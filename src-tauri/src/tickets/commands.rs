@@ -8,6 +8,21 @@ use serde_json::{json, Value};
 use std::fs;
 use uuid::Uuid;
 
+fn extract_optional_trimmed_field(
+    b: Option<&Value>,
+    issue_obj: Option<&serde_json::Map<String, Value>>,
+    key: &str,
+) -> Option<Option<String>> {
+    let val = b
+        .and_then(|v| v.get(key))
+        .or_else(|| issue_obj.and_then(|o| o.get(key)))?;
+    Some(
+        val.as_str()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    )
+}
+
 pub fn ticket_snapshot() -> Value {
     let _lock = doc_lock().lock().unwrap();
     let doc = load_ticket_document_locked();
@@ -148,6 +163,21 @@ pub fn ticket_call(request: Option<Value>) -> Value {
                     changes.insert("branch".into(), v.clone());
                 }
 
+                if let Some(odd_path) = extract_optional_trimmed_field(b, issue_obj, "oddPath") {
+                    issue.odd_path = odd_path.clone();
+                    changes.insert("oddPath".into(), json!(odd_path));
+                }
+
+                if let Some(source_agent) = extract_optional_trimmed_field(b, issue_obj, "sourceAgent") {
+                    issue.source_agent = source_agent.clone();
+                    changes.insert("sourceAgent".into(), json!(source_agent));
+                }
+
+                if let Some(source_thread_id) = extract_optional_trimmed_field(b, issue_obj, "sourceThreadId") {
+                    issue.source_thread_id = source_thread_id.clone();
+                    changes.insert("sourceThreadId".into(), json!(source_thread_id));
+                }
+
                 if let Some(labels) = b.and_then(|v| v.get("labels")).and_then(|v| v.as_array()) {
                     issue.labels = labels.iter().filter_map(|l| l.as_str().map(|s| s.to_string())).collect();
                     changes.insert("labels".into(), json!(issue.labels));
@@ -229,6 +259,11 @@ pub fn ticket_call(request: Option<Value>) -> Value {
                     .map(|arr| arr.iter().filter_map(|l| l.as_str().map(|s| s.to_string())).collect())
                     .unwrap_or_default();
 
+                let branch = extract_optional_trimmed_field(b, issue_obj, "branch").flatten();
+                let odd_path = extract_optional_trimmed_field(b, issue_obj, "oddPath").flatten();
+                let source_agent = extract_optional_trimmed_field(b, issue_obj, "sourceAgent").flatten();
+                let source_thread_id = extract_optional_trimmed_field(b, issue_obj, "sourceThreadId").flatten();
+
                 let new_issue = TicketIssue {
                     id: new_id.clone(),
                     uuid: Uuid::new_v4().to_string(),
@@ -245,8 +280,11 @@ pub fn ticket_call(request: Option<Value>) -> Value {
                     labels,
                     blocks: vec![],
                     related_to: vec![],
-                    branch: None,
+                    branch,
                     due_date: None,
+                    odd_path,
+                    source_agent,
+                    source_thread_id,
                     created_at: now.clone(),
                     updated_at: now.clone(),
                     archived_at: None,
@@ -420,7 +458,7 @@ pub fn ticket_connect(request: Option<Value>) -> Value {
         "readOnly": read_only,
         "mcpServers": {
             "kite-tasks": {
-                "command": "kite-code",
+                "command": "kite",
                 "args": args
             }
         }
@@ -454,7 +492,7 @@ pub fn ticket_configuration(request: Option<Value>) -> Value {
         "readOnly": read_only,
         "mcpServers": {
             "kite-tasks": {
-                "command": "kite-code",
+                "command": "kite",
                 "args": args
             }
         }

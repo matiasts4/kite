@@ -30,6 +30,12 @@ pub struct TicketIssue {
     pub related_to: Vec<String>,
     pub branch: Option<String>,
     pub due_date: Option<String>,
+    #[serde(default)]
+    pub odd_path: Option<String>,
+    #[serde(default)]
+    pub source_agent: Option<String>,
+    #[serde(default)]
+    pub source_thread_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub archived_at: Option<String>,

@@ -47,15 +47,18 @@ pub fn resolve_antigravity_acp_binary() -> Option<PathBuf> {
     None
 }
 
-/// Discovers native MCP servers grouped by provider (Antigravity, Claude Code, Codex, Cursor, Gemini, and Kite built-in).
+/// Discovers native MCP servers grouped by provider (Antigravity, Claude Code, Codex, Cursor, Gemini, OpenCode, and Kite built-in).
 pub fn list_provider_mcp_servers_impl(request: Option<Value>) -> Value {
+    let home = user_home_dir();
+    list_provider_mcp_servers_with_home(&home, request)
+}
+
+pub fn list_provider_mcp_servers_with_home(home: &Path, request: Option<Value>) -> Value {
     let filter_provider = request
         .as_ref()
         .and_then(|v| v.get("provider").or_else(|| v.get("engine")))
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_lowercase());
-
-    let home = user_home_dir();
     let mut providers: Vec<Value> = Vec::new();
     let mut all_servers: Vec<Value> = Vec::new();
 
@@ -71,7 +74,7 @@ pub fn list_provider_mcp_servers_impl(request: Option<Value>) -> Value {
         "description": "Local workspace task board & ticket orchestration MCP server.",
         "toolCount": 5,
         "tools": ["list_tasks", "get_task", "create_task", "update_task", "add_task_comment"],
-        "sourcePath": "kite-code mcp-tasks"
+        "sourcePath": "kite mcp tasks"
     });
     all_servers.push(kite_builtin.clone());
 
@@ -307,6 +310,69 @@ pub fn list_provider_mcp_servers_impl(request: Option<Value>) -> Value {
         "servers": gemini_servers
     }));
 
+    // 7. OpenCode Native MCPs (~/.config/opencode/opencode.json)
+    let mut opencode_servers: Vec<Value> = Vec::new();
+    let opencode_path = home.join(".config").join("opencode").join("opencode.json");
+    if opencode_path.is_file() {
+        if let Ok(raw) = std::fs::read_to_string(&opencode_path) {
+            if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
+                if let Some(obj) = parsed.get("mcp").and_then(|v| v.as_object()) {
+                    for (name, cfg) in obj {
+                        let enabled = cfg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let cmd_str = cfg.get("command").and_then(|v| {
+                            v.as_str().map(String::from).or_else(|| {
+                                v.as_array().and_then(|arr| {
+                                    let parts: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+                                    if parts.is_empty() {
+                                        None
+                                    } else {
+                                        Some(parts.join(" "))
+                                    }
+                                })
+                            })
+                        });
+                        let url_str = cfg.get("url").and_then(|v| v.as_str()).map(String::from);
+                        let entry_type = cfg.get("type").and_then(|v| v.as_str());
+                        let transport = cmd_str
+                            .as_deref()
+                            .and_then(|s| s.split_whitespace().next())
+                            .or(url_str.as_deref())
+                            .or(entry_type)
+                            .unwrap_or("stdio");
+                        let detail = cmd_str
+                            .as_deref()
+                            .or(url_str.as_deref())
+                            .or(entry_type)
+                            .unwrap_or("stdio");
+                        let status = if enabled { "configured" } else { "disabled" };
+                        let srv = json!({
+                            "id": format!("mcp:opencode:{}", name),
+                            "name": name,
+                            "provider": "opencode",
+                            "providerLabel": "OpenCode",
+                            "transport": transport,
+                            "status": status,
+                            "enabled": enabled,
+                            "builtin": false,
+                            "description": format!("OpenCode MCP server ({})", detail),
+                            "toolCount": 0,
+                            "tools": [],
+                            "sourcePath": opencode_path.to_string_lossy().to_string()
+                        });
+                        opencode_servers.push(srv.clone());
+                        all_servers.push(srv);
+                    }
+                }
+            }
+        }
+    }
+    providers.push(json!({
+        "provider": "opencode",
+        "label": "OpenCode",
+        "configPath": opencode_path.to_string_lossy().to_string(),
+        "servers": opencode_servers
+    }));
+
     let filtered_servers: Vec<Value> = if let Some(ref p) = filter_provider {
         all_servers
             .iter()
@@ -325,4 +391,82 @@ pub fn list_provider_mcp_servers_impl(request: Option<Value>) -> Value {
         "servers": filtered_servers,
         "allServers": all_servers
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_mcp_discovery_parses_local_remote_and_disabled_entries() {
+        let temp_home = std::env::temp_dir().join(format!(
+            "kite-opencode-mcp-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let opencode_dir = temp_home.join(".config").join("opencode");
+        std::fs::create_dir_all(&opencode_dir).expect("create temp opencode dir");
+        let opencode_cfg = json!({
+            "mcp": {
+                "kite-tasks": {
+                    "type": "local",
+                    "command": ["kite", "mcp", "tasks"],
+                    "enabled": true
+                },
+                "remote-ctx": {
+                    "type": "remote",
+                    "url": "https://mcp.example.com/sse",
+                    "enabled": false
+                },
+                "default-enabled": {
+                    "type": "local",
+                    "command": ["npx", "-y", "@example/mcp"]
+                }
+            }
+        });
+        std::fs::write(
+            opencode_dir.join("opencode.json"),
+            serde_json::to_string_pretty(&opencode_cfg).unwrap(),
+        )
+        .expect("write opencode.json");
+
+        let res = list_provider_mcp_servers_with_home(&temp_home, Some(json!({ "provider": "opencode" })));
+        let providers = res["providers"].as_array().expect("providers array");
+        let opencode = providers
+            .iter()
+            .find(|p| p.get("provider").and_then(|v| v.as_str()) == Some("opencode"))
+            .expect("opencode provider");
+        let opencode_servers = opencode["servers"].as_array().expect("opencode servers");
+        assert_eq!(opencode_servers.len(), 3);
+
+        let kite_tasks = opencode_servers
+            .iter()
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("kite-tasks"))
+            .expect("kite-tasks server");
+        assert_eq!(kite_tasks["id"], "mcp:opencode:kite-tasks");
+        assert_eq!(kite_tasks["transport"], "kite");
+        assert_eq!(kite_tasks["status"], "configured");
+        assert_eq!(kite_tasks["enabled"], true);
+
+        let remote_ctx = opencode_servers
+            .iter()
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("remote-ctx"))
+            .expect("remote-ctx server");
+        assert_eq!(remote_ctx["id"], "mcp:opencode:remote-ctx");
+        assert_eq!(remote_ctx["transport"], "https://mcp.example.com/sse");
+        assert_eq!(remote_ctx["status"], "disabled");
+        assert_eq!(remote_ctx["enabled"], false);
+
+        let default_enabled = opencode_servers
+            .iter()
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("default-enabled"))
+            .expect("default-enabled server");
+        assert_eq!(default_enabled["status"], "configured");
+        assert_eq!(default_enabled["enabled"], true);
+
+        let filtered = res["servers"].as_array().expect("filtered servers");
+        assert!(filtered.iter().any(|s| s["id"] == "mcp:opencode:kite-tasks"));
+        assert!(filtered.iter().any(|s| s["id"] == "mcp:kite:kite-tasks"));
+
+        let _ = std::fs::remove_dir_all(&temp_home);
+    }
 }

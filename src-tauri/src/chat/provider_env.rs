@@ -103,7 +103,7 @@ const DRIVER_FACTS: &[DriverFacts] = &[
         inherited_names: &[],
         auth_source: "unknown: CLI configuration; the secret store was not observed",
         recovery: None,
-        mcp_sources: &[],
+        mcp_sources: &["~/.config/opencode/opencode.json"],
     },
 ];
 
@@ -341,7 +341,7 @@ mod tests {
             );
         }
 
-        for driver in ["antigravity", "claude", "codex", "cursor"] {
+        for driver in ["antigravity", "claude", "codex", "cursor", "opencode"] {
             let environment = environment_for(driver).expect("known driver");
             assert!(
                 !environment.mcp_sources.is_empty(),
@@ -354,7 +354,13 @@ mod tests {
             );
         }
 
-        for driver in ["gemini", "grok", "opencode"] {
+        let opencode = environment_for("opencode").expect("opencode driver");
+        assert_eq!(
+            opencode.mcp_sources,
+            vec!["~/.config/opencode/opencode.json".to_string()]
+        );
+
+        for driver in ["gemini", "grok"] {
             let environment = environment_for(driver).expect("known driver");
             assert!(
                 environment.mcp_sources.is_empty(),

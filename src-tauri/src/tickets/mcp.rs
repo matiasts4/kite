@@ -7,6 +7,22 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use uuid::Uuid;
 
+fn optional_trimmed_arg(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn resolve_source_thread_id(explicit: Option<String>) -> Option<String> {
+    explicit.or_else(|| {
+        std::env::var("KITE_ADDRESS")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+}
+
 pub fn get_mcp_tools() -> Vec<Value> {
     vec![
         json!({
@@ -80,6 +96,26 @@ pub fn get_mcp_tools() -> Vec<Value> {
                     "assignee": {
                         "type": "string",
                         "description": "Assignee name or agent handle"
+                    },
+                    "oddPath": {
+                        "type": "string",
+                        "description": "Repository-relative ODD spec path (e.g. \"odd/tasks/seth-voice-roadmap.md\")"
+                    },
+                    "sourceAgent": {
+                        "type": "string",
+                        "description": "Agent/provider name creating the task (e.g. \"antigravity\", \"opencode\", \"claude-code\", \"codex\")"
+                    },
+                    "sourceThreadId": {
+                        "type": "string",
+                        "description": "Originating Kite thread ID/address (\"thread:<id>\") or external conversation/session ID"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Associated git branch"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Project ID (default \"proj-kite\" on create)"
                     }
                 },
                 "required": ["title"]
@@ -87,7 +123,7 @@ pub fn get_mcp_tools() -> Vec<Value> {
         }),
         json!({
             "name": "update_task",
-            "description": "Update state, priority, description, title, or assignee of an existing task.",
+            "description": "Update state, priority, description, title, assignee, or traceability attributes of an existing task.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -121,6 +157,26 @@ pub fn get_mcp_tools() -> Vec<Value> {
                     "assignee": {
                         "type": "string",
                         "description": "Updated assignee"
+                    },
+                    "oddPath": {
+                        "type": "string",
+                        "description": "Repository-relative ODD spec path (e.g. \"odd/tasks/seth-voice-roadmap.md\")"
+                    },
+                    "sourceAgent": {
+                        "type": "string",
+                        "description": "Agent/provider name creating the task (e.g. \"antigravity\", \"opencode\", \"claude-code\", \"codex\")"
+                    },
+                    "sourceThreadId": {
+                        "type": "string",
+                        "description": "Originating Kite thread ID/address (\"thread:<id>\") or external conversation/session ID"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Associated git branch"
+                    },
+                    "projectId": {
+                        "type": "string",
+                        "description": "Project ID (default \"proj-kite\" on create)"
                     }
                 },
                 "required": ["id"]
@@ -227,9 +283,25 @@ pub fn handle_mcp_tool_call(name: &str, args: &Value, read_only: bool) -> Value 
                     format!(" [{}]", issue.labels.join(", "))
                 };
 
+                let mut meta_parts: Vec<String> = Vec::new();
+                if let Some(ref odd_path) = issue.odd_path {
+                    meta_parts.push(format!("oddPath: {}", odd_path));
+                }
+                if let Some(ref source_agent) = issue.source_agent {
+                    meta_parts.push(format!("sourceAgent: {}", source_agent));
+                }
+                if let Some(ref source_thread_id) = issue.source_thread_id {
+                    meta_parts.push(format!("sourceThreadId: {}", source_thread_id));
+                }
+                let meta_line = if meta_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}\n", meta_parts.join(" | "))
+                };
+
                 out.push_str(&format!(
-                    "- **{}** | **{}** | Priority: {} | Assignee: {}{}\n  {}\n",
-                    issue.id, issue.state, prio, assignee, labels, issue.title
+                    "- **{}** | **{}** | Priority: {} | Assignee: {}{}\n  {}\n{}",
+                    issue.id, issue.state, prio, assignee, labels, issue.title, meta_line
                 ));
             }
 
@@ -252,11 +324,23 @@ pub fn handle_mcp_tool_call(name: &str, args: &Value, read_only: bool) -> Value 
                 out.push_str(&format!("- **Status:** {}\n", issue.state));
                 out.push_str(&format!("- **Priority:** {}\n", issue.priority));
                 out.push_str(&format!("- **Assignee:** {}\n", issue.assignee.as_deref().unwrap_or("Unassigned")));
+                if let Some(ref project_id) = issue.project_id {
+                    out.push_str(&format!("- **Project:** {}\n", project_id));
+                }
                 if !issue.labels.is_empty() {
                     out.push_str(&format!("- **Labels:** {}\n", issue.labels.join(", ")));
                 }
                 if let Some(ref branch) = issue.branch {
                     out.push_str(&format!("- **Branch:** {}\n", branch));
+                }
+                if let Some(ref odd_path) = issue.odd_path {
+                    out.push_str(&format!("- **oddPath:** {}\n", odd_path));
+                }
+                if let Some(ref source_agent) = issue.source_agent {
+                    out.push_str(&format!("- **sourceAgent:** {}\n", source_agent));
+                }
+                if let Some(ref source_thread_id) = issue.source_thread_id {
+                    out.push_str(&format!("- **sourceThreadId:** {}\n", source_thread_id));
                 }
                 out.push_str(&format!("- **Created:** {}\n", issue.created_at));
                 out.push_str(&format!("- **Updated:** {}\n\n", issue.updated_at));
@@ -320,6 +404,12 @@ pub fn handle_mcp_tool_call(name: &str, args: &Value, read_only: bool) -> Value 
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|l| l.as_str().map(|s| s.to_string())).collect())
                 .unwrap_or_default();
+            let odd_path = optional_trimmed_arg(args, "oddPath");
+            let source_agent = optional_trimmed_arg(args, "sourceAgent");
+            let source_thread_id = resolve_source_thread_id(optional_trimmed_arg(args, "sourceThreadId"));
+            let branch = optional_trimmed_arg(args, "branch");
+            let project_id = optional_trimmed_arg(args, "projectId").or_else(|| Some("proj-kite".into()));
+            let actor = source_agent.clone().unwrap_or_else(|| "Agent".into());
 
             let new_issue = TicketIssue {
                 id: new_id.clone(),
@@ -331,14 +421,17 @@ pub fn handle_mcp_tool_call(name: &str, args: &Value, read_only: bool) -> Value 
                 priority,
                 assignee,
                 delegate: None,
-                project_id: Some("proj-kite".into()),
+                project_id,
                 parent_id: None,
                 duplicate_of: None,
                 labels,
                 blocks: vec![],
                 related_to: vec![],
-                branch: None,
+                branch,
                 due_date: None,
+                odd_path,
+                source_agent,
+                source_thread_id,
                 created_at: now.clone(),
                 updated_at: now.clone(),
                 archived_at: None,
@@ -350,7 +443,7 @@ pub fn handle_mcp_tool_call(name: &str, args: &Value, read_only: bool) -> Value 
             doc.history.push(TicketHistoryEvent {
                 id: Uuid::new_v4().to_string(),
                 issue_id: Some(new_id.clone()),
-                actor: "Agent".into(),
+                actor,
                 action: "created".into(),
                 created_at: now,
                 changes: json!({ "state": state }),
@@ -398,6 +491,31 @@ pub fn handle_mcp_tool_call(name: &str, args: &Value, read_only: bool) -> Value 
                 if let Some(labels) = args.get("labels").and_then(|v| v.as_array()) {
                     issue.labels = labels.iter().filter_map(|l| l.as_str().map(|s| s.to_string())).collect();
                     changes.insert("labels".into(), json!(issue.labels));
+                }
+                if args.get("oddPath").is_some() {
+                    let odd_path = optional_trimmed_arg(args, "oddPath");
+                    issue.odd_path = odd_path.clone();
+                    changes.insert("oddPath".into(), json!(odd_path));
+                }
+                if args.get("sourceAgent").is_some() {
+                    let source_agent = optional_trimmed_arg(args, "sourceAgent");
+                    issue.source_agent = source_agent.clone();
+                    changes.insert("sourceAgent".into(), json!(source_agent));
+                }
+                if args.get("sourceThreadId").is_some() {
+                    let source_thread_id = optional_trimmed_arg(args, "sourceThreadId");
+                    issue.source_thread_id = source_thread_id.clone();
+                    changes.insert("sourceThreadId".into(), json!(source_thread_id));
+                }
+                if args.get("branch").is_some() {
+                    let branch = optional_trimmed_arg(args, "branch");
+                    issue.branch = branch.clone();
+                    changes.insert("branch".into(), json!(branch));
+                }
+                if args.get("projectId").is_some() {
+                    let project_id = optional_trimmed_arg(args, "projectId");
+                    issue.project_id = project_id.clone();
+                    changes.insert("projectId".into(), json!(project_id));
                 }
 
                 issue.updated_at = now.clone();

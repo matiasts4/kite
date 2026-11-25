@@ -15,6 +15,10 @@ Fuente de verdad para ids, áreas, tipos y estado. Historial de ejecuciones de b
 | ORCH-SWARM-01 | `orchestration` | Swarm `E2E Release Swarm` (`@scout`, `@verifier`) en tablero RightDock `Subagents` | passed | 2026-11-15 verify:desktop:e2e | Corregido `name_taken` por placeholders `child_thread_id.is_none()` en `execute_swarm_add` |
 | ORCH-FAIL-01 | `orchestration` | Propagación visible de subagente fallido (`Crasher Worker` -> `Failed` + `subagent_error`) sin quedar en spinner colgado | passed | 2026-11-15 verify:desktop:e2e | Cubierto en `orchestration.e2e.mjs` |
 | UI-LAYOUT-01 | `ui-layout` | Cero overflow horizontal, cero overlap entre controles/filas en `1366x840` y `960x680` (RightDock cerrado/abierto) y cero clics forzados | passed | 2026-11-15 verify:desktop:e2e | Corregido shrink flex de wrappers en `.kite-composer-footer-left` (`composer.css`) |
+| AGENTS-ROUTINES-01 | `agents-routines` | Modo Agent + Roster/AgentsView + navegación a Routines sin overflow/overlap ni errores de página en `1366x840` y `960x680` | passed | 2026-11-25 verify:desktop:e2e | Agregado en Fase 2 (`odd/tasks/engineering-quality-gate-and-delivery-loop.md`) |
+| SETTINGS-TASKS-01 | `settings-tasks` | Modal Settings (General, Notifications, Audio/Argos, Subagents) + pestaña Tasks/Tickets en RightDock con IPC real y cero overlap | passed | 2026-11-25 verify:desktop:e2e | Agregado en Fase 2 (`odd/tasks/engineering-quality-gate-and-delivery-loop.md`) |
+| CODE-DIFFS-01 | `code-diffs` | Modo Code + canvas de workspace + pestaña Diffs sin overflow/overlap ni errores en `1366x840` y `960x680` | passed | 2026-11-25 verify:desktop:e2e | Agregado en Fase 2 (`odd/tasks/engineering-quality-gate-and-delivery-loop.md`) |
+| UI-KIT-01 | `ui-kit` | Ruta dev `?ui-kit=1` de primitivos core (`Button`, `Field`, `Card`, `Modal`, `Tabs`, `Badge`, `EmptyState`, `SelectMenu`) con interacción y capturas `1366x840`/`960x680` | passed | 2026-11-25 verify:desktop:e2e | Agregado en Fase 3 (`odd/tasks/engineering-quality-gate-and-delivery-loop.md`) |
 
 ---
 

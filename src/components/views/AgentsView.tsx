@@ -21,6 +21,9 @@ import { AgentSkillsTab } from './agents/AgentSkillsTab';
 import { AgentStartersTab } from './agents/AgentStartersTab';
 import { AgentSettingsTab } from './agents/AgentSettingsTab';
 import { AgentPlaybooksTab } from './agents/AgentPlaybooksTab';
+import { AgentAuditTab } from './agents/AgentAuditTab';
+import { AgentEvalDrawer } from './agents/AgentEvalDrawer';
+import { AgentBundleModal } from './agents/AgentBundleModal';
 import { AgentTerminalPane } from './agents/AgentTerminalPane';
 import { AgentCreatePane } from './agents/AgentCreatePane';
 import {
@@ -104,9 +107,9 @@ export interface AgentsViewProps {
   onAgentCreated?: (agent: AgentProfile) => void;
   onAgentUpdated?: (agent: AgentProfile) => void;
   onAgentDeleted?: (agentId: string) => void;
-  initialMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters';
-  viewMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters';
-  onViewModeChange?: (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters') => void;
+  initialMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit';
+  viewMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit';
+  onViewModeChange?: (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => void;
   onOpenRoutines?: () => void;
   runningCount?: number;
 }
@@ -131,11 +134,13 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   const [internalAgents, setInternalAgents] = useState<AgentProfile[]>([]);
   const agents = agentsProp ?? internalAgents;
 
-  const [internalViewMode, setInternalViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters'>(initialMode);
+  const [internalViewMode, setInternalViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit'>(initialMode);
   const viewMode = controlledViewMode ?? internalViewMode;
+  const [isEvalOpen, setIsEvalOpen] = useState(false);
+  const [isBundleOpen, setIsBundleOpen] = useState(false);
 
   const setViewMode = useCallback(
-    (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters') => {
+    (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => {
       setInternalViewMode(mode);
       onViewModeChange?.(mode);
     },
@@ -879,6 +884,18 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
               <BotIcon size={12} />
               <span className="ui-tab__label" data-label="Playbooks">Playbooks</span>
             </button>
+
+            <button
+              type="button"
+              aria-label="Agent Audit"
+              className={viewMode === 'audit' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
+              onClick={() => handleSelectTab('audit')}
+              aria-current={viewMode === 'audit' ? 'page' : undefined}
+              title="Persistent tool call and policy audit log"
+            >
+              <SlidersIcon size={12} />
+              <span className="ui-tab__label" data-label="Audit">Audit</span>
+            </button>
           </div>
         </nav>
       )}
@@ -961,6 +978,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
         />
       )}
 
+      {viewMode === 'audit' && (
+        <AgentAuditTab agentId={selectedAgent.id} />
+      )}
+
       {viewMode === 'settings' && (
         <AgentSettingsTab
           agentId={selectedAgent.id}
@@ -974,8 +995,24 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           onSaveSettings={handleSaveSettings}
           onRevertSettings={handleRevertSettings}
           onOpenRoutines={onOpenRoutines}
+          onOpenDryRunEval={() => setIsEvalOpen(true)}
+          onOpenBundleModal={() => setIsBundleOpen(true)}
         />
       )}
+
+      <AgentEvalDrawer
+        isOpen={isEvalOpen}
+        agentId={selectedAgent.id}
+        agentName={selectedAgent.name}
+        onClose={() => setIsEvalOpen(false)}
+      />
+
+      <AgentBundleModal
+        isOpen={isBundleOpen}
+        agentId={selectedAgent.id}
+        agentName={selectedAgent.name}
+        onClose={() => setIsBundleOpen(false)}
+      />
     </section>
   );
 };

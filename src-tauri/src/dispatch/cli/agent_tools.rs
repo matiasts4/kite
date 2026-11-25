@@ -131,9 +131,58 @@ pub fn execute_agent_tool(
     workspace: Option<&Path>,
     approved: bool,
 ) -> Result<Value, String> {
+    let started = std::time::Instant::now();
     let family = tool_family_for_command(cmd);
-    check_agent_tool_policy(agent_id, family, approved)?;
+    let tool_name = format!("kite_{family}");
+    let thread_opt = {
+        let t = caller_from.trim();
+        if t.is_empty() { None } else { Some(t) }
+    };
+    let aid_str = agent_id.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("anonymous");
+    let verdict = match check_agent_tool_policy(agent_id, family, approved) {
+        Ok(v) => v,
+        Err(err) => {
+            let verdict_label = if err.starts_with("Approval required:") {
+                "asked"
+            } else {
+                "denied"
+            };
+            crate::agents::record_agent_audit_event(
+                aid_str,
+                thread_opt,
+                &tool_name,
+                family,
+                verdict_label,
+                Some(&err),
+                started.elapsed().as_millis() as i64,
+                None,
+            );
+            return Err(err);
+        }
+    };
 
+    let result = execute_agent_tool_inner(cmd, agent_id, caller_from, workspace);
+    let verdict_label = if verdict == "ask" { "asked" } else { "allowed" };
+    let reason = result.as_ref().err().map(|s| s.as_str());
+    crate::agents::record_agent_audit_event(
+        aid_str,
+        thread_opt,
+        &tool_name,
+        family,
+        verdict_label,
+        reason,
+        started.elapsed().as_millis() as i64,
+        None,
+    );
+    result
+}
+
+fn execute_agent_tool_inner(
+    cmd: &AgentToolCommand,
+    agent_id: Option<&str>,
+    caller_from: &str,
+    workspace: Option<&Path>,
+) -> Result<Value, String> {
     match cmd {
         AgentToolCommand::TasksList { state, label, limit } => {
             let snap = crate::tickets::ticket_snapshot();

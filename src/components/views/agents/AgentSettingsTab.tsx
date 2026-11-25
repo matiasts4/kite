@@ -68,6 +68,8 @@ export interface AgentSettingsTabProps {
   successMessage?: string | null;
   onDeleteAgent?: () => Promise<void> | void;
   onOpenRoutines?: () => void;
+  onOpenDryRunEval?: () => void;
+  onOpenBundleModal?: () => void;
   workspaces?: Workspace[] | Array<{ id: string; displayName?: string; name?: string }>;
 }
 
@@ -84,6 +86,8 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
   successMessage = null,
   onDeleteAgent,
   onOpenRoutines,
+  onOpenDryRunEval,
+  onOpenBundleModal,
   workspaces,
 }) => {
   const [saving, setSaving] = useState<boolean>(false);
@@ -685,6 +689,35 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
               Folders beyond its home that new chats may write in. It always runs from its home and can read anywhere.
             </p>
           </section>
+
+          {(onOpenDryRunEval || onOpenBundleModal) ? (
+            <section className="agent-setting-group">
+              <h2 className="agent-setting-label">Validation & Portable Bundles</h2>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {onOpenDryRunEval ? (
+                  <button
+                    type="button"
+                    className="secondary-button action-button--row"
+                    onClick={onOpenDryRunEval}
+                  >
+                    Dry-Run Eval Testbench
+                  </button>
+                ) : null}
+                {onOpenBundleModal ? (
+                  <button
+                    type="button"
+                    className="secondary-button action-button--row"
+                    onClick={onOpenBundleModal}
+                  >
+                    Export / Import .kite-agent.json
+                  </button>
+                ) : null}
+              </div>
+              <p className="agent-setting-hint">
+                Test charter + policy behavior safely in read-only dry-run mode or share stripped specialist bundles.
+              </p>
+            </section>
+          ) : null}
 
           {/* Delete */}
           <section className="agent-setting-group">

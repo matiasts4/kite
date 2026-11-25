@@ -346,6 +346,20 @@ CREATE TABLE IF NOT EXISTS routine_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_routine_runs_routine_started
     ON routine_runs (routine_id, started_at_unix_ms DESC);
+CREATE TABLE IF NOT EXISTS agent_audit_log (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    thread_id TEXT,
+    tool_name TEXT NOT NULL,
+    tool_family TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    reason TEXT,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    skill_event TEXT,
+    created_at_unix_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_audit_agent_created
+    ON agent_audit_log (agent_id, created_at_unix_ms DESC);
 ";
 
 pub(crate) fn configure_sqlite_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {

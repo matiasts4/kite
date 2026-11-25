@@ -150,7 +150,57 @@ export interface PlaybookRunRecord {
   stages: PlaybookStageRun[];
 }
 
-export type TabType = 'memory' | 'skills' | 'starters' | 'playbooks' | 'settings';
+export interface AgentAuditLogEntry {
+  id: string;
+  agentId: string;
+  threadId: string | null;
+  toolName: string;
+  toolFamily: string;
+  verdict: 'allowed' | 'asked' | 'denied' | string;
+  reason: string | null;
+  durationMs: number;
+  skillEvent: string | null;
+  createdAtUnixMs: number;
+}
+
+export interface DryRunPredictedTool {
+  tool: string;
+  family: string;
+  policy: string;
+  mutating: boolean;
+  blockedInDryRun: boolean;
+}
+
+export interface DryRunCaseResult {
+  prompt: string;
+  predictedTools: DryRunPredictedTool[];
+  policyViolations: string[];
+  matchedSkills: string[];
+  passed: boolean;
+}
+
+export interface DryRunEvalReport {
+  agentId: string;
+  compiledPromptChars: number;
+  estimatedPromptTokens: number;
+  totalCases: number;
+  passedCases: number;
+  blockedMutations: number;
+  results: DryRunCaseResult[];
+}
+
+export interface CuratedAgentTemplate {
+  id: string;
+  name: string;
+  engine: string;
+  roleBadge: string;
+  summary: string;
+  brief: string;
+  toolPolicies: Record<string, 'allow' | 'ask' | 'deny'>;
+  knowledgePackGlobs: string[];
+}
+
+export type TabType = 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit' | 'settings';
 export type MemoryTarget = 'memory' | 'user';
 
 export const MEMORY_DELIMITER = '\n§\n';

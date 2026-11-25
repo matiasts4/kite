@@ -1246,6 +1246,643 @@ pub fn list_agent_rail_activity_sync(_request: Option<Value>) -> Vec<Value> {
         .collect()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAuditLogEntry {
+    pub id: String,
+    pub agent_id: String,
+    pub thread_id: Option<String>,
+    pub tool_name: String,
+    pub tool_family: String,
+    pub verdict: String,
+    pub reason: Option<String>,
+    pub duration_ms: i64,
+    pub skill_event: Option<String>,
+    pub created_at_unix_ms: i64,
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+pub fn record_agent_audit_in_conn(
+    conn: &rusqlite::Connection,
+    entry: &AgentAuditLogEntry,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO agent_audit_log (
+            id, agent_id, thread_id, tool_name, tool_family,
+            verdict, reason, duration_ms, skill_event, created_at_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            entry.id,
+            entry.agent_id,
+            entry.thread_id,
+            entry.tool_name,
+            entry.tool_family,
+            entry.verdict,
+            entry.reason,
+            entry.duration_ms,
+            entry.skill_event,
+            entry.created_at_unix_ms,
+        ],
+    )
+    .map(|_| ())
+    .map_err(|e| format!("Failed to persist agent_audit_log: {e}"))
+}
+
+pub fn record_agent_audit_event(
+    agent_id: &str,
+    thread_id: Option<&str>,
+    tool_name: &str,
+    tool_family: &str,
+    verdict: &str,
+    reason: Option<&str>,
+    duration_ms: i64,
+    skill_event: Option<&str>,
+) {
+    let entry = AgentAuditLogEntry {
+        id: Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        thread_id: thread_id.map(ToString::to_string),
+        tool_name: tool_name.to_string(),
+        tool_family: tool_family.to_string(),
+        verdict: verdict.to_string(),
+        reason: reason.map(|r| r.chars().take(500).collect()),
+        duration_ms,
+        skill_event: skill_event.map(ToString::to_string),
+        created_at_unix_ms: now_unix_ms(),
+    };
+    if let Ok(conn) = db_connection().lock() {
+        let _ = record_agent_audit_in_conn(&conn, &entry);
+    }
+}
+
+pub fn list_agent_audit_log_in_conn(
+    conn: &rusqlite::Connection,
+    agent_id: Option<&str>,
+    verdict: Option<&str>,
+    tool_family: Option<&str>,
+    limit: usize,
+) -> Result<Vec<AgentAuditLogEntry>, String> {
+    let capped = limit.clamp(1, 500) as i64;
+    let mut sql = String::from(
+        "SELECT id, agent_id, thread_id, tool_name, tool_family, verdict, reason, duration_ms, skill_event, created_at_unix_ms FROM agent_audit_log WHERE 1=1",
+    );
+    let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(aid) = agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+        sql.push_str(" AND agent_id = ?");
+        params_vec.push(rusqlite::types::Value::Text(aid.to_string()));
+    }
+    if let Some(v) = verdict.map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+        sql.push_str(" AND verdict = ?");
+        params_vec.push(rusqlite::types::Value::Text(v.to_string()));
+    }
+    if let Some(fam) = tool_family.map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+        sql.push_str(" AND tool_family = ?");
+        params_vec.push(rusqlite::types::Value::Text(fam.to_string()));
+    }
+    sql.push_str(" ORDER BY created_at_unix_ms DESC LIMIT ?");
+    params_vec.push(rusqlite::types::Value::Integer(capped));
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+            Ok(AgentAuditLogEntry {
+                id: row.get(0)?,
+                agent_id: row.get(1)?,
+                thread_id: row.get(2)?,
+                tool_name: row.get(3)?,
+                tool_family: row.get(4)?,
+                verdict: row.get(5)?,
+                reason: row.get(6)?,
+                duration_ms: row.get(7)?,
+                skill_event: row.get(8)?,
+                created_at_unix_ms: row.get(9)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for item in rows {
+        if let Ok(rec) = item {
+            out.push(rec);
+        }
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn list_agent_audit_log(request: Option<Value>) -> Value {
+    let req = request_body(&request);
+    let agent_id = req.and_then(|r| r.get("agentId")).and_then(Value::as_str);
+    let verdict = req.and_then(|r| r.get("verdict")).and_then(Value::as_str);
+    let tool_family = req.and_then(|r| r.get("toolFamily")).and_then(Value::as_str);
+    let limit = req.and_then(|r| r.get("limit")).and_then(Value::as_u64).unwrap_or(100) as usize;
+    let entries = db_connection()
+        .lock()
+        .ok()
+        .and_then(|conn| list_agent_audit_log_in_conn(&conn, agent_id, verdict, tool_family, limit).ok())
+        .unwrap_or_default();
+    json!({ "entries": entries })
+}
+
+pub fn eval_agent_prompts_at(
+    mind_root: &Path,
+    agent_id: &str,
+    prompts: &[String],
+) -> Value {
+    let cfg = load_agent_autonomy_config(agent_id);
+    let agent_opt = agents()
+        .lock()
+        .ok()
+        .and_then(|items| items.iter().find(|a| a.id == agent_id).cloned());
+    let role = agent_opt
+        .as_ref()
+        .map(|a| if !a.brief.trim().is_empty() { a.brief.trim() } else { a.purpose.trim() })
+        .unwrap_or("");
+    let mem_dir = mind_root.join(agent_id);
+    let memory = std::fs::read_to_string(mem_dir.join("memory.txt")).unwrap_or_default();
+    let user = std::fs::read_to_string(mind_root.join("user.txt")).unwrap_or_default();
+    let (skills, _) = crate::agent_mind::skills::read_skills(&mem_dir.join("skills"));
+    let skill_ids: Vec<String> = skills
+        .iter()
+        .filter(|s| s.get("enabled").and_then(Value::as_bool).unwrap_or(true))
+        .filter_map(|s| s.get("id").and_then(Value::as_str).map(ToString::to_string))
+        .collect();
+    let compiled = crate::agent_mind::memory::compile_snapshot_instructions_at(
+        mind_root,
+        agent_id,
+        role,
+        &memory,
+        &user,
+        &skill_ids,
+    );
+    let compiled_chars = compiled.chars().count();
+    let estimated_tokens = compiled_chars.div_ceil(4);
+
+    let mut total_blocked_mutations = 0usize;
+    let mut results = Vec::new();
+
+    for prompt in prompts {
+        let lower = prompt.to_ascii_lowercase();
+        let mut predicted_calls: Vec<(&'static str, &'static str, bool)> = Vec::new();
+        if lower.contains("search") || lower.contains("read") || lower.contains("doc") || lower.contains("spec") {
+            predicted_calls.push(("kite_ctx", "ctx", false));
+        }
+        if lower.contains("diff") || lower.contains("status") || lower.contains("commit") || lower.contains("git") {
+            predicted_calls.push(("kite_diff", "diff", false));
+        }
+        if lower.contains("create task") || lower.contains("file ticket") || lower.contains("update task") {
+            predicted_calls.push(("kite_tasks.create", "tasks", true));
+        } else if lower.contains("task") || lower.contains("ticket") || lower.contains("issue") {
+            predicted_calls.push(("kite_tasks.list", "tasks", false));
+        }
+        if lower.contains("write") || lower.contains("edit") || lower.contains("modify") || lower.contains("delete") {
+            predicted_calls.push(("filesystem_write", "filesystem_write", true));
+        }
+        if lower.contains("run ") || lower.contains("shell") || lower.contains("cargo") || lower.contains("vitest") {
+            predicted_calls.push(("shell", "shell", true));
+        }
+
+        let mut evaluations = Vec::new();
+        let mut violations = Vec::new();
+        for (tool_name, family, mutating) in predicted_calls {
+            let policy = cfg
+                .tool_policies
+                .get(family)
+                .map(String::as_str)
+                .unwrap_or_else(|| default_policy_for_family(family));
+            let blocked_by_dry_run = mutating;
+            if blocked_by_dry_run {
+                total_blocked_mutations += 1;
+            }
+            if policy == "deny" {
+                violations.push(format!("Policy denies '{tool_name}' ({family})."));
+            } else if blocked_by_dry_run {
+                violations.push(format!(
+                    "Dry-run read-only guard blocked mutating call '{tool_name}'."
+                ));
+            }
+            evaluations.push(json!({
+                "tool": tool_name,
+                "family": family,
+                "policy": policy,
+                "mutating": mutating,
+                "blockedInDryRun": blocked_by_dry_run,
+            }));
+        }
+
+        let matched_skills: Vec<String> = skills
+            .iter()
+            .filter_map(|s| {
+                let sid = s.get("id").and_then(Value::as_str)?;
+                let desc = s.get("description").and_then(Value::as_str).unwrap_or("");
+                let hay = format!("{sid} {desc}").to_ascii_lowercase();
+                let hit = lower
+                    .split(|c: char| !c.is_alphanumeric())
+                    .filter(|w| w.len() >= 4)
+                    .any(|w| hay.contains(w));
+                if hit { Some(sid.to_string()) } else { None }
+            })
+            .collect();
+
+        results.push(json!({
+            "prompt": prompt,
+            "predictedTools": evaluations,
+            "policyViolations": violations,
+            "matchedSkills": matched_skills,
+            "passed": violations.is_empty(),
+        }));
+    }
+
+    let passed_cases = results
+        .iter()
+        .filter(|r| r.get("passed").and_then(Value::as_bool) == Some(true))
+        .count();
+
+    json!({
+        "agentId": agent_id,
+        "compiledPromptChars": compiled_chars,
+        "estimatedPromptTokens": estimated_tokens,
+        "totalCases": results.len(),
+        "passedCases": passed_cases,
+        "blockedMutations": total_blocked_mutations,
+        "results": results,
+    })
+}
+
+#[tauri::command]
+pub fn dry_run_agent_eval(request: Option<Value>) -> Result<Value, String> {
+    let req = request_body(&request).ok_or_else(|| "Eval request is required.".to_string())?;
+    let agent_id = req
+        .get("agentId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "agentId is required.".to_string())?;
+    let prompts: Vec<String> = req
+        .get("prompts")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if prompts.is_empty() {
+        return Err("Provide at least one prompt for dry-run eval.".to_string());
+    }
+    Ok(eval_agent_prompts_at(
+        &crate::agent_mind::agents_root(),
+        agent_id,
+        &prompts,
+    ))
+}
+
+fn is_token_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+}
+
+fn is_path_stop_char(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ')' | ']' | '>' | ';')
+}
+
+/// Strips API keys/secrets and local absolute paths from exported `.kite-agent.json` bundle strings.
+pub fn strip_bundle_secrets_and_paths(raw: &str) -> String {
+    let mut pass1 = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut i = 0usize;
+    let secret_prefixes = ["sk-", "ghp_", "gho_", "AIza", "xoxb-", "xoxp-"];
+    let kv_prefixes = [
+        "bearer ",
+        "api_key=",
+        "api_key:",
+        "apikey=",
+        "apikey:",
+        "access_token=",
+        "access_token:",
+        "secret=",
+        "secret:",
+        "password=",
+        "password:",
+    ];
+
+    while i < bytes.len() {
+        let rest = &raw[i..];
+        let mut matched_secret = false;
+        for pref in secret_prefixes {
+            if rest.starts_with(pref) {
+                let mut end = i + pref.len();
+                while end < bytes.len() && is_token_char(bytes[end]) {
+                    end += 1;
+                }
+                pass1.push_str("[REDACTED]");
+                i = end;
+                matched_secret = true;
+                break;
+            }
+        }
+        if matched_secret {
+            continue;
+        }
+        let rest_lower = rest.to_ascii_lowercase();
+        let mut matched_kv = false;
+        for kv in kv_prefixes {
+            if rest_lower.starts_with(kv) {
+                pass1.push_str(&raw[i..i + kv.len()]);
+                let mut j = i + kv.len();
+                while j < bytes.len() && bytes[j] == b' ' {
+                    pass1.push(' ');
+                    j += 1;
+                }
+                while j < bytes.len() && !bytes[j].is_ascii_whitespace() && bytes[j] != b'"' && bytes[j] != b'\'' {
+                    j += 1;
+                }
+                pass1.push_str("[REDACTED]");
+                i = j;
+                matched_kv = true;
+                break;
+            }
+        }
+        if matched_kv {
+            continue;
+        }
+        let ch = rest.chars().next().unwrap();
+        pass1.push(ch);
+        i += ch.len_utf8();
+    }
+
+    // Strip absolute local filesystem paths (`C:\...`, `/Users/...`, `/home/...`)
+    let mut pass2 = String::with_capacity(pass1.len());
+    let chars: Vec<(usize, char)> = pass1.char_indices().collect();
+    let mut ci = 0usize;
+    while ci < chars.len() {
+        let (byte_pos, c) = chars[ci];
+        let rem = &pass1[byte_pos..];
+        let is_win_abs = ci + 2 < chars.len()
+            && c.is_ascii_alphabetic()
+            && chars[ci + 1].1 == ':'
+            && (chars[ci + 2].1 == '\\' || chars[ci + 2].1 == '/');
+        let is_unix_abs = rem.starts_with("/Users/") || rem.starts_with("/home/");
+        if is_win_abs || is_unix_abs {
+            pass2.push_str("<workspace>");
+            while ci < chars.len() && !is_path_stop_char(chars[ci].1) {
+                ci += 1;
+            }
+            continue;
+        }
+        pass2.push(c);
+        ci += 1;
+    }
+    pass2
+}
+
+pub fn export_agent_bundle_at(mind_root: &Path, agent_id: &str) -> Result<Value, String> {
+    let profile = agents()
+        .lock()
+        .ok()
+        .and_then(|items| items.iter().find(|a| a.id == agent_id).cloned())
+        .ok_or_else(|| format!("Agent '{agent_id}' not found."))?;
+    let autonomy = load_agent_autonomy_config(agent_id);
+    let safe_places: Vec<String> = profile
+        .place_display_names
+        .iter()
+        .filter(|p| {
+            let trimmed = p.trim();
+            !trimmed.contains(":\\")
+                && !trimmed.contains(":/")
+                && !trimmed.starts_with("/Users/")
+                && !trimmed.starts_with("/home/")
+        })
+        .cloned()
+        .collect();
+    let (skills_meta, _) = crate::agent_mind::skills::read_skills(&mind_root.join(agent_id).join("skills"));
+    let exported_skills: Vec<Value> = skills_meta
+        .into_iter()
+        .filter_map(|s| {
+            let sid = s.get("id")?.as_str()?.to_string();
+            let src = std::fs::read_to_string(
+                mind_root.join(agent_id).join("skills").join(format!("{sid}.md")),
+            )
+            .unwrap_or_default();
+            Some(json!({
+                "id": sid,
+                "name": s.get("name").and_then(Value::as_str).unwrap_or(&sid),
+                "source": strip_bundle_secrets_and_paths(&src),
+            }))
+        })
+        .collect();
+    let kp_idx = crate::agent_mind::knowledge::load_knowledge_index_at(mind_root, agent_id);
+    let exported_packs: Vec<Value> = kp_idx
+        .packs
+        .into_iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "globs": p.globs,
+                "enabled": p.enabled,
+            })
+        })
+        .collect();
+    let routine_templates: Vec<Value> = crate::persist::routines()
+        .lock()
+        .ok()
+        .map(|list| {
+            list.iter()
+                .filter(|r| r.get("agentId").and_then(Value::as_str) == Some(agent_id))
+                .map(|r| {
+                    json!({
+                        "name": strip_bundle_secrets_and_paths(r.get("name").and_then(Value::as_str).unwrap_or("")),
+                        "prompt": strip_bundle_secrets_and_paths(r.get("prompt").and_then(Value::as_str).unwrap_or("")),
+                        "cadence": r.get("cadence").cloned().unwrap_or_else(|| json!({ "kind": "interval", "seconds": 3600 })),
+                        "triggerType": r.get("triggerType").and_then(Value::as_str).unwrap_or("schedule"),
+                        "outputActions": r.get("outputActions").cloned().unwrap_or_else(|| json!([])),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(json!({
+        "schema": "kite-agent/v1",
+        "bundleVersion": 1,
+        "exportedAtUnixMs": now_unix_ms(),
+        "agent": {
+            "name": profile.name,
+            "engine": profile.engine,
+            "purpose": strip_bundle_secrets_and_paths(&profile.purpose),
+            "brief": strip_bundle_secrets_and_paths(&profile.brief),
+            "memoryBudget": profile.memory_budget,
+            "reflectionMode": profile.reflection_mode,
+            "allowAgentScheduling": profile.allow_agent_scheduling,
+            "allowAgentMessaging": profile.allow_agent_messaging,
+            "defaultMode": profile.default_mode,
+            "defaultPlan": profile.default_plan,
+            "defaultModel": profile.default_model,
+            "placeDisplayNames": safe_places,
+            "toolPolicies": autonomy.tool_policies,
+            "maxTurnsPerRun": autonomy.max_turns_per_run,
+            "maxDurationSecs": autonomy.max_duration_secs,
+            "failoverEngines": autonomy.failover_engines,
+        },
+        "skills": exported_skills,
+        "knowledgePacks": exported_packs,
+        "routineTemplates": routine_templates,
+    }))
+}
+
+#[tauri::command]
+pub fn export_agent_bundle(request: Option<Value>) -> Result<Value, String> {
+    let req = request_body(&request).ok_or_else(|| "Export request is required.".to_string())?;
+    let agent_id = req
+        .get("agentId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "agentId is required.".to_string())?;
+    export_agent_bundle_at(&crate::agent_mind::agents_root(), agent_id)
+}
+
+#[tauri::command]
+pub fn import_agent_bundle(request: Option<Value>) -> Result<Value, String> {
+    let req = request_body(&request).ok_or_else(|| "Import request is required.".to_string())?;
+    let bundle = req.get("bundle").unwrap_or(req);
+    let schema = bundle.get("schema").and_then(Value::as_str).unwrap_or("");
+    if schema != "kite-agent/v1" && bundle.get("bundleVersion").and_then(Value::as_u64) != Some(1) {
+        return Err("Invalid .kite-agent.json bundle schema. Expected 'kite-agent/v1'.".to_string());
+    }
+    let agent_obj = bundle
+        .get("agent")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Bundle missing 'agent' object.".to_string())?;
+    let raw_name = agent_obj
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Imported Specialist");
+    let engine = agent_obj
+        .get("engine")
+        .and_then(Value::as_str)
+        .unwrap_or("claude-code");
+    let brief = strip_bundle_secrets_and_paths(
+        agent_obj
+            .get("brief")
+            .or_else(|| agent_obj.get("purpose"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let created = create_agent(Some(json!({
+        "name": raw_name,
+        "engine": engine,
+        "brief": brief,
+        "defaultMode": agent_obj.get("defaultMode").cloned().unwrap_or(Value::Null),
+        "defaultModel": agent_obj.get("defaultModel").cloned().unwrap_or(Value::Null),
+    })));
+    let new_id = created
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if new_id.is_empty() {
+        return Err("Failed to create imported agent profile.".to_string());
+    }
+    let mut autonomy = AgentAutonomyConfig::default();
+    sanitize_autonomy_config_patch(&Value::Object(agent_obj.clone()), &mut autonomy);
+    save_agent_autonomy_config(&new_id, &autonomy)?;
+
+    if let Some(skills) = bundle.get("skills").and_then(Value::as_array) {
+        let root = crate::agent_mind::agents_root();
+        let skills_dir = root.join(&new_id).join("skills");
+        let _ = std::fs::create_dir_all(&skills_dir);
+        for sk in skills {
+            if let (Some(id), Some(src)) = (
+                sk.get("id").and_then(Value::as_str),
+                sk.get("source").and_then(Value::as_str),
+            ) {
+                let safe_id: String = id
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if !safe_id.is_empty() {
+                    let _ = std::fs::write(
+                        skills_dir.join(format!("{safe_id}.md")),
+                        strip_bundle_secrets_and_paths(src),
+                    );
+                }
+            }
+        }
+        let _ = crate::agent_mind::sync_agent_instructions(&root, &new_id);
+    }
+
+    Ok(json!({
+        "imported": true,
+        "agent": load_agent_profile(json!({ "agentId": new_id })),
+    }))
+}
+
+#[tauri::command]
+pub fn list_curated_agent_templates() -> Value {
+    json!({
+        "templates": [
+            {
+                "id": "odd-architect",
+                "name": "ODD Architect",
+                "engine": "antigravity",
+                "roleBadge": "Architecture & ODDs",
+                "summary": "Writes clean-room ODD specs, maps dependencies, and plans reviewable slices.",
+                "brief": "Author concise Organic Driven Development specifications, enforce clean module boundaries, and keep Risk assessments explicit.",
+                "toolPolicies": { "ctx": "allow", "diff": "allow", "tasks": "allow", "filesystem_write": "ask", "shell": "ask" },
+                "knowledgePackGlobs": ["odd/tasks/*.md", "docs/**/*.md"]
+            },
+            {
+                "id": "security-policy-auditor",
+                "name": "Security & Policy Auditor",
+                "engine": "claude-code",
+                "roleBadge": "Security Auditor",
+                "summary": "Audits diffs, tool permissions, credential handling, and Places sandboxes.",
+                "brief": "Inspect diffs and permission boundaries for privilege escalation, secret leaks, path traversal, and missing input validation.",
+                "toolPolicies": { "ctx": "allow", "diff": "allow", "tasks": "ask", "filesystem_write": "deny", "shell": "deny" },
+                "knowledgePackGlobs": ["src-tauri/src/**/*.rs", "odd/tasks/*.md"]
+            },
+            {
+                "id": "test-regression-runner",
+                "name": "Test & Regression Runner",
+                "engine": "codex",
+                "roleBadge": "Test & QA Engineer",
+                "summary": "Reproduces failures RED-first and runs focused Cargo/Vitest/TSC verification suites.",
+                "brief": "Verify changes through RED->GREEN tests across Rust Cargo suites, Vitest specs, and TypeScript checks without mocking away assertions.",
+                "toolPolicies": { "ctx": "allow", "diff": "allow", "tasks": "allow", "filesystem_write": "allow", "shell": "ask" },
+                "knowledgePackGlobs": ["src/**/*.test.ts*", "scripts/e2e/**/*.mjs"]
+            },
+            {
+                "id": "pr-diff-reviewer",
+                "name": "PR Diff Reviewer",
+                "engine": "claude-code",
+                "roleBadge": "PR Reviewer",
+                "summary": "Reviews slices for correctness, edge cases, UI token adherence, and clean-room hygiene.",
+                "brief": "Perform adversarial read-only diff reviews highlighting concrete bugs, contract breaks, and design token drift.",
+                "toolPolicies": { "ctx": "allow", "diff": "allow", "tasks": "ask", "filesystem_write": "deny", "shell": "deny" },
+                "knowledgePackGlobs": ["AGENTS.md", "docs/**/*.md"]
+            },
+            {
+                "id": "research-librarian",
+                "name": "Research Librarian",
+                "engine": "grok",
+                "roleBadge": "Codebase Librarian",
+                "summary": "Indexes documentation and ODD specs into concise SharedContext handoffs.",
+                "brief": "Use Knowledge Packs and compact kite_ctx reads to synthesize grounded architecture maps without mutating repository files.",
+                "toolPolicies": { "ctx": "allow", "diff": "allow", "memory": "allow", "filesystem_write": "deny", "shell": "deny" },
+                "knowledgePackGlobs": ["docs/**/*.md", "odd/tasks/*.md", "README.md"]
+            }
+        ]
+    })
+}
+
 fn install_action(value: Option<&str>) -> String {
     match value {
         Some("signIn") => "signIn".to_string(),
@@ -1602,5 +2239,71 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_root);
         let _ = std::fs::remove_dir_all(&outside_root);
+    }
+
+    #[test]
+    fn audit_log_roundtrips_dry_run_eval_blocks_mutations_and_bundle_strips_secrets() {
+        // 1. Audit log SQLite CRUD + filtering
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_audit_log (
+                id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, thread_id TEXT,
+                tool_name TEXT NOT NULL, tool_family TEXT NOT NULL, verdict TEXT NOT NULL,
+                reason TEXT, duration_ms INTEGER NOT NULL DEFAULT 0, skill_event TEXT,
+                created_at_unix_ms INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        record_agent_audit_in_conn(
+            &conn,
+            &AgentAuditLogEntry {
+                id: "aud-1".into(),
+                agent_id: "ag-audit".into(),
+                thread_id: Some("t-1".into()),
+                tool_name: "kite_diff".into(),
+                tool_family: "diff".into(),
+                verdict: "denied".into(),
+                reason: Some("Policy denied".into()),
+                duration_ms: 4,
+                skill_event: None,
+                created_at_unix_ms: 1000,
+            },
+        )
+        .unwrap();
+        let denied = list_agent_audit_log_in_conn(&conn, Some("ag-audit"), Some("denied"), None, 10).unwrap();
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].tool_name, "kite_diff");
+
+        // 2. Dry-run eval blocks mutating calls & computes token budget
+        let mind_root = std::env::temp_dir().join(format!("kite_eval_mind_{}", Uuid::new_v4()));
+        let eval_agent_id = format!("test-eval-{}", Uuid::new_v4());
+        std::fs::create_dir_all(mind_root.join(&eval_agent_id)).unwrap();
+        let res = eval_agent_prompts_at(
+            &mind_root,
+            &eval_agent_id,
+            &[
+                "Read diff status".to_string(),
+                "Write file and run cargo test".to_string(),
+            ],
+        );
+        assert_eq!(res["totalCases"], 2);
+        assert!(res["blockedMutations"].as_u64().unwrap() >= 2);
+        assert_eq!(res["results"][0]["passed"], true);
+        assert_eq!(res["results"][1]["passed"], false);
+
+        // 3. Bundle secret & path stripping + curated 5 templates
+        let raw_secret = "Use key sk-testsecret12345 and Bearer abcdef99 in C:\\Users\\Dev\\secret\\repo or /home/dev/project.";
+        let sanitized = strip_bundle_secrets_and_paths(raw_secret);
+        assert!(!sanitized.contains("sk-testsecret12345"));
+        assert!(!sanitized.contains("abcdef99"));
+        assert!(!sanitized.contains("C:\\Users\\Dev"));
+        assert!(!sanitized.contains("/home/dev/project"));
+        assert!(sanitized.contains("[REDACTED]"));
+        assert!(sanitized.contains("<workspace>"));
+
+        let templates = list_curated_agent_templates();
+        assert_eq!(templates["templates"].as_array().unwrap().len(), 5);
+
+        let _ = std::fs::remove_dir_all(&mind_root);
     }
 }

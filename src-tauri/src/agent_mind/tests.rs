@@ -557,3 +557,94 @@ use std::time::{SystemTime, UNIX_EPOCH};
         assert!(mem.contains("snake_case"));
     }
 
+    #[test]
+    fn knowledge_pack_indexing_respects_places_token_caps_and_deduplicates_memory() {
+        use crate::agent_mind::knowledge::{
+            delete_knowledge_pack_at, glob_matches, render_knowledge_manifest_at,
+            save_knowledge_pack_at, search_knowledge_packs_at, MANIFEST_MAX_CHARS,
+            SEARCH_MAX_EXCERPT_CHARS,
+        };
+        use crate::agent_mind::memory::{
+            find_similar_memory_entries, jaccard_similarity, load_memory_meta_map,
+            update_memory_meta_at,
+        };
+
+        assert!(glob_matches("odd/tasks/*.md", "odd/tasks/spec.md"));
+        assert!(glob_matches("docs/**/*.md", "docs/arch/overview.md"));
+        assert!(!glob_matches("docs/*.md", "docs/arch/overview.md"));
+
+        let root = TempRoot::new();
+        let workspace_ok = root.0.join("workspace_ok");
+        let outside_dir = root.0.join("outside_secret");
+        fs::create_dir_all(workspace_ok.join("docs")).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(
+            workspace_ok.join("docs/architecture.md"),
+            "# Core Architecture\n\nKite Code uses a Rust backend and React frontend with Tauri IPC.\n\n## Playbooks\n\nPlaybooks coordinate stages via SharedContextStore.",
+        )
+        .unwrap();
+        fs::write(outside_dir.join("secret.md"), "# Secret\nDo not leak").unwrap();
+
+        let agent_id = "d4444444-4444-4444-8444-444444444444";
+        let allowed = vec![workspace_ok.clone()];
+
+        // Outside root must be rejected by Places boundary
+        let denied = save_knowledge_pack_at(
+            &root.0,
+            agent_id,
+            &allowed,
+            None,
+            "Outside",
+            &outside_dir.to_string_lossy(),
+            vec!["**/*.md".into()],
+            true,
+        );
+        assert!(denied.is_err());
+
+        // Inside authorized Place succeeds, renders compact manifest, and bounds search output
+        let index = save_knowledge_pack_at(
+            &root.0,
+            agent_id,
+            &allowed,
+            None,
+            "Architecture Docs",
+            &workspace_ok.to_string_lossy(),
+            vec!["docs/*.md".into()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(index.packs.len(), 1);
+        assert!(index.chunks.len() >= 2);
+
+        let manifest = render_knowledge_manifest_at(&root.0, agent_id);
+        assert!(manifest.contains("Architecture Docs"));
+        assert!(manifest.chars().count() <= MANIFEST_MAX_CHARS + 2);
+
+        let search = search_knowledge_packs_at(&root.0, agent_id, "SharedContextStore Playbooks", 5);
+        assert!(!search["matches"].as_array().unwrap().is_empty());
+        assert!(search["totalChars"].as_u64().unwrap() <= SEARCH_MAX_EXCERPT_CHARS as u64);
+
+        let after_del = delete_knowledge_pack_at(&root.0, agent_id, &index.packs[0].id).unwrap();
+        assert!(after_del.packs.is_empty());
+        assert!(render_knowledge_manifest_at(&root.0, agent_id).is_empty());
+
+        // Fuzzy Jaccard deduplication >= 0.85
+        let sim = jaccard_similarity(
+            "- Convention: Keep Tauri commands snake_case always.",
+            "- Decision: Keep Tauri commands always snake_case",
+        );
+        assert!(sim >= 0.85, "expected high jaccard similarity, got {sim}");
+        let hits = find_similar_memory_entries(
+            "- Convention: Keep Tauri commands snake_case always.\n- Use Vitest for React tests.",
+            "Keep Tauri commands always snake_case",
+            0.85,
+        );
+        assert_eq!(hits.len(), 1);
+
+        // Pin / archive / verify memory metadata
+        let _ = update_memory_meta_at(&root.0, agent_id, "Keep Tauri commands", "pin", 1_700_000_000_000).unwrap();
+        let meta = load_memory_meta_map(&root.0, agent_id);
+        assert_eq!(meta.len(), 1);
+        assert!(meta.values().next().unwrap().pinned);
+    }
+

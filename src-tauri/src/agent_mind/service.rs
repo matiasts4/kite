@@ -1,4 +1,7 @@
-use crate::agent_mind::memory::{load_agent_mind_at, write_agent_memory_at};
+use crate::agent_mind::memory::{
+    find_similar_memory_entries, load_agent_mind_at, memory_path, update_memory_meta_at,
+    write_agent_memory_at,
+};
 use crate::agent_mind::skills::{
     load_agent_skill_at, remove_agent_skill_at, set_agent_skill_enabled_at, write_agent_skill_at,
 };
@@ -91,4 +94,43 @@ pub fn install_agent_starter(request: Value) -> Result<Value, AgentMindError> {
     let starter_id = req.get("starterId").and_then(|value| value.as_str()).unwrap_or("");
     require_known_agent(agent_id)?;
     install_agent_starter_at(&agents_root(), agent_id, starter_id)
+}
+
+#[tauri::command]
+pub fn update_agent_memory_meta(request: Value) -> Result<Value, AgentMindError> {
+    let req = request_body(&request);
+    let agent_id = req.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+    require_known_agent(agent_id)?;
+    let entry_text = req.get("entryText").and_then(|v| v.as_str()).unwrap_or("");
+    let action = req.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let map = update_memory_meta_at(&agents_root(), agent_id, entry_text, action, now)?;
+    Ok(json!({ "agentId": agent_id, "memoryMeta": map }))
+}
+
+#[tauri::command]
+pub fn check_memory_duplicate(request: Value) -> Result<Value, AgentMindError> {
+    let req = request_body(&request);
+    let agent_id = req.get("agentId").and_then(|v| v.as_str()).unwrap_or("");
+    require_known_agent(agent_id)?;
+    let target = req.get("target").and_then(|v| v.as_str()).unwrap_or("memory");
+    let candidate = req.get("candidate").and_then(|v| v.as_str()).unwrap_or("");
+    let threshold = req
+        .get("threshold")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.85)
+        .clamp(0.1, 1.0);
+    let root = agents_root();
+    let path = memory_path(&root, agent_id, target)?;
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let hits: Vec<Value> = find_similar_memory_entries(&existing, candidate, threshold)
+        .into_iter()
+        .map(|(index, entry, similarity)| {
+            json!({ "index": index, "entry": entry, "similarity": similarity })
+        })
+        .collect();
+    Ok(json!({ "isDuplicate": !hits.is_empty(), "matches": hits }))
 }

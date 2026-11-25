@@ -16,6 +16,50 @@ export interface LearnedSkillDocument extends LearnedSkillSummary {
   source: string;
 }
 
+export interface MemoryEntryMeta {
+  pinned: boolean;
+  archived: boolean;
+  lastVerifiedAtUnixMs: number;
+}
+
+export interface KnowledgePackDef {
+  id: string;
+  name: string;
+  root: string;
+  globs: string[];
+  enabled: boolean;
+  createdAtUnixMs: number;
+}
+
+export interface KnowledgePackIndexEntry {
+  packId: string;
+  name: string;
+  root: string;
+  globs: string[];
+  indexedAtUnixMs: number;
+  fileCount: number;
+  chunkCount: number;
+}
+
+export interface KnowledgePackSearchMatch {
+  packId: string;
+  packName: string;
+  path: string;
+  heading: string;
+  lineStart: number;
+  lineEnd: number;
+  preview: string;
+  score: number;
+}
+
+export interface KnowledgePackSnapshot {
+  agentId: string;
+  packs: KnowledgePackDef[];
+  entries: KnowledgePackIndexEntry[];
+  totalChunks: number;
+  manifestPreview: string;
+}
+
 export interface AgentMindSnapshot {
   schemaVersion: number;
   agentId: string;
@@ -26,6 +70,7 @@ export interface AgentMindSnapshot {
   userUpdatedAtUnixMs: number | null;
   memoryRevision: string | null;
   userRevision: string | null;
+  memoryMeta?: Record<string, MemoryEntryMeta>;
   readIssues: Array<{ code: string; skillId: string | null; rawRevision: string | null }>;
 }
 

@@ -348,10 +348,17 @@ pub fn execute_agent_tool(
             let mut matches = Vec::new();
             let capped = (*limit).clamp(1, 50);
             collect_text_search_matches(&search_root, &query.to_ascii_lowercase(), capped, &mut matches);
+            let knowledge = crate::agent_mind::knowledge::search_knowledge_packs_at(
+                &crate::agent_mind::agents_root(),
+                agent_id.unwrap_or(""),
+                query,
+                capped.min(8),
+            );
             Ok(json!({
                 "query": query,
                 "root": search_root.display().to_string(),
                 "matches": matches,
+                "knowledgeMatches": knowledge["matches"],
             }))
         }
         AgentToolCommand::CtxSharePut {

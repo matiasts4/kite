@@ -61,6 +61,7 @@ pub mod core_daemon;
 pub mod ctx_bridge;
 pub mod user_path;
 pub mod voice_audio;
+pub mod voice_realtime;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -557,6 +558,13 @@ fn main() {
             list_terminal_profiles,
             load_agent_chat_thread,
             load_agent_mind,
+            list_agent_knowledge_packs,
+            save_agent_knowledge_pack,
+            delete_agent_knowledge_pack,
+            reindex_agent_knowledge_packs,
+            search_agent_knowledge_packs,
+            update_agent_memory_meta,
+            check_memory_duplicate,
             load_agent_profile,
             load_agent_skill,
             load_chat_thread,
@@ -800,6 +808,12 @@ fn main() {
             voice_audio::voice_audio_start_capture,
             voice_audio::voice_audio_stop_capture,
             voice_audio::voice_audio_status,
+            voice_realtime::voice_realtime_connect,
+            voice_realtime::voice_realtime_disconnect,
+            voice_realtime::voice_realtime_send_audio,
+            voice_realtime::voice_realtime_truncate,
+            voice_realtime::voice_realtime_submit_tool_result,
+            voice_realtime::voice_realtime_status,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {

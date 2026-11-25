@@ -61,6 +61,7 @@ pub fn load_agent_mind_at(root: &Path, agent_id: &str) -> Result<Value, AgentMin
         read_issues.push(issue);
     }
     read_issues.truncate(515);
+    let memory_meta = load_memory_meta_map(root, agent_id);
     Ok(json!({
         "schemaVersion": 1,
         "agentId": agent_id,
@@ -71,8 +72,142 @@ pub fn load_agent_mind_at(root: &Path, agent_id: &str) -> Result<Value, AgentMin
         "userUpdatedAtUnixMs": user.updated_at,
         "memoryRevision": memory.revision,
         "userRevision": user.revision,
+        "memoryMeta": memory_meta,
         "readIssues": read_issues,
     }))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEntryMeta {
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub last_verified_at_unix_ms: i64,
+}
+
+pub fn memory_entry_key(entry_text: &str) -> String {
+    normalize_memory_line(entry_text)
+        .chars()
+        .take(160)
+        .collect()
+}
+
+pub fn memory_meta_path(root: &Path, agent_id: &str) -> PathBuf {
+    root.join(agent_id).join("memory-meta.json")
+}
+
+pub fn load_memory_meta_map(
+    root: &Path,
+    agent_id: &str,
+) -> std::collections::HashMap<String, MemoryEntryMeta> {
+    fs::read_to_string(memory_meta_path(root, agent_id))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn update_memory_meta_at(
+    root: &Path,
+    agent_id: &str,
+    entry_text: &str,
+    action: &str,
+    now_unix_ms: i64,
+) -> Result<std::collections::HashMap<String, MemoryEntryMeta>, AgentMindError> {
+    ensure_agent_id(agent_id)?;
+    let key = memory_entry_key(entry_text);
+    let mut map = load_memory_meta_map(root, agent_id);
+    let mut meta = map.get(&key).cloned().unwrap_or_default();
+    match action {
+        "pin" => meta.pinned = true,
+        "unpin" => meta.pinned = false,
+        "archive" => {
+            meta.archived = true;
+            meta.pinned = false;
+        }
+        "unarchive" => meta.archived = false,
+        "verify" => meta.last_verified_at_unix_ms = now_unix_ms,
+        _ => {
+            return Err(AgentMindError::new(
+                "agent_data_failed",
+                "Unknown memory metadata action.",
+            ))
+        }
+    }
+    if meta.last_verified_at_unix_ms == 0 {
+        meta.last_verified_at_unix_ms = now_unix_ms;
+    }
+    map.insert(key, meta);
+    let dir = root.join(agent_id);
+    fs::create_dir_all(&dir).map_err(|_| {
+        AgentMindError::new("agent_data_failed", "Could not create agent directory.")
+    })?;
+    let body = serde_json::to_string_pretty(&map).map_err(|_| {
+        AgentMindError::new("agent_data_failed", "Could not serialize memory metadata.")
+    })?;
+    fs::write(memory_meta_path(root, agent_id), body).map_err(|_| {
+        AgentMindError::new("agent_data_failed", "Could not write memory metadata.")
+    })?;
+    Ok(map)
+}
+
+fn normalize_memory_line(raw: &str) -> String {
+    let trimmed = raw.trim().trim_start_matches('-').trim();
+    let stripped = trimmed
+        .strip_prefix("Decision:")
+        .or_else(|| trimmed.strip_prefix("Convention:"))
+        .or_else(|| trimmed.strip_prefix("Constraint:"))
+        .or_else(|| trimmed.strip_prefix("Preference:"))
+        .unwrap_or(trimmed);
+    stripped
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Computes normalized token Jaccard similarity in `[0.0, 1.0]` for fuzzy memory deduplication.
+pub fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    let norm_a = normalize_memory_line(a);
+    let norm_b = normalize_memory_line(b);
+    let set_a: std::collections::HashSet<&str> = norm_a.split_whitespace().collect();
+    let set_b: std::collections::HashSet<&str> = norm_b.split_whitespace().collect();
+    if set_a.is_empty() && set_b.is_empty() {
+        return 1.0;
+    }
+    if set_a.is_empty() || set_b.is_empty() {
+        return 0.0;
+    }
+    let inter = set_a.intersection(&set_b).count() as f64;
+    let union = set_a.union(&set_b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+pub fn find_similar_memory_entries(
+    existing: &str,
+    candidate: &str,
+    threshold: f64,
+) -> Vec<(usize, String, f64)> {
+    let mut hits = Vec::new();
+    for (idx, line) in existing.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let sim = jaccard_similarity(trimmed, candidate);
+        if sim >= threshold {
+            hits.push((idx, trimmed.to_string(), sim));
+        }
+    }
+    hits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    hits
 }
 
 pub(crate) fn memory_path(root: &Path, agent_id: &str, target: &str) -> Result<PathBuf, AgentMindError> {
@@ -408,6 +543,11 @@ pub fn compile_snapshot_instructions_at(
             doc.push_str("\n");
         }
     }
+    let knowledge_manifest =
+        crate::agent_mind::knowledge::render_knowledge_manifest_at(root, agent_id);
+    if !knowledge_manifest.is_empty() {
+        doc.push_str(&knowledge_manifest);
+    }
     doc
 }
 
@@ -710,8 +850,10 @@ pub fn apply_post_turn_reflection_at(
     let budget = clamp_memory_budget(agent.memory_budget);
 
     let normalized_new = new_entry.trim().to_lowercase();
-    if existing.lines().any(|line| line.trim().to_lowercase() == normalized_new)
-        || existing.to_lowercase().contains(&normalized_new)
+    if existing.lines().any(|line| {
+        let line_lower = line.trim().to_lowercase();
+        line_lower == normalized_new || jaccard_similarity(line, &new_entry) >= 0.85
+    }) || existing.to_lowercase().contains(&normalized_new)
     {
         return None;
     }

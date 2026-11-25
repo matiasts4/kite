@@ -1,12 +1,44 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import {
   AgentMindSnapshot,
+  MemoryEntryMeta,
   MemoryTarget,
+  KnowledgePackSnapshot,
+  KnowledgePackSearchMatch,
   MEMORY_DELIMITER,
   parseMemoryEntries,
   clusterMemory,
 } from './types';
 import { loadAgentMind, writeAgentMemory } from '../../../lib/ipc';
+
+const STALE_MEMORY_MS = 14 * 24 * 60 * 60 * 1000;
+
+export function normalizeMemoryKey(raw: string): string {
+  const trimmed = raw.trim().replace(/^-+\s*/, '').trim();
+  const stripped = trimmed.replace(/^(Decision|Convention|Constraint|Preference):\s*/i, '');
+  return stripped
+    .split(/[^a-zA-Z0-9]+/)
+    .filter((s) => s.length > 0)
+    .map((s) => s.toLowerCase())
+    .join(' ')
+    .slice(0, 160);
+}
+
+export function jaccardMemorySimilarity(a: string, b: string): number {
+  const normA = normalizeMemoryKey(a);
+  const normB = normalizeMemoryKey(b);
+  const setA = new Set(normA ? normA.split(' ') : []);
+  const setB = new Set(normB ? normB.split(' ') : []);
+  if (setA.size === 0 && setB.size === 0) return 1;
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let intersection = 0;
+  for (const token of setA) {
+    if (setB.has(token)) intersection += 1;
+  }
+  const union = setA.size + setB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
 
 // Memory list thresholds
 const USER_MEMORY_BUDGET = 1375;
@@ -237,13 +269,29 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
   onMindUpdated: onMindUpdatedProp,
 }) => {
   const [internalTarget, setInternalTarget] = useState<MemoryTarget>('memory');
+  const [memoryRoomView, setMemoryRoomView] = useState<'notes' | 'packs'>('notes');
   const [newNoteText, setNewNoteText] = useState<string>('');
+  const [duplicateAcknowledged, setDuplicateAcknowledged] = useState<boolean>(false);
+  const [searchFilter, setSearchFilter] = useState<string>('');
+  const [showArchived, setShowArchived] = useState<boolean>(false);
+  const [metaOverride, setMetaOverride] = useState<Record<string, MemoryEntryMeta> | null>(null);
   const [editingEntry, setEditingEntry] = useState<{ index: number; draft: string; original: string } | null>(null);
   const [rawDraft, setRawDraft] = useState<string | null>(null);
   const [internalLastDeleted, setInternalLastDeleted] = useState<{ target: MemoryTarget; index: number; text: string } | null>(null);
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [localSaving, setLocalSaving] = useState<boolean>(false);
   const [localMind, setLocalMind] = useState<AgentMindSnapshot | null>(mindProp);
+
+  // Knowledge Packs state
+  const [knowledgeSnapshot, setKnowledgeSnapshot] = useState<KnowledgePackSnapshot | null>(null);
+  const [packName, setPackName] = useState<string>('');
+  const [packRoot, setPackRoot] = useState<string>('');
+  const [packGlobs, setPackGlobs] = useState<string>('odd/tasks/*.md, docs/**');
+  const [packBusy, setPackBusy] = useState<boolean>(false);
+  const [packError, setPackError] = useState<string | null>(null);
+  const [packSearchQuery, setPackSearchQuery] = useState<string>('');
+  const [packSearchMatches, setPackSearchMatches] = useState<KnowledgePackSearchMatch[]>([]);
+  const [packSearchChars, setPackSearchChars] = useState<number>(0);
 
   const activeMind = mindProp ?? localMind;
   const effectiveAgentName = profile?.name ?? agentNameProp ?? 'This agent';
@@ -259,12 +307,39 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
         setInternalTarget('memory');
       }
       setNewNoteText('');
+      setDuplicateAcknowledged(false);
+      setSearchFilter('');
+      setMetaOverride(null);
       setEditingEntry(null);
       setRawDraft(null);
       setInternalLastDeleted(null);
       setInlineError(null);
+      setPackError(null);
+      setPackSearchMatches([]);
     }
   }, [effectiveAgentId, setMemoryTargetProp]);
+
+  const loadKnowledgePacks = useCallback(async () => {
+    if (!effectiveAgentId) return;
+    setPackError(null);
+    try {
+      const snap = await invoke<KnowledgePackSnapshot>('list_agent_knowledge_packs', {
+        request: { agentId: effectiveAgentId },
+      });
+      if (snap) {
+        setKnowledgeSnapshot(snap);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+      if (msg) setPackError(msg);
+    }
+  }, [effectiveAgentId]);
+
+  useEffect(() => {
+    if (memoryRoomView === 'packs' && effectiveAgentId) {
+      void loadKnowledgePacks();
+    }
+  }, [memoryRoomView, effectiveAgentId, loadKnowledgePacks]);
 
   // Keep localMind synchronized if parent passes mind or load it via IPC
   useEffect(() => {
@@ -345,15 +420,168 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
   } as React.CSSProperties;
 
   const handleSelectTarget = (target: MemoryTarget) => {
+    setMemoryRoomView('notes');
     if (setMemoryTargetProp) {
       setMemoryTargetProp(target);
     } else {
       setInternalTarget(target);
     }
     setNewNoteText('');
+    setDuplicateAcknowledged(false);
     setEditingEntry(null);
     setRawDraft(null);
     setInlineError(null);
+  };
+
+  const memoryMetaMap = metaOverride ?? activeMind?.memoryMeta ?? {};
+
+  const getEntryMeta = useCallback(
+    (entryText: string): MemoryEntryMeta | undefined => {
+      return memoryMetaMap[normalizeMemoryKey(entryText)];
+    },
+    [memoryMetaMap]
+  );
+
+  const handleMemoryMetaAction = async (
+    entryText: string,
+    action: 'pin' | 'unpin' | 'archive' | 'unarchive' | 'verify'
+  ) => {
+    if (!effectiveAgentId) return;
+    setInlineError(null);
+    try {
+      const res = await invoke<{ agentId: string; memoryMeta: Record<string, MemoryEntryMeta> }>(
+        'update_agent_memory_meta',
+        {
+          request: { agentId: effectiveAgentId, entryText, action },
+        }
+      );
+      if (res?.memoryMeta) {
+        setMetaOverride(res.memoryMeta);
+      }
+    } catch (err: unknown) {
+      setInlineError(err instanceof Error ? err.message : 'Failed to update memory status');
+    }
+  };
+
+  const nearDuplicateMatch = useMemo(() => {
+    const trimmed = newNoteText.trim();
+    if (trimmed.length < 12) return null;
+    let best: { entry: string; score: number } | null = null;
+    for (const existing of memoryEntries) {
+      const score = jaccardMemorySimilarity(existing, trimmed);
+      if (score >= 0.85 && (!best || score > best.score)) {
+        best = { entry: existing, score };
+      }
+    }
+    return best;
+  }, [newNoteText, memoryEntries]);
+
+  const filteredClusters = useMemo(() => {
+    const query = searchFilter.trim().toLowerCase();
+    return memoryClusters
+      .map((cluster) => {
+        const entries = cluster.entries
+          .filter((entry) => {
+            const meta = getEntryMeta(entry.text);
+            if (!showArchived && meta?.archived) return false;
+            if (query && !entry.text.toLowerCase().includes(query)) return false;
+            return true;
+          })
+          .sort((a, b) => {
+            const pinA = getEntryMeta(a.text)?.pinned ? 1 : 0;
+            const pinB = getEntryMeta(b.text)?.pinned ? 1 : 0;
+            return pinB - pinA;
+          });
+        return { ...cluster, entries };
+      })
+      .filter((cluster) => cluster.entries.length > 0);
+  }, [memoryClusters, searchFilter, showArchived, getEntryMeta]);
+
+  const handleSaveKnowledgePack = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!effectiveAgentId || !packName.trim() || !packRoot.trim()) return;
+    setPackBusy(true);
+    setPackError(null);
+    try {
+      const globs = packGlobs
+        .split(',')
+        .map((g) => g.trim())
+        .filter(Boolean);
+      const snap = await invoke<KnowledgePackSnapshot>('save_agent_knowledge_pack', {
+        request: {
+          agentId: effectiveAgentId,
+          name: packName.trim(),
+          root: packRoot.trim(),
+          globs,
+          enabled: true,
+        },
+      });
+      setKnowledgeSnapshot(snap);
+      setPackName('');
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : typeof err === 'object' && err !== null && 'message' in err
+            ? String((err as { message: unknown }).message)
+            : 'Failed to attach Knowledge Pack';
+      setPackError(msg);
+    } finally {
+      setPackBusy(false);
+    }
+  };
+
+  const handleDeleteKnowledgePack = async (packId: string) => {
+    if (!effectiveAgentId) return;
+    setPackBusy(true);
+    setPackError(null);
+    try {
+      const snap = await invoke<KnowledgePackSnapshot>('delete_agent_knowledge_pack', {
+        request: { agentId: effectiveAgentId, packId },
+      });
+      setKnowledgeSnapshot(snap);
+    } catch (err: unknown) {
+      setPackError(err instanceof Error ? err.message : 'Failed to remove Knowledge Pack');
+    } finally {
+      setPackBusy(false);
+    }
+  };
+
+  const handleReindexKnowledgePacks = async () => {
+    if (!effectiveAgentId) return;
+    setPackBusy(true);
+    setPackError(null);
+    try {
+      const snap = await invoke<KnowledgePackSnapshot>('reindex_agent_knowledge_packs', {
+        request: { agentId: effectiveAgentId },
+      });
+      setKnowledgeSnapshot(snap);
+    } catch (err: unknown) {
+      setPackError(err instanceof Error ? err.message : 'Failed to reindex Knowledge Packs');
+    } finally {
+      setPackBusy(false);
+    }
+  };
+
+  const handleSearchKnowledgePacks = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!effectiveAgentId || !packSearchQuery.trim()) return;
+    setPackBusy(true);
+    setPackError(null);
+    try {
+      const res = await invoke<{ matches: KnowledgePackSearchMatch[]; totalChars: number }>(
+        'search_agent_knowledge_packs',
+        {
+          request: { agentId: effectiveAgentId, query: packSearchQuery.trim(), limit: 8 },
+        }
+      );
+      setPackSearchMatches(res?.matches ?? []);
+      setPackSearchChars(res?.totalChars ?? 0);
+    } catch (err: unknown) {
+      setPackError(err instanceof Error ? err.message : 'Failed to search Knowledge Packs');
+    } finally {
+      setPackBusy(false);
+    }
   };
 
   const validateEdit = (text: string, kind: 'structured' | 'rawBuilderEdit'): boolean => {
@@ -432,6 +660,12 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
       setNewNoteText('');
       return;
     }
+
+    if (nearDuplicateMatch && !duplicateAcknowledged) {
+      return;
+    }
+
+    setDuplicateAcknowledged(false);
 
     if (onAddMemoryNoteProp) {
       setInlineError(null);
@@ -652,9 +886,9 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
             <button
               type="button"
               role="tab"
-              tabIndex={activeTarget === 'memory' ? 0 : -1}
-              aria-selected={activeTarget === 'memory'}
-              className={activeTarget === 'memory' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
+              tabIndex={memoryRoomView === 'notes' && activeTarget === 'memory' ? 0 : -1}
+              aria-selected={memoryRoomView === 'notes' && activeTarget === 'memory'}
+              className={memoryRoomView === 'notes' && activeTarget === 'memory' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
               onClick={() => handleSelectTarget('memory')}
             >
               <span className="ui-tab__label" data-label="Notes">
@@ -670,9 +904,9 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
             <button
               type="button"
               role="tab"
-              tabIndex={activeTarget === 'user' ? 0 : -1}
-              aria-selected={activeTarget === 'user'}
-              className={activeTarget === 'user' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
+              tabIndex={memoryRoomView === 'notes' && activeTarget === 'user' ? 0 : -1}
+              aria-selected={memoryRoomView === 'notes' && activeTarget === 'user'}
+              className={memoryRoomView === 'notes' && activeTarget === 'user' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
               onClick={() => handleSelectTarget('user')}
             >
               <span className="ui-tab__label" data-label="About you">
@@ -684,56 +918,213 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
                 </span>
               ) : null}
             </button>
+
+            <button
+              type="button"
+              role="tab"
+              tabIndex={memoryRoomView === 'packs' ? 0 : -1}
+              aria-selected={memoryRoomView === 'packs'}
+              className={memoryRoomView === 'packs' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
+              onClick={() => setMemoryRoomView('packs')}
+            >
+              <span className="ui-tab__label" data-label="Knowledge Packs">
+                Knowledge Packs
+              </span>
+              {(knowledgeSnapshot?.packs.length ?? 0) > 0 ? (
+                <span className="ui-tab__count" data-count="">
+                  {knowledgeSnapshot?.packs.length}
+                </span>
+              ) : null}
+            </button>
           </div>
 
-          <div className="ui-tabs__trailing">
-            <div className="agent-memory__budget">
-              {activeUndoEntry && activeUndoEntry.target === activeTarget && (
+          {memoryRoomView === 'notes' ? (
+            <div className="ui-tabs__trailing">
+              <div className="agent-memory__budget">
+                {activeUndoEntry && activeUndoEntry.target === activeTarget && (
+                  <button
+                    type="button"
+                    disabled={isLocked}
+                    onClick={() => void handleUndo()}
+                    title="Restore the last deleted entry"
+                  >
+                    <RotateCcwIcon size={11} />
+                    Undo
+                  </button>
+                )}
+
+                <span
+                  className={`agent-memory__meter${isOverCap ? ' agent-memory__meter--over' : ''}`}
+                  title={
+                    isOverCap
+                      ? `This file is over its ${formatBudget(activeBudget)} cap — new writes are refused until something is shortened or removed.`
+                      : `Hard size cap for this file. Notes is set in Settings; About you is fixed at ${formatBudget(USER_MEMORY_BUDGET)}.`
+                  }
+                >
+                  <span
+                    aria-label="Memory budget used"
+                    aria-valuemax={100}
+                    aria-valuemin={0}
+                    aria-valuenow={Math.round(usedFraction * 100)}
+                    className={`agent-memory__hairline${isOverCap ? ' agent-memory__hairline--over' : ''}`}
+                    role="progressbar"
+                    style={hairlineStyle}
+                  />
+                  <span data-count="">
+                    {formatBudget(memoryUsedLength)} of {formatBudget(activeBudget)}
+                  </span>
+                </span>
+
                 <button
                   type="button"
                   disabled={isLocked}
-                  onClick={() => void handleUndo()}
-                  title="Restore the last deleted entry"
+                  onClick={() => setRawDraft(activeRawText)}
+                  title="Edit the whole file as text"
                 >
-                  <RotateCcwIcon size={11} />
-                  Undo
+                  Raw
                 </button>
-              )}
-
-              <span
-                className={`agent-memory__meter${isOverCap ? ' agent-memory__meter--over' : ''}`}
-                title={
-                  isOverCap
-                    ? `This file is over its ${formatBudget(activeBudget)} cap — new writes are refused until something is shortened or removed.`
-                    : `Hard size cap for this file. Notes is set in Settings; About you is fixed at ${formatBudget(USER_MEMORY_BUDGET)}.`
-                }
-              >
-                <span
-                  aria-label="Memory budget used"
-                  aria-valuemax={100}
-                  aria-valuemin={0}
-                  aria-valuenow={Math.round(usedFraction * 100)}
-                  className={`agent-memory__hairline${isOverCap ? ' agent-memory__hairline--over' : ''}`}
-                  role="progressbar"
-                  style={hairlineStyle}
-                />
-                <span data-count="">
-                  {formatBudget(memoryUsedLength)} of {formatBudget(activeBudget)}
-                </span>
-              </span>
-
-              <button
-                type="button"
-                disabled={isLocked}
-                onClick={() => setRawDraft(activeRawText)}
-                title="Edit the whole file as text"
-              >
-                Raw
-              </button>
+              </div>
             </div>
-          </div>
+          ) : null}
         </div>
       </div>
+
+      {memoryRoomView === 'packs' ? (
+        <div className="agent-memory__room" id="agent-knowledge-packs-room" role="tabpanel">
+          <div className="agent-mind-column agent-knowledge">
+            <p className="agent-mind-lede">
+              Attach project folders or ODD docs within authorized Places. Kite injects only a compact manifest (&lt;=120 tokens) and serves snippets on demand via <code>kite_ctx</code>.
+            </p>
+
+            {packError ? (
+              <p className="agent-feedback agent-feedback--error" role="alert">
+                {packError}
+              </p>
+            ) : null}
+
+            <form className="ui-card agent-knowledge__form" onSubmit={(e) => void handleSaveKnowledgePack(e)}>
+              <div className="agent-knowledge__form-grid">
+                <label className="agent-knowledge__field">
+                  <span className="ui-eyebrow">Pack name</span>
+                  <input
+                    type="text"
+                    className="ui-field"
+                    placeholder="Architecture & ODDs"
+                    value={packName}
+                    onChange={(e) => setPackName(e.currentTarget.value)}
+                  />
+                </label>
+                <label className="agent-knowledge__field">
+                  <span className="ui-eyebrow">Authorized root folder</span>
+                  <input
+                    type="text"
+                    className="ui-field"
+                    placeholder="C:\repo\docs"
+                    value={packRoot}
+                    onChange={(e) => setPackRoot(e.currentTarget.value)}
+                  />
+                </label>
+                <label className="agent-knowledge__field">
+                  <span className="ui-eyebrow">File globs</span>
+                  <input
+                    type="text"
+                    className="ui-field"
+                    placeholder="odd/tasks/*.md, docs/**"
+                    value={packGlobs}
+                    onChange={(e) => setPackGlobs(e.currentTarget.value)}
+                  />
+                </label>
+              </div>
+              <div className="agent-knowledge__actions">
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={packBusy || !packName.trim() || !packRoot.trim()}
+                >
+                  Attach Knowledge Pack
+                </button>
+                <button
+                  type="button"
+                  className="chrome-button"
+                  disabled={packBusy}
+                  onClick={() => void handleReindexKnowledgePacks()}
+                >
+                  Reindex all
+                </button>
+                {knowledgeSnapshot ? (
+                  <span className="agent-knowledge__budget">
+                    {knowledgeSnapshot.totalChunks} chunks indexed · Manifest {knowledgeSnapshot.manifestPreview.length}/480 chars
+                  </span>
+                ) : null}
+              </div>
+            </form>
+
+            {knowledgeSnapshot && knowledgeSnapshot.packs.length > 0 ? (
+              <div className="agent-knowledge__list">
+                {knowledgeSnapshot.packs.map((pack) => {
+                  const entry = knowledgeSnapshot.entries.find((item) => item.packId === pack.id);
+                  return (
+                    <div key={pack.id} className="ui-card agent-knowledge__item">
+                      <div className="agent-knowledge__item-info">
+                        <strong>{pack.name}</strong>
+                        <span className="agent-knowledge__meta">
+                          {pack.root} · {pack.globs.join(', ') || '*'} · {entry?.fileCount ?? 0} files / {entry?.chunkCount ?? 0} chunks
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="chrome-button"
+                        disabled={packBusy}
+                        onClick={() => void handleDeleteKnowledgePack(pack.id)}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="ui-card agent-knowledge__empty">
+                No Knowledge Packs attached yet.
+              </div>
+            )}
+
+            <form className="ui-card agent-knowledge__search" onSubmit={(e) => void handleSearchKnowledgePacks(e)}>
+              <div className="agent-knowledge__search-row">
+                <input
+                  type="search"
+                  className="ui-field"
+                  aria-label="Test Knowledge Pack search"
+                  placeholder="Test on-demand query across indexed packs..."
+                  value={packSearchQuery}
+                  onChange={(e) => setPackSearchQuery(e.currentTarget.value)}
+                />
+                <button
+                  type="submit"
+                  className="chrome-button"
+                  disabled={packBusy || !packSearchQuery.trim()}
+                >
+                  Search Packs
+                </button>
+              </div>
+              {packSearchMatches.length > 0 ? (
+                <div className="agent-knowledge__matches">
+                  <div className="agent-knowledge__meta">
+                    Returned {packSearchMatches.length} excerpt(s) ({packSearchChars}/3200 chars budget)
+                  </div>
+                  {packSearchMatches.map((m, idx) => (
+                    <div key={`${m.packId}-${m.lineStart}-${idx}`} className="agent-knowledge__match">
+                      <strong>{m.heading}</strong> <span>({m.packName} · L{m.lineStart}-{m.lineEnd})</span>
+                      <p>{m.preview}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </form>
+          </div>
+        </div>
+      ) : (
+        <>
 
       {/* Read Issue Alert Banner */}
       {(isMemoryUnreadable || activeRevision === null) && (
@@ -768,15 +1159,39 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
               {defaultLedeOrTitle}
             </p>
 
+            <div className="agent-memory__toolbar">
+              <input
+                type="search"
+                className="ui-field agent-memory__filter-input"
+                aria-label="Filter memory notes"
+                placeholder="Filter notes or conventions..."
+                value={searchFilter}
+                onChange={(e) => setSearchFilter(e.currentTarget.value)}
+              />
+              <button
+                type="button"
+                className="chrome-button"
+                onClick={() => setShowArchived((v) => !v)}
+              >
+                {showArchived ? 'Hide archived' : 'Show archived'}
+              </button>
+            </div>
+
             <div className="agent-memory__clusters">
-              {memoryClusters.map((cluster) => (
+              {filteredClusters.map((cluster) => (
                 <section
                   key={`${cluster.heading ?? 'unheaded'}-${cluster.entries[0]?.index ?? 'empty'}`}
                   className="ui-card agent-memory__cluster"
                 >
                   {cluster.heading && <h2 className="ui-eyebrow">{cluster.heading}</h2>}
                   <div>
-                    {cluster.entries.map((entry) => (
+                    {cluster.entries.map((entry) => {
+                      const entryMeta = getEntryMeta(entry.text);
+                      const isPinned = Boolean(entryMeta?.pinned);
+                      const isArchived = Boolean(entryMeta?.archived);
+                      const verifiedAt = entryMeta?.lastVerifiedAtUnixMs ?? activeMind?.memoryUpdatedAtUnixMs ?? 0;
+                      const isStale = verifiedAt > 0 && Date.now() - verifiedAt > STALE_MEMORY_MS;
+                      return (
                       <div key={`${entry.index}-${entry.text}`} className="agent-memory__entry">
                         {editingEntry?.index === entry.index && editingEntry.original === entry.text ? (
                           <div className="agent-memory__inline-editor">
@@ -825,9 +1240,42 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
                               }
                               title="Edit memory entry"
                             >
-                              {entry.body}
+                              <span>{entry.body}</span>
+                              {isPinned ? <span className="agent-memory__badge agent-memory__badge--pinned">Pinned</span> : null}
+                              {isArchived ? <span className="agent-memory__badge">Archived</span> : null}
+                              {isStale ? <span className="agent-memory__badge agent-memory__badge--stale">Stale</span> : null}
                             </button>
                             <div className="agent-memory__entry-actions">
+                              {effectiveAgentId ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="agent-memory__meta-btn"
+                                    aria-label={isPinned ? 'Unpin memory entry' : 'Pin memory entry'}
+                                    onClick={() => void handleMemoryMetaAction(entry.text, isPinned ? 'unpin' : 'pin')}
+                                  >
+                                    {isPinned ? 'Unpin' : 'Pin'}
+                                  </button>
+                                  {isStale ? (
+                                    <button
+                                      type="button"
+                                      className="agent-memory__meta-btn"
+                                      aria-label="Verify memory entry"
+                                      onClick={() => void handleMemoryMetaAction(entry.text, 'verify')}
+                                    >
+                                      Verify
+                                    </button>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    className="agent-memory__meta-btn"
+                                    aria-label={isArchived ? 'Restore memory entry' : 'Archive memory entry'}
+                                    onClick={() => void handleMemoryMetaAction(entry.text, isArchived ? 'unarchive' : 'archive')}
+                                  >
+                                    {isArchived ? 'Restore' : 'Archive'}
+                                  </button>
+                                </>
+                              ) : null}
                               <button
                                 type="button"
                                 aria-label="Edit memory entry"
@@ -854,7 +1302,8 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
                           </>
                         )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </section>
               ))}
@@ -876,6 +1325,20 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
 
       {/* Composer at Bottom */}
       <div className="agent-memory__composer-shell">
+        {nearDuplicateMatch && !duplicateAcknowledged ? (
+          <div className="agent-memory__dup-warning" role="status">
+            <span>
+              Possible duplicate ({Math.round(nearDuplicateMatch.score * 100)}% overlap with existing note).
+            </span>
+            <button
+              type="button"
+              className="chrome-button"
+              onClick={() => setDuplicateAcknowledged(true)}
+            >
+              Add anyway
+            </button>
+          </div>
+        ) : null}
         <div className="agent-memory__composer">
           <label className="sr-only" htmlFor="agent-memory-note">
             {activeTarget === 'memory' ? 'Add a memory note' : 'Add something about you'}
@@ -885,7 +1348,10 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
             rows={1}
             value={newNoteText}
             disabled={isLocked}
-            onChange={(e) => setNewNoteText(e.currentTarget.value)}
+            onChange={(e) => {
+              setNewNoteText(e.currentTarget.value);
+              setDuplicateAcknowledged(false);
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !(e.nativeEvent as any)?.isComposing) {
                 e.preventDefault();
@@ -903,7 +1369,7 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
               type="button"
               className="agent-memory__send"
               aria-label="Add"
-              disabled={isLocked}
+              disabled={isLocked || (Boolean(nearDuplicateMatch) && !duplicateAcknowledged)}
               onClick={() => void handleAddNote()}
             >
               <ArrowUpIcon size={13} />
@@ -911,6 +1377,8 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
           )}
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 };

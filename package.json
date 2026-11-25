@@ -28,7 +28,12 @@
     "verify:operator:e2e": "vite-node scripts/verify-operator-e2e.ts",
     "verify:browser:smoke": "node scripts/browser-lane-smoke.mjs",
     "verify:browser:qa": "node scripts/qa/run-catalog.mjs",
-    "verify:desktop:e2e": "node scripts/e2e/run.mjs"
+    "verify:desktop:e2e": "node scripts/e2e/run.mjs",
+    "verify:ipc": "node scripts/quality/verify-ipc.mjs",
+    "verify:design": "node scripts/quality/verify-design.mjs",
+    "verify:quality:test": "node --test scripts/quality/quality.test.mjs",
+    "verify:gate": "node scripts/quality/verify-gate.mjs",
+    "verify:gate:fast": "node scripts/quality/verify-gate.mjs --profile fast"
   },
   "dependencies": {
     "@pierre/diffs": "1.6.4",

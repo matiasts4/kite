@@ -5,21 +5,16 @@
     "rustMainPath": "src-tauri/src/main.rs",
     "rustSrcDir": "src-tauri/src",
     "tsSrcDir": "src",
-    "invokeCallers": ["invokeCommand", "invoke", "tauriInvoke"],
+    "invokeCallers": ["invokeCommand", "invokeFlatCommand", "invoke", "tauriInvoke"],
     "ignorePrefixes": ["plugin:"],
     "ignoreCommands": [],
-    "payloadCheckSeverity": "warn",
+    "payloadCheckSeverity": "error",
     "legacyBaseline": [
-      { "file": "src/components/sidebar/AgentRoster.tsx", "command": "request_agent_install", "reason": "Pre-existing mismatch; real Rust command is start_agent_install (tracked for Phase 2 fix)." },
-      { "file": "src/components/sidebar/WorkspaceRoster.tsx", "command": "remove_workspace", "reason": "Pre-existing mismatch; real Rust command is remove_workspace_from_list." },
       { "file": "src/components/views/WorkspacesView.tsx", "command": "list_manual_worktrees", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
       { "file": "src/components/views/WorkspacesView.tsx", "command": "create_manual_worktree", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
       { "file": "src/components/views/WorkspacesView.tsx", "command": "recover_manual_worktree", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
       { "file": "src/components/views/WorkspacesView.tsx", "command": "remove_manual_worktree", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
-      { "file": "src/components/views/settings/NotificationsTab.tsx", "command": "notifications_get_snapshot", "reason": "Pre-existing mismatch; real Rust command is notifications_snapshot." },
-      { "file": "src/lib/headroomMonitor.ts", "command": "fetch_headroom_monitor", "reason": "Pre-existing deprecated headroom monitor command unregistered from main.rs." },
-      { "file": "src/lib/operator/appOperatorController.ts", "command": "open_browser", "reason": "Pre-existing mismatch; browser surface uses create_browser_surface/open_external_link." },
-      { "file": "src/lib/operator/executor/actions/switchWorkspace.ts", "command": "list_workspaces", "reason": "Pre-existing mismatch; workspace list comes from bootstrap/state." }
+      { "file": "src/lib/headroomMonitor.ts", "command": "fetch_headroom_monitor", "reason": "Pre-existing deprecated headroom monitor command unregistered from main.rs." }
     ]
   },
   "design": {
@@ -202,7 +197,7 @@
         ],
         "vitestPaths": ["src/components/views/agents", "src/components/views/routines", "src/components/sidebar/AgentRoster.test.tsx"],
         "cargoFilters": ["agents", "agent_mind", "agent_playbooks", "routines", "local_autopilot"],
-        "e2eSpecs": ["desktop-smoke", "ui-layout"],
+        "e2eSpecs": ["agents-routines", "ui-layout"],
         "visualReview": true
       },
       {
@@ -217,7 +212,7 @@
         ],
         "vitestPaths": ["src/components/TitleBar.test.tsx", "src/components/Sidebar.test.tsx", "src/components/ui"],
         "cargoFilters": [],
-        "e2eSpecs": ["desktop-smoke", "ui-layout"],
+        "e2eSpecs": ["desktop-smoke", "ui-layout", "ui-kit"],
         "visualReview": true
       },
       {
@@ -233,7 +228,7 @@
         ],
         "vitestPaths": ["src/components/views/settings", "src/components/views/tickets", "src/components/views/diffs"],
         "cargoFilters": ["local_tasks"],
-        "e2eSpecs": ["desktop-smoke", "ui-layout"],
+        "e2eSpecs": ["settings-tasks", "code-diffs"],
         "visualReview": true
       },
       {

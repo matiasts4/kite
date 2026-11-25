@@ -603,9 +603,17 @@ export function verifyIpcWorkspace(repoRoot, ipcConfig, options = {}) {
         command: inv.command,
         file: inv.file,
         line: inv.line,
-        message: `invokeCommand('${inv.command}', args) wraps payload in { request: args }, but Rust (${rustDef.file}:${rustDef.line}) expects flat params (${rustDef.params.map((p) => p.name).join(', ')}).`,
+        message: `invokeCommand('${inv.command}', args) wraps payload in { request: args }, but Rust (${rustDef.file}:${rustDef.line}) expects flat params (${rustDef.params.map((p) => p.name).join(', ')}). Use invokeFlatCommand instead.`,
       });
-    } else if (inv.caller !== 'invokeCommand' && inv.isObjectLiteral && inv.hasSecondArg) {
+    } else if (inv.caller === 'invokeFlatCommand' && inv.hasSecondArg && rustDef.expectsRequestWrapper && !inv.hasRequestKey) {
+      payloadTarget.push({
+        code: 'missing-request-wrapper',
+        command: inv.command,
+        file: inv.file,
+        line: inv.line,
+        message: `invokeFlatCommand('${inv.command}', args) sends flat params, but Rust (${rustDef.file}:${rustDef.line}) expects a top-level 'request' wrapper. Use invokeCommand instead.`,
+      });
+    } else if (inv.caller !== 'invokeCommand' && inv.caller !== 'invokeFlatCommand' && inv.isObjectLiteral && inv.hasSecondArg) {
       if (rustDef.expectsRequestWrapper && !inv.hasRequestKey) {
         payloadTarget.push({
           code: 'missing-request-wrapper',

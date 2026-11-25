@@ -302,7 +302,7 @@ export const WorkspaceRoster: React.FC<WorkspaceRosterProps> = ({
       return;
     }
     try {
-      await invokeCommand('remove_workspace', {
+      await invokeCommand('remove_workspace_from_list', {
         supportedSchemaVersion: 1,
         workspaceId: wsId,
       });

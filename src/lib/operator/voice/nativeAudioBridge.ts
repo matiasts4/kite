@@ -2,7 +2,7 @@
 // Prefers native cpal WASAPI capture when running inside Tauri, falling back cleanly
 // to WebView2 AudioWorklet in browser previews or unit tests.
 
-import { invokeCommand, isTauriEnvironment } from '../../ipc';
+import { invokeCommand, invokeFlatCommand, isTauriEnvironment } from '../../ipc';
 
 export interface NativeAudioDeviceInfo {
   id: string;
@@ -71,7 +71,7 @@ export async function startNativeAudioCapture(options?: {
     return { ok: false, error: 'Native audio unavailable outside Tauri runtime' };
   }
   try {
-    const res = await invokeCommand<NativeCaptureStartResult>('voice_audio_start_capture', {
+    const res = await invokeFlatCommand<NativeCaptureStartResult>('voice_audio_start_capture', {
       deviceId: options?.deviceId ?? null,
       sampleRate: options?.sampleRate ?? 16000,
     });

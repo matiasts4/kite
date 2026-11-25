@@ -8,6 +8,7 @@ vi.mock('../../ipc', async () => {
   return {
     ...actual,
     invokeCommand: vi.fn(),
+    invokeFlatCommand: vi.fn(),
     isTauriEnvironment: vi.fn(() => true),
   };
 });
@@ -22,7 +23,7 @@ describe('RealtimeVoiceBridge — 24 kHz S2S Tool Bridge & Cascaded Fallback (S6
   });
 
   it('automatically downgrades to cascaded mode when realtime credentials are missing or proxy rejects', async () => {
-    vi.mocked(ipc.invokeCommand).mockResolvedValueOnce({
+    vi.mocked(ipc.invokeFlatCommand).mockResolvedValueOnce({
       ok: false,
       fallbackToCascaded: true,
       reason: 'missing_credentials',
@@ -38,7 +39,7 @@ describe('RealtimeVoiceBridge — 24 kHz S2S Tool Bridge & Cascaded Fallback (S6
   });
 
   it('forwards realtime function-call events into executePlan() and submits structured tool output', async () => {
-    vi.mocked(ipc.invokeCommand)
+    vi.mocked(ipc.invokeFlatCommand)
       .mockResolvedValueOnce({ ok: true, connected: true })
       .mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: true });
@@ -72,7 +73,7 @@ describe('RealtimeVoiceBridge — 24 kHz S2S Tool Bridge & Cascaded Fallback (S6
 
     expect(handled.ok).toBe(true);
     expect(execSpy).toHaveBeenCalledTimes(1);
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+    expect(ipc.invokeFlatCommand).toHaveBeenCalledWith(
       'voice_realtime_submit_tool_result',
       expect.objectContaining({
         callId: 'call-123',
@@ -81,7 +82,7 @@ describe('RealtimeVoiceBridge — 24 kHz S2S Tool Bridge & Cascaded Fallback (S6
     );
 
     await bridge.truncateAssistantAudio('item-99', 1420);
-    expect(ipc.invokeCommand).toHaveBeenCalledWith('voice_realtime_truncate', {
+    expect(ipc.invokeFlatCommand).toHaveBeenCalledWith('voice_realtime_truncate', {
       itemId: 'item-99',
       audioEndMs: 1420,
     });

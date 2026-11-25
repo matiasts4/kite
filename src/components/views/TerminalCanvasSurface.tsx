@@ -479,8 +479,8 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
           scheduleRender();
           return;
         }
-      } catch {
-        // Older hosts have no binary scroll command.
+      } catch (err) {
+        console.warn('[TerminalCanvasSurface] Binary scroll unavailable, falling back to JSON scroll:', err);
       }
       const snapshot = await invokeCommand<RenderSnapshot>('scroll_terminal_viewport', {
         sessionId,

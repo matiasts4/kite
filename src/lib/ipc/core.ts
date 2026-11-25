@@ -26,6 +26,24 @@ export async function invokeCommand<T>(cmd: string, args: Record<string, unknown
   }
 }
 
+/**
+ * Invoke a Rust `#[tauri::command]` that declares flat top-level parameters
+ * (instead of a single `request: Value` wrapper).
+ */
+export async function invokeFlatCommand<T>(cmd: string, args: Record<string, unknown> = {}): Promise<T> {
+  if (!isTauriEnvironment()) {
+    throw new Error(
+      `[IPC] Command '${cmd}' failed: Kite Code is running in a web browser. Launch Studio inside the native Tauri window via 'npm run tauri dev'.`
+    );
+  }
+  try {
+    return await tauriInvoke<T>(cmd, args);
+  } catch (err) {
+    console.warn(`[IPC] Failed to invoke flat command ${cmd}:`, err);
+    throw err;
+  }
+}
+
 // Window controls
 export const windowControls = {
   minimize: () => invokeCommand<void>('app_window_minimize'),
@@ -96,7 +114,7 @@ export async function saveOpenCodeApiKey(apiKey: string): Promise<boolean> {
     }
   }
   try {
-    return await invokeCommand<boolean>('save_opencode_api_key', { apiKey });
+    return await invokeFlatCommand<boolean>('save_opencode_api_key', { apiKey });
   } catch (err) {
     console.warn('[IPC] Failed to save OpenCode API key:', err);
     return false;

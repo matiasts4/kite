@@ -508,9 +508,11 @@ export const TerminalView: React.FC<TerminalViewProps> = ({
             workspaceId: entry.workspaceId,
             resourceId: entry.resourceId,
             entryId: entry.entryId,
-          }).catch(() => {});
-        } catch {
-          // The drop payload was not a files entry.
+          }).catch((err) => {
+            console.warn('[TerminalView] Failed to insert dropped files entry:', err);
+          });
+        } catch (err) {
+          console.warn('[TerminalView] Ignored malformed dropped files entry payload:', err);
         }
       }}
       onPasteCapture={(event) => {

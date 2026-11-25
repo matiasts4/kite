@@ -46,7 +46,10 @@ function readCachedWorkspaces(): WorkspaceCandidate[] {
 }
 
 async function listWorkspaces(): Promise<WorkspaceCandidate[]> {
-  const fromBackend = await invokeCommand<unknown>('list_workspaces').catch(() => null);
+  const fromBackend = await invokeCommand<unknown>('bootstrap').catch((err) => {
+    console.warn('[switchWorkspace] bootstrap IPC fallback:', err);
+    return null;
+  });
   const rawList = Array.isArray(fromBackend)
     ? fromBackend
     : Array.isArray((fromBackend as { workspaces?: unknown[] } | null)?.workspaces)

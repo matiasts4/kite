@@ -114,11 +114,24 @@ test('verify-ipc catches missing/unregistered commands and wrapper mismatches in
   });
 
   try {
-    const result = verifyIpcWorkspace(root, GATE_CONFIG.ipc);
-    const errorCmds = result.errors.map((e) => e.command).sort();
-    assert.deepEqual(errorCmds, ['does_not_exist', 'unregistered_secret']);
+    // With default gate.config.json (payloadCheckSeverity: 'error'), wrapper mismatches are hard errors.
+    const strictResult = verifyIpcWorkspace(root, { ...GATE_CONFIG.ipc, legacyBaseline: [] });
+    const strictCodes = strictResult.errors.map((e) => `${e.command}:${e.code}`).sort();
+    assert.deepEqual(strictCodes, [
+      'does_not_exist:command-not-found',
+      'flat_ping:unexpected-request-wrapper',
+      'list_items:missing-request-wrapper',
+      'unregistered_secret:command-not-registered',
+    ]);
 
-    const warningTypes = result.warnings.map((w) => `${w.command}:${w.code}`).sort();
+    // With payloadCheckSeverity: 'warn', wrapper mismatches route to warnings while missing commands stay errors.
+    const warnResult = verifyIpcWorkspace(root, {
+      ...GATE_CONFIG.ipc,
+      payloadCheckSeverity: 'warn',
+      legacyBaseline: [],
+    });
+    assert.deepEqual(warnResult.errors.map((e) => e.command).sort(), ['does_not_exist', 'unregistered_secret']);
+    const warningTypes = warnResult.warnings.map((w) => `${w.command}:${w.code}`).sort();
     assert.ok(warningTypes.includes('list_items:missing-request-wrapper'));
     assert.ok(warningTypes.includes('flat_ping:unexpected-request-wrapper'));
   } finally {
@@ -330,6 +343,33 @@ test('verify-ipc honors payloadCheckSeverity=error and JSX apostrophes do not bl
     const res = verifyIpcWorkspace(root, { ...GATE_CONFIG.ipc, payloadCheckSeverity: 'error', legacyBaseline: [] });
     assert.deepEqual(res.errors.map((e) => e.code), ['unexpected-request-wrapper']);
     assert.equal(res.warnings.length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verify-ipc validates invokeFlatCommand symmetrically against flat and request-wrapped Rust commands', () => {
+  const root = createTempRepo({
+    'src-tauri/src/main.rs': `fn main() { builder.invoke_handler(tauri::generate_handler![flat_cmd, wrapped_cmd]); }`,
+    'src-tauri/src/cmds.rs': `
+      #[tauri::command]
+      pub fn flat_cmd(id: String) -> String { id }
+      #[tauri::command]
+      pub fn wrapped_cmd(request: Value) -> Value { request }
+    `,
+    'src/App.ts': `
+      import { invokeFlatCommand, invokeCommand } from './lib/ipc';
+      export async function run() {
+        await invokeFlatCommand('flat_cmd', { id: 'ok' });
+        await invokeCommand('wrapped_cmd', { id: 'ok' });
+        await invokeFlatCommand('wrapped_cmd', { id: 'bad' });
+      }
+    `,
+  });
+
+  try {
+    const res = verifyIpcWorkspace(root, { ...GATE_CONFIG.ipc, payloadCheckSeverity: 'error', legacyBaseline: [] });
+    assert.deepEqual(res.errors.map((e) => `${e.command}:${e.code}`), ['wrapped_cmd:missing-request-wrapper']);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

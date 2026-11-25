@@ -143,8 +143,8 @@ export const ComposerDictationButton: React.FC<ComposerDictationButtonProps> = (
               setDictationError(take.message);
             }
           }
-        } catch {
-          // Keep polling
+        } catch (err) {
+          console.warn('[ComposerDictationButton] Dictation poll transient error:', err);
         } finally {
           dictationPollInFlightRef.current = false;
         }

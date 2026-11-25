@@ -641,17 +641,13 @@ class AppOperatorController {
     }
 
     try {
-      // `open_external_link` is the real Tauri command; the rest are layered fallbacks
-      // for builds/surfaces where that command is unavailable.
+      // `open_external_link` is the real Tauri command; fall back to window.open outside Tauri.
       try {
         await invokeCommand('open_external_link', { url: formattedUrl });
-      } catch {
-        try {
-          await invokeCommand('open_browser', { url: formattedUrl });
-        } catch {
-          if (typeof window !== 'undefined') {
-            window.open(formattedUrl, '_blank');
-          }
+      } catch (ipcErr) {
+        console.warn('[AppOperatorController] open_external_link failed, falling back to window.open:', ipcErr);
+        if (typeof window !== 'undefined') {
+          window.open(formattedUrl, '_blank');
         }
       }
 

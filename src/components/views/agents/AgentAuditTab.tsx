@@ -13,9 +13,11 @@ export const AgentAuditTab: React.FC<AgentAuditTabProps> = ({ agentId, onOpenThr
   const [familyFilter, setFamilyFilter] = useState<string>('all');
   const [searchText, setSearchText] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const loadAudit = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const res = await invoke<{ entries?: AgentAuditLogEntry[] }>('list_agent_audit_log', {
         request: {
@@ -26,8 +28,12 @@ export const AgentAuditTab: React.FC<AgentAuditTabProps> = ({ agentId, onOpenThr
         },
       });
       setEntries(res?.entries ?? []);
-    } catch {
-      // Safe fallback outside Tauri runtime
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('[AgentAuditTab] Failed to load tool audit log:', err);
+      if (typeof window !== 'undefined' && Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)) {
+        setLoadError(`Unable to load audit log: ${msg}`);
+      }
     } finally {
       setLoading(false);
     }
@@ -54,6 +60,12 @@ export const AgentAuditTab: React.FC<AgentAuditTabProps> = ({ agentId, onOpenThr
         <p className="agent-mind-lede">
           Persistent SQLite audit ledger recording tool policy verdicts (<code>allow</code>, <code>ask</code>, <code>deny</code>), latency, and thread links.
         </p>
+
+        {loadError && (
+          <p className="agent-mind-error" role="alert">
+            {loadError}
+          </p>
+        )}
 
         <div className="agent-memory__toolbar">
           <input

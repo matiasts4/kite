@@ -16,6 +16,7 @@ vi.mock('../../ipc', async () => {
   return {
     ...actual,
     invokeCommand: vi.fn(async () => null),
+    invokeFlatCommand: vi.fn(async () => null),
     isTauriEnvironment: vi.fn(() => false),
   };
 });
@@ -114,9 +115,9 @@ describe('voiceCallReceipts (T8 — Post-Call Persistence & History)', () => {
     );
   });
 
-  it('invokes Tauri voice_call_receipt_save and voice_call_receipt_list when Tauri runtime is active', async () => {
+  it('invokes Tauri voice_call_receipt_save and voice_call_receipt_list via flat IPC when Tauri runtime is active', async () => {
     vi.mocked(ipc.isTauriEnvironment).mockReturnValue(true);
-    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+    vi.mocked(ipc.invokeFlatCommand).mockImplementation(async (cmd: string) => {
       if (cmd === 'voice_call_receipt_list') {
         return [
           {
@@ -140,7 +141,7 @@ describe('voiceCallReceipts (T8 — Post-Call Persistence & History)', () => {
     const listed = await listVoiceCallReceipts(5);
     expect(listed[0]?.callId).toBe('call_tauri_99');
     await saveVoiceCallReceipt(listed[0]);
-    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+    expect(ipc.invokeFlatCommand).toHaveBeenCalledWith(
       'voice_call_receipt_save',
       expect.objectContaining({ receipt: expect.objectContaining({ callId: 'call_tauri_99' }) })
     );

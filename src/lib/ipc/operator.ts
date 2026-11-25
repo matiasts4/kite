@@ -1,5 +1,5 @@
 import type { ContinuationSuggestion } from '../../types';
-import { invokeCommand, isTauriEnvironment } from './core';
+import { invokeCommand, invokeFlatCommand, isTauriEnvironment } from './core';
 
 export async function recommendContinuationTargets(
   currentProvider: string
@@ -65,8 +65,9 @@ export async function proxyOperatorHttp(
 export async function operatorDuckAudio(ratio: number = 0.20): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
-    return await invokeCommand<boolean>('operator_duck_audio', { ratio });
-  } catch {
+    return await invokeFlatCommand<boolean>('operator_duck_audio', { ratio });
+  } catch (err) {
+    console.warn('[IPC] operator_duck_audio failed:', err);
     return false;
   }
 }
@@ -75,7 +76,8 @@ export async function operatorRestoreAudio(): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
     return await invokeCommand<boolean>('operator_restore_audio', {});
-  } catch {
+  } catch (err) {
+    console.warn('[IPC] operator_restore_audio failed:', err);
     return false;
   }
 }
@@ -83,8 +85,9 @@ export async function operatorRestoreAudio(): Promise<boolean> {
 export async function operatorPlayCueSound(start: boolean): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
-    return await invokeCommand<boolean>('operator_play_cue_sound', { start });
-  } catch {
+    return await invokeFlatCommand<boolean>('operator_play_cue_sound', { start });
+  } catch (err) {
+    console.warn('[IPC] operator_play_cue_sound failed:', err);
     return false;
   }
 }
@@ -92,8 +95,9 @@ export async function operatorPlayCueSound(start: boolean): Promise<boolean> {
 export async function operatorOnRecordingStateChange(recording: boolean): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
-    return await invokeCommand<boolean>('operator_on_recording_state_change', { recording });
-  } catch {
+    return await invokeFlatCommand<boolean>('operator_on_recording_state_change', { recording });
+  } catch (err) {
+    console.warn('[IPC] operator_on_recording_state_change failed:', err);
     return false;
   }
 }

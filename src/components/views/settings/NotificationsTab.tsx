@@ -48,7 +48,7 @@ export const NotificationsTab: React.FC = () => {
 
   useEffect(() => {
     let isMounted = true;
-    void invokeCommand<NotificationCenterSnapshot>('notifications_get_snapshot')
+    void invokeCommand<NotificationCenterSnapshot>('notifications_snapshot')
       .then((snap) => {
         if (snap && isMounted) applyNotificationSnapshot(snap);
       })

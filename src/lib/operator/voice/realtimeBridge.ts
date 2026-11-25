@@ -2,7 +2,7 @@
 // Connects native Rust `voice_realtime` WebSocket proxy to Argos's `executePlan()` tool loop,
 // automatically downgrading to `cascaded` mode if credentials or endpoint are unavailable.
 
-import { invokeCommand, isTauriEnvironment } from '../../ipc';
+import { invokeCommand, invokeFlatCommand, isTauriEnvironment } from '../../ipc';
 import {
   ActionSchema,
   OPERATOR_NATIVE_TOOLS,
@@ -83,7 +83,7 @@ export class RealtimeVoiceBridge {
     }));
 
     try {
-      const res = await invokeCommand<{
+      const res = await invokeFlatCommand<{
         ok?: boolean;
         connected?: boolean;
         fallbackToCascaded?: boolean;
@@ -206,20 +206,24 @@ export class RealtimeVoiceBridge {
 
     const outputJson = JSON.stringify(outputPayload);
     if (isTauriEnvironment()) {
-      await invokeCommand('voice_realtime_submit_tool_result', {
+      await invokeFlatCommand('voice_realtime_submit_tool_result', {
         callId: toolCall.callId,
         outputJson,
-      }).catch(() => undefined);
+      }).catch((err) => {
+        console.warn('[RealtimeVoiceBridge] voice_realtime_submit_tool_result failed:', err);
+      });
     }
     return { ok, outputJson };
   }
 
   public async truncateAssistantAudio(itemId: string, audioEndMs: number): Promise<void> {
     if (!isTauriEnvironment() || !itemId) return;
-    await invokeCommand('voice_realtime_truncate', {
+    await invokeFlatCommand('voice_realtime_truncate', {
       itemId,
       audioEndMs: Math.max(0, Math.round(audioEndMs)),
-    }).catch(() => undefined);
+    }).catch((err) => {
+      console.warn('[RealtimeVoiceBridge] voice_realtime_truncate failed:', err);
+    });
   }
 
   public async disconnect(): Promise<void> {

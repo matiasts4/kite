@@ -1,4 +1,4 @@
-import { invokeCommand, isTauriEnvironment } from '../../ipc';
+import { invokeFlatCommand, isTauriEnvironment } from '../../ipc';
 import { loadOperatorConfig } from '../config/storage';
 import { runLedger } from '../runLedger';
 import { voiceSessionStore, VoiceTurnRecord } from './voiceSessionStore';
@@ -115,9 +115,9 @@ export async function saveVoiceCallReceipt(receipt: VoiceCallReceipt): Promise<v
 
   if (isTauriEnvironment()) {
     try {
-      await invokeCommand('voice_call_receipt_save', { receipt });
-    } catch {
-      // localStorage already persisted fallback
+      await invokeFlatCommand('voice_call_receipt_save', { receipt });
+    } catch (err) {
+      console.warn('[voiceCallReceipts] voice_call_receipt_save failed, kept localStorage fallback:', err);
     }
   }
 }
@@ -125,14 +125,14 @@ export async function saveVoiceCallReceipt(receipt: VoiceCallReceipt): Promise<v
 export async function listVoiceCallReceipts(limit = 25): Promise<VoiceCallReceipt[]> {
   if (isTauriEnvironment()) {
     try {
-      const native = await invokeCommand<VoiceCallReceipt[]>('voice_call_receipt_list', {
+      const native = await invokeFlatCommand<VoiceCallReceipt[]>('voice_call_receipt_list', {
         limit,
       });
       if (Array.isArray(native) && native.length > 0) {
         return sortNewestFirst(native).slice(0, limit);
       }
-    } catch {
-      // fallback to local receipts
+    } catch (err) {
+      console.warn('[voiceCallReceipts] voice_call_receipt_list failed, falling back to localStorage:', err);
     }
   }
   return sortNewestFirst(readLocalReceipts()).slice(0, limit);
@@ -141,12 +141,12 @@ export async function listVoiceCallReceipts(limit = 25): Promise<VoiceCallReceip
 export async function getVoiceCallReceipt(callId: string): Promise<VoiceCallReceipt | null> {
   if (isTauriEnvironment()) {
     try {
-      const native = await invokeCommand<VoiceCallReceipt | null>('voice_call_receipt_get', {
+      const native = await invokeFlatCommand<VoiceCallReceipt | null>('voice_call_receipt_get', {
         callId,
       });
       if (native) return native;
-    } catch {
-      // fallback
+    } catch (err) {
+      console.warn('[voiceCallReceipts] voice_call_receipt_get failed, falling back to localStorage:', err);
     }
   }
   return readLocalReceipts().find((r) => r.callId === callId) ?? null;

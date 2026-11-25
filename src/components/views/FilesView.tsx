@@ -471,8 +471,8 @@ export const FilesView: React.FC<FilesViewProps> = ({
             setActiveFileId(link.entryId);
             setLoadingContent(false);
             return;
-          } catch {
-            // Fall back to other handlers
+          } catch (err) {
+            console.warn('[FilesView] File preview IPC failed, falling back:', err);
           }
         }
 

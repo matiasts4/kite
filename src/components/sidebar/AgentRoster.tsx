@@ -108,12 +108,12 @@ export const AgentRoster: React.FC<AgentRosterProps> = ({
       return;
     }
     try {
-      await invokeCommand('request_agent_install', { supportedSchemaVersion: 1, engine });
+      await invokeCommand('start_agent_install', { supportedSchemaVersion: 1, engine });
       if (onUpdateAvailability && shownAvailability) {
         onUpdateAvailability({ ...shownAvailability, [engine]: true });
       }
     } catch (err) {
-      console.warn('[AgentRoster] request_agent_install notice:', err);
+      console.warn('[AgentRoster] start_agent_install notice:', err);
     }
   };
 

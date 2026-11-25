@@ -132,8 +132,8 @@ export const PluginDetailsDrawer: React.FC<PluginDetailsDrawerProps> = ({
         pluginId: plugin.id,
         config: configToSave,
       });
-    } catch {
-      // IPC fallback
+    } catch (err) {
+      console.warn('[PluginDetailsDrawer] save_plugin_config failed on connect:', err);
     }
 
     onSaveConfig?.(plugin.id, configToSave);
@@ -174,8 +174,8 @@ export const PluginDetailsDrawer: React.FC<PluginDetailsDrawerProps> = ({
         pluginId: plugin.id,
         config: configToSave,
       });
-    } catch {
-      // IPC fallback
+    } catch (err) {
+      console.warn('[PluginDetailsDrawer] save_plugin_config failed on connect:', err);
     }
 
     onSaveConfig?.(plugin.id, configToSave);
@@ -204,7 +204,9 @@ export const PluginDetailsDrawer: React.FC<PluginDetailsDrawerProps> = ({
         pluginId: plugin.id,
         config: updatedConfig,
       });
-    } catch {}
+    } catch (err) {
+      console.warn('[PluginDetailsDrawer] save_plugin_config failed on provider toggle:', err);
+    }
 
     onSaveConfig?.(plugin.id, updatedConfig);
 

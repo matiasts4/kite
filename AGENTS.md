@@ -69,8 +69,10 @@ To prevent jarring height jumps when users navigate across lateral tabs and pane
    - Public task specifications live under `odd/tasks/<slug>.md`. They must be 100% product-focused and clean of external donor or cloning references.
    - Internal investigation tasks live under `.kite/tasks/<slug>.md` (gitignored).
    - A correction that belongs to an existing ODD updates that document in the same change: append the user's words to `## Log`, rewrite the affected `S#`, and reopen or add the linked task. Do not leave the fix floating only in code.
-2. **Quality Verification**:
-   - Always verify changes with `npx tsc --noEmit` and `npx vitest run`.
+2. **Quality Verification & 4-Lane Delivery Gate**:
+   - Follow `.agents/skills/kite-delivery-loop/SKILL.md` for every non-trivial feature or UI slice: **Proposer** (slim vertical slice + IPC/UI/E2E contract) -> **Builder** (`npm run verify:gate:fast` during iteration) -> **Automated Gate** (`npm run verify:gate`) -> **Independent QA & Visual Verifier** (separate read-only agent inspecting `verifier-handoff.md` and captured CDP PNGs).
+   - Run `npm run verify:ipc` and `npm run verify:design` (included inside `npm run verify:gate`) to enforce real Rust `generate_handler![]` parity, design tokens, and zero silent IPC `catch {}` blocks.
+   - Never mark an ODD verification task `[x]` if `verify:gate` returned `FAILED`, `INCOMPLETE` (`--skip-e2e`), or `FAST_ONLY` on a UI/runtime slice.
    - For real desktop UI, streaming, orchestration, and layout verification over CDP, run `npm run verify:desktop:e2e` (see [docs/qa/catalog.md](docs/qa/catalog.md) and local skill `kite-desktop-qa`).
    - Before any commit or push, run `node .kite/sanitizer/audit-references.mjs --check`.
 3. **Matching another product**:
@@ -95,6 +97,7 @@ To prevent jarring height jumps when users navigate across lateral tabs and pane
 | `docs/` | Project architecture, QA catalog (`docs/qa/catalog.md`), release guides, and AI Studio setup (`docs/AI_STUDIO_AGENT_SETUP.md`). |
 | `.agents/skills/` | Portable LLM-first runtime skill contracts shared across local agents and GitHub-synced cloud environments. |
 | `scripts/e2e/` | Playwright CDP verification specs against real Windows Tauri WebView2 builds (`npm run verify:desktop:e2e`). |
+| `scripts/quality/` | Config-driven reusable quality gate (`gate.config.json`, `verify-ipc.mjs`, `verify-design.mjs`, `verify-gate.mjs`). |
 
 ### Cloud / Browser Sandboxes (e.g., Google AI Studio Build) vs Local Machine
 - **Supported in browser/cloud sandboxes**: Reading repo files and `.agents/skills/`, authoring/updating `odd/tasks/*.md` specs and `docs/`, React/CSS/TypeScript edits, `npx tsc --noEmit`, `npx vitest run`, and Vite builds when Node deps are present.
@@ -113,6 +116,7 @@ Before executing matching work, read the full `SKILL.md` file rather than guessi
 | `judgment-day` | Explicit adversarial/dual review (`judgment day`, `juzgar`, blind pre-release diff audit) | [`.agents/skills/judgment-day/SKILL.md`](.agents/skills/judgment-day/SKILL.md) |
 | `port-from-product` | Feature parity requests (`copy from`, `match`, `parity`, `port`) and full surface inventories | [`.agents/skills/port-from-product/SKILL.md`](.agents/skills/port-from-product/SKILL.md) |
 | `cognitive-doc-design` | Writing or refactoring guides, READMEs, RFCs, or review docs with low cognitive load | [`.agents/skills/cognitive-doc-design/SKILL.md`](.agents/skills/cognitive-doc-design/SKILL.md) |
+| `kite-delivery-loop` | Feature proposals, UI slices, `verify:gate`, Proposer -> Builder -> Independent Visual/QA Verifier workflow | [`.agents/skills/kite-delivery-loop/SKILL.md`](.agents/skills/kite-delivery-loop/SKILL.md) |
 | `kite-desktop-qa` | Desktop E2E, Tauri CDP verification, layout matrix, and sabotage fault checks | [`.agents/skills/kite-desktop-qa/SKILL.md`](.agents/skills/kite-desktop-qa/SKILL.md) |
 | `qa-task-handoff` | QA task, manual test, testeo pendiente, crear en Tasks for Voice Mode, Zed/SETH, and Agent | [`.agents/skills/qa-task-handoff/SKILL.md`](.agents/skills/qa-task-handoff/SKILL.md) |
 | `skill-creator` | Creating or updating skills inside `.agents/skills/` | [`.agents/skills/skill-creator/SKILL.md`](.agents/skills/skill-creator/SKILL.md) |

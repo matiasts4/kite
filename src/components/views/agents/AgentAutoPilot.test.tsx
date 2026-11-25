@@ -208,4 +208,88 @@ describe('AgentAutoPilot multi-turn continuation', () => {
 
     unmount();
   });
+
+  it('drives Agent Chat Thread AutoPilot with verification gates and Argos announcement', async () => {
+    const autopilotRequests: any[] = [];
+    const submittedPrompts: string[] = [];
+    const announceListener = vi.fn();
+    window.addEventListener('kite:agent-announce', announceListener);
+
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === 'autopilot_next') {
+        autopilotRequests.push(args.request);
+        if (autopilotRequests.length === 1) {
+          return { action: 'prompt', prompt: 'Implement feature X', reason: 'Turn 1' };
+        }
+        if (autopilotRequests.length === 2) {
+          return { action: 'verify', gates: ['npx tsc --noEmit'], reason: 'Running gates' };
+        }
+        return { action: 'complete', reason: 'Verified and passed' };
+      }
+      if (cmd === 'run_autopilot_verification_gates') {
+        return {
+          allPassed: true,
+          results: [{ command: 'npx tsc --noEmit', passed: true, output: 'ok' }],
+        };
+      }
+      return null;
+    });
+
+    const baseProps = {
+      surface: 'thread' as const,
+      profile: { id: 'agent-1', name: 'Orion', engine: 'antigravity' },
+      threadId: 'thread-99',
+      workspaceId: 'ws-1',
+      threadItems: [{ kind: 'user', text: 'Start feature X' }],
+      onSubmitThreadPrompt: async (prompt: string) => {
+        submittedPrompts.push(prompt);
+      },
+    };
+
+    const { rerender } = render(<AgentAutoPilot {...baseProps} threadRunning={false} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /auto/i }));
+    fireEvent.click(screen.getByLabelText(/TypeScript \(tsc\)/i));
+    fireEvent.click(screen.getByLabelText(/Announce finish\/stuck via Argos/i));
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Complete'));
+      await Promise.resolve();
+    });
+
+    expect(submittedPrompts).toEqual(['Implement feature X']);
+    expect(autopilotRequests[0].surface).toBe('thread');
+    expect(autopilotRequests[0].verificationGates).toEqual(['npx tsc --noEmit']);
+
+    // Simulate thread turn running -> settled
+    rerender(<AgentAutoPilot {...baseProps} threadRunning={true} />);
+    rerender(
+      <AgentAutoPilot
+        {...baseProps}
+        threadRunning={false}
+        threadItems={[
+          { kind: 'user', text: 'Start feature X' },
+          { kind: 'assistant', text: 'All tests passed' },
+        ]}
+      />
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith('run_autopilot_verification_gates', {
+      request: { workspaceId: 'ws-1', gates: ['npx tsc --noEmit'] },
+    });
+    expect(autopilotRequests).toHaveLength(3);
+    expect(autopilotRequests[2].verificationResults).toEqual([
+      { command: 'npx tsc --noEmit', passed: true, output: 'ok' },
+    ]);
+    expect(screen.getByText('Done')).toBeInTheDocument();
+    expect(announceListener).toHaveBeenCalledTimes(1);
+
+    window.removeEventListener('kite:agent-announce', announceListener);
+  });
 });

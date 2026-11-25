@@ -11,15 +11,33 @@ const MAX_TRANSCRIPT_CHARS = 16000;
 export type AutoPilotMode = 'complete' | 'dream' | 'harden' | 'review' | 'task';
 export type AutoPilotPhase = 'off' | 'watching' | 'thinking' | 'waiting' | 'done' | 'stuck';
 
+export interface AutoPilotThreadItem {
+  kind?: string;
+  text?: string | null;
+  title?: string | null;
+}
+
+export interface AutoPilotVerificationResult {
+  command: string;
+  passed: boolean;
+  output?: string;
+}
+
 export interface AgentAutoPilotProps {
   profile: {
     id: string;
     name: string;
     engine: string;
   };
-  paneId: string;
-  sessionId: string;
-  phase: 'suspended' | 'loading' | 'running' | 'exited' | 'error';
+  surface?: 'terminal' | 'thread';
+  paneId?: string;
+  sessionId?: string;
+  phase?: 'suspended' | 'loading' | 'running' | 'exited' | 'error';
+  threadId?: string | null;
+  workspaceId?: string | null;
+  threadRunning?: boolean;
+  threadItems?: AutoPilotThreadItem[];
+  onSubmitThreadPrompt?: (prompt: string) => void | Promise<void>;
   readOnly?: boolean;
   onSessionRestart?: (nextSessionId: string) => void;
 }
@@ -63,6 +81,12 @@ function autoPilotReducer(state: State, action: Action): State {
       return state;
   }
 }
+
+const DEFAULT_GATE_PRESETS = [
+  { id: 'tsc', label: 'TypeScript (tsc)', command: 'npx tsc --noEmit' },
+  { id: 'vitest', label: 'Frontend (vitest)', command: 'npx vitest run' },
+  { id: 'cargo', label: 'Backend (cargo test)', command: 'cargo test --manifest-path src-tauri/Cargo.toml' },
+];
 
 // Icons
 const ZapIcon = ({ size = 12, fill = 'none', className = '' }: { size?: number; fill?: string; className?: string }) => (
@@ -148,25 +172,55 @@ const MODES: AutoModeDef[] = [
   { id: 'task', label: 'Custom task', detail: 'Type the goal; Auto drives to it.', chip: 'Auto', glyph: TextCursorInputIcon },
 ];
 
+export function formatThreadTranscript(items?: AutoPilotThreadItem[]): string {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  const lines = items
+    .slice(-40)
+    .map((item) => {
+      const role = item.kind || 'message';
+      const title = item.title ? `${item.title}: ` : '';
+      const text = (item.text || '').trim();
+      return text ? `${role}: ${title}${text}` : '';
+    })
+    .filter(Boolean);
+  return lines.join('\n').slice(-MAX_TRANSCRIPT_CHARS);
+}
+
 export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   profile,
-  paneId,
-  sessionId,
-  phase: terminalPhase,
+  surface = 'terminal',
+  paneId = '',
+  sessionId = '',
+  phase: terminalPhase = 'running',
+  threadId = null,
+  workspaceId = null,
+  threadRunning = false,
+  threadItems = [],
+  onSubmitThreadPrompt,
   readOnly = false,
 }) => {
   const [state, dispatch] = useReducer(autoPilotReducer, initialState);
   const { mode, task, phase, menuOpen, detail } = state;
   const [customTaskOpen, setCustomTaskOpen] = useState(false);
+  const [maxTurns, setMaxTurns] = useState<number>(12);
+  const [maxWallClockMins, setMaxWallClockMins] = useState<number>(20);
+  const [selectedGates, setSelectedGates] = useState<string[]>([]);
+  const [customGate, setCustomGate] = useState<string>('');
+  const [announceViaArgos, setAnnounceViaArgos] = useState<boolean>(false);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
   const turnsCompletedRef = useRef(0);
+  const startedAtUnixMsRef = useRef<number | null>(null);
   const previousPromptsRef = useRef<string[]>([]);
   const activeLoopRef = useRef(0);
   const mountedRef = useRef(true);
   const transcriptBufferRef = useRef('');
+  const threadItemsRef = useRef<AutoPilotThreadItem[]>(threadItems);
+  threadItemsRef.current = threadItems;
+  const sawThreadRunningRef = useRef(false);
   const activeWatchRef = useRef<{ loopId: number; mode: AutoPilotMode; taskText: string } | null>(null);
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const waitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -174,7 +228,9 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   const objectiveRef = useRef<string | null>(null);
   const objectivesCompletedRef = useRef(0);
   const completedObjectivesRef = useRef<string[]>([]);
-  const driveTurnRef = useRef<((m: AutoPilotMode, t: string, tr?: string) => Promise<void>) | null>(null);
+  const driveTurnRef = useRef<
+    ((m: AutoPilotMode, t: string, tr?: string, gateResults?: AutoPilotVerificationResult[]) => Promise<void>) | null
+  >(null);
 
   const clearAutoTimers = useCallback(() => {
     if (settleTimerRef.current !== null) {
@@ -192,10 +248,14 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   }, []);
 
   const captureTranscript = useCallback(async (): Promise<string> => {
+    if (surface === 'thread') {
+      return formatThreadTranscript(threadItemsRef.current);
+    }
     const live = transcriptBufferRef.current.trim();
     if (live.length > 0) {
       return transcriptBufferRef.current.slice(-MAX_TRANSCRIPT_CHARS);
     }
+    if (!sessionId) return '';
     try {
       const res = await invokeCommand<{ transcript?: string }>('read_terminal_transcript', {
         sessionId,
@@ -205,7 +265,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
     } catch {
       return '';
     }
-  }, [sessionId]);
+  }, [surface, sessionId]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -255,160 +315,319 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
     };
   }, [menuOpen]);
 
+  const emitArgosAnnouncement = useCallback(
+    (status: 'done' | 'stuck', summary: string) => {
+      if (!announceViaArgos || typeof window === 'undefined') return;
+      window.dispatchEvent(
+        new CustomEvent('kite:agent-announce', {
+          detail: {
+            source: 'autopilot',
+            surface,
+            agentId: profile.id,
+            agentName: profile.name,
+            threadId,
+            status,
+            message: `${profile.name} AutoPilot ${status === 'done' ? 'completed' : 'needs attention'}: ${summary}`,
+          },
+        })
+      );
+    },
+    [announceViaArgos, surface, profile.id, profile.name, threadId]
+  );
+
   // Stop handler
-  const handleStop = useCallback((reason = 'Auto stopped. The Agent terminal is still available.') => {
-    activeLoopRef.current += 1;
-    activeWatchRef.current = null;
-    clearAutoTimers();
-    void invokeCommand('cancel_autopilot', {}).catch(() => {});
-    dispatch({ type: 'transition', phase: 'off', detail: reason });
-  }, [clearAutoTimers]);
+  const handleStop = useCallback(
+    (reason = `Auto stopped. The Agent ${surface === 'thread' ? 'thread' : 'terminal'} is still available.`) => {
+      activeLoopRef.current += 1;
+      activeWatchRef.current = null;
+      sawThreadRunningRef.current = false;
+      clearAutoTimers();
+      void invokeCommand('cancel_autopilot', { request: { agentId: profile.id } }).catch(() => {});
+      dispatch({ type: 'transition', phase: 'off', detail: reason });
+    },
+    [clearAutoTimers, profile.id, surface]
+  );
 
   // Drive Auto turn loop
-  const driveTurn = useCallback(async (selectedMode: AutoPilotMode, taskText: string, capturedTranscript = '') => {
-    const loopId = (activeLoopRef.current += 1);
-    activeWatchRef.current = null;
-    clearAutoTimers();
-    dispatch({ type: 'transition', phase: 'thinking', detail: 'Auto is deciding next turn…' });
+  const driveTurn = useCallback(
+    async (
+      selectedMode: AutoPilotMode,
+      taskText: string,
+      capturedTranscript = '',
+      verificationResults: AutoPilotVerificationResult[] = []
+    ) => {
+      const loopId = (activeLoopRef.current += 1);
+      activeWatchRef.current = null;
+      sawThreadRunningRef.current = false;
+      clearAutoTimers();
+      if (startedAtUnixMsRef.current === null) {
+        startedAtUnixMsRef.current = Date.now();
+      }
+      dispatch({ type: 'transition', phase: 'thinking', detail: 'Auto is deciding next turn…' });
 
-    try {
-      const decision = await invokeCommand<{
-        action?: string;
-        prompt?: string;
-        reason?: string;
-        objective?: string;
-        turnsRemaining?: number;
-      }>('autopilot_next', {
-        request: {
-          supportedSchemaVersion: 1,
-          agentId: profile.id,
-          paneId,
-          sessionId,
-          runId: globalThis.crypto.randomUUID(),
-          generation: 1,
-          turn: {
-            supportedSchemaVersion: 1,
-            task: selectedMode === 'task' ? taskText : '',
-            mode: selectedMode,
-            engine: profile.engine,
-            transcript: capturedTranscript.slice(-MAX_TRANSCRIPT_CHARS),
-            turnsCompleted: turnsCompletedRef.current,
-            previousPrompts: previousPromptsRef.current.slice(-5),
-            objective: objectiveRef.current,
-            objectivesCompleted: objectivesCompletedRef.current,
-            completedObjectives: completedObjectivesRef.current.slice(-12),
+      const effectiveGates = [
+        ...selectedGates,
+        ...(customGate.trim() ? [customGate.trim()] : []),
+      ];
+
+      try {
+        const decision = await invokeCommand<{
+          action?: string;
+          prompt?: string;
+          reason?: string;
+          objective?: string;
+          gates?: string[];
+          turnsRemaining?: number;
+        }>('autopilot_next', {
+          request: {
+            supportedSchemaVersion: 2,
+            surface,
+            agentId: profile.id,
+            agentName: profile.name,
+            paneId: paneId || undefined,
+            sessionId: sessionId || undefined,
+            threadId: threadId || undefined,
+            workspaceId: workspaceId || undefined,
+            runId: globalThis.crypto.randomUUID(),
+            generation: 1,
+            maxTurns,
+            maxWallClockMins,
+            startedAtUnixMs: startedAtUnixMsRef.current,
+            verificationGates: effectiveGates,
+            verificationResults,
+            announceViaArgos,
+            turn: {
+              supportedSchemaVersion: 1,
+              task: selectedMode === 'task' ? taskText : '',
+              mode: selectedMode,
+              engine: profile.engine,
+              transcript: (capturedTranscript || (surface === 'thread' ? formatThreadTranscript(threadItemsRef.current) : '')).slice(
+                -MAX_TRANSCRIPT_CHARS
+              ),
+              turnsCompleted: turnsCompletedRef.current,
+              previousPrompts: previousPromptsRef.current.slice(-5),
+              objective: objectiveRef.current,
+              objectivesCompleted: objectivesCompletedRef.current,
+              completedObjectives: completedObjectivesRef.current.slice(-12),
+            },
           },
-        },
-      });
+        });
 
-      if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+        if (!mountedRef.current || activeLoopRef.current !== loopId) return;
 
-      if (!decision || decision.action === 'stuck') {
+        if (decision?.action === 'verify') {
+          const gatesToRun = Array.isArray(decision.gates) && decision.gates.length > 0 ? decision.gates : effectiveGates;
+          dispatch({
+            type: 'transition',
+            phase: 'thinking',
+            detail: `Running ${gatesToRun.length} verification gate(s)…`,
+          });
+          let results: AutoPilotVerificationResult[] = [];
+          try {
+            const gateRes = await invokeCommand<{ results?: AutoPilotVerificationResult[] }>(
+              'run_autopilot_verification_gates',
+              {
+                request: {
+                  workspaceId,
+                  gates: gatesToRun,
+                },
+              }
+            );
+            results = Array.isArray(gateRes?.results) ? gateRes.results : [];
+          } catch (gateErr: any) {
+            results = gatesToRun.map((command) => ({
+              command,
+              passed: false,
+              output: gateErr?.message || 'Verification gate command failed to launch.',
+            }));
+          }
+          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          const nextTranscript = await captureTranscript();
+          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          void driveTurnRef.current?.(selectedMode, taskText, nextTranscript, results);
+          return;
+        }
+
+        if (!decision || decision.action === 'stuck') {
+          const reason = decision?.reason || 'Auto stopped because this agent needs attention.';
+          emitArgosAnnouncement('stuck', reason);
+          dispatch({
+            type: 'transition',
+            phase: 'stuck',
+            detail: reason,
+          });
+          return;
+        }
+
+        if (decision.action === 'complete') {
+          const reason = decision.reason || 'Auto verified that all objectives are complete.';
+          emitArgosAnnouncement('done', reason);
+          dispatch({
+            type: 'transition',
+            phase: 'done',
+            detail: reason,
+          });
+          return;
+        }
+
+        if (decision.action === 'wait') {
+          dispatch({
+            type: 'transition',
+            phase: 'waiting',
+            detail: decision.reason || 'The Agent is still working. Auto will check again.',
+          });
+          waitTimerRef.current = setTimeout(() => {
+            waitTimerRef.current = null;
+            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+            void captureTranscript().then((nextTranscript) => {
+              if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+              void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
+            });
+          }, WAIT_RECHECK_MS);
+          return;
+        }
+
+        if (decision.action === 'advance') {
+          if (objectiveRef.current && !completedObjectivesRef.current.includes(objectiveRef.current)) {
+            completedObjectivesRef.current = [...completedObjectivesRef.current, objectiveRef.current].slice(-12);
+            objectivesCompletedRef.current += 1;
+          }
+          if (decision.objective) {
+            objectiveRef.current = decision.objective;
+          }
+        } else if (decision.objective) {
+          objectiveRef.current = decision.objective;
+        }
+
+        if ((decision.action === 'prompt' || decision.action === 'advance') && decision.prompt) {
+          transcriptBufferRef.current = '';
+          turnsCompletedRef.current += 1;
+          previousPromptsRef.current = [...previousPromptsRef.current, decision.prompt].slice(-5);
+          activeWatchRef.current = { loopId, mode: selectedMode, taskText };
+          dispatch({
+            type: 'transition',
+            phase: 'watching',
+            detail: decision.reason || `Auto turn ${turnsCompletedRef.current} submitted.`,
+          });
+
+          if (surface === 'thread') {
+            try {
+              if (onSubmitThreadPrompt) {
+                await onSubmitThreadPrompt(decision.prompt);
+              } else if (threadId) {
+                await invokeCommand('start_agent_chat_turn', {
+                  threadId,
+                  agentId: profile.id,
+                  prompt: decision.prompt,
+                  attachments: [],
+                });
+              }
+            } catch (err) {
+              console.warn('[AutoPilot] failed to submit thread turn:', err);
+            }
+          } else {
+            try {
+              await invokeCommand('write_terminal', {
+                sessionId,
+                data: decision.prompt + '\r',
+              });
+            } catch (err) {
+              console.warn('[AutoPilot] failed to write terminal input:', err);
+            }
+          }
+
+          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          maxWatchTimerRef.current = setTimeout(() => {
+            maxWatchTimerRef.current = null;
+            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+            activeWatchRef.current = null;
+            clearAutoTimers();
+            void captureTranscript().then((nextTranscript) => {
+              if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+              void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
+            });
+          }, MAX_WATCH_MS);
+        } else if (decision.action === 'advance') {
+          waitTimerRef.current = setTimeout(() => {
+            waitTimerRef.current = null;
+            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+            void captureTranscript().then((nextTranscript) => {
+              if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+              void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
+            });
+          }, 250);
+        }
+      } catch (err: any) {
+        if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+        const msg = err?.message || 'Auto encountered an unexpected error.';
+        emitArgosAnnouncement('stuck', msg);
         dispatch({
           type: 'transition',
           phase: 'stuck',
-          detail: decision?.reason || 'Auto stopped because this agent needs attention.',
+          detail: msg,
         });
-        return;
       }
-
-      if (decision.action === 'complete') {
-        dispatch({
-          type: 'transition',
-          phase: 'done',
-          detail: decision.reason || 'Auto verified that all objectives are complete.',
-        });
-        return;
-      }
-
-      if (decision.action === 'wait') {
-        dispatch({
-          type: 'transition',
-          phase: 'waiting',
-          detail: decision.reason || 'The Agent is still working. Auto will check again.',
-        });
-        waitTimerRef.current = setTimeout(() => {
-          waitTimerRef.current = null;
-          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-          void captureTranscript().then((nextTranscript) => {
-            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-            void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
-          });
-        }, WAIT_RECHECK_MS);
-        return;
-      }
-
-      if (decision.action === 'advance') {
-        if (objectiveRef.current && !completedObjectivesRef.current.includes(objectiveRef.current)) {
-          completedObjectivesRef.current = [...completedObjectivesRef.current, objectiveRef.current].slice(-12);
-          objectivesCompletedRef.current += 1;
-        }
-        if (decision.objective) {
-          objectiveRef.current = decision.objective;
-        }
-      } else if (decision.objective) {
-        objectiveRef.current = decision.objective;
-      }
-
-      if ((decision.action === 'prompt' || decision.action === 'advance') && decision.prompt) {
-        transcriptBufferRef.current = '';
-        turnsCompletedRef.current += 1;
-        previousPromptsRef.current = [...previousPromptsRef.current, decision.prompt].slice(-5);
-        activeWatchRef.current = { loopId, mode: selectedMode, taskText };
-        dispatch({
-          type: 'transition',
-          phase: 'watching',
-          detail: decision.reason || `Auto turn ${turnsCompletedRef.current} submitted.`,
-        });
-
-        // Write prompt to terminal session
-        try {
-          await invokeCommand('write_terminal', {
-            sessionId,
-            data: decision.prompt + '\r',
-          });
-        } catch (err) {
-          console.warn('[AutoPilot] failed to write terminal input:', err);
-        }
-
-        if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-        maxWatchTimerRef.current = setTimeout(() => {
-          maxWatchTimerRef.current = null;
-          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-          activeWatchRef.current = null;
-          clearAutoTimers();
-          void captureTranscript().then((nextTranscript) => {
-            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-            void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
-          });
-        }, MAX_WATCH_MS);
-      } else if (decision.action === 'advance') {
-        waitTimerRef.current = setTimeout(() => {
-          waitTimerRef.current = null;
-          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-          void captureTranscript().then((nextTranscript) => {
-            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-            void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
-          });
-        }, 250);
-      }
-    } catch (err: any) {
-      if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-      dispatch({
-        type: 'transition',
-        phase: 'stuck',
-        detail: err?.message || 'Auto encountered an unexpected error.',
-      });
-    }
-  }, [profile.id, profile.engine, paneId, sessionId, clearAutoTimers, captureTranscript]);
+    },
+    [
+      surface,
+      profile.id,
+      profile.name,
+      profile.engine,
+      paneId,
+      sessionId,
+      threadId,
+      workspaceId,
+      maxTurns,
+      maxWallClockMins,
+      selectedGates,
+      customGate,
+      announceViaArgos,
+      clearAutoTimers,
+      captureTranscript,
+      onSubmitThreadPrompt,
+      emitArgosAnnouncement,
+    ]
+  );
 
   useEffect(() => {
     driveTurnRef.current = driveTurn;
   }, [driveTurn]);
 
-  // Listen for terminal output/activity to capture transcript and detect turn settle
+  // Thread surface: detect turn running -> settled transition
   useEffect(() => {
-    if (!isTauriEnvironment() || !sessionId) return;
+    if (surface !== 'thread') return;
+    const watching = activeWatchRef.current;
+    if (!watching || activeLoopRef.current !== watching.loopId) return;
+
+    if (threadRunning) {
+      sawThreadRunningRef.current = true;
+      if (settleTimerRef.current !== null) {
+        clearTimeout(settleTimerRef.current);
+        settleTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (sawThreadRunningRef.current && settleTimerRef.current === null) {
+      settleTimerRef.current = setTimeout(() => {
+        settleTimerRef.current = null;
+        if (!mountedRef.current) return;
+        const currentWatch = activeWatchRef.current;
+        if (!currentWatch || activeLoopRef.current !== currentWatch.loopId) return;
+        activeWatchRef.current = null;
+        sawThreadRunningRef.current = false;
+        clearAutoTimers();
+        void captureTranscript().then((nextTranscript) => {
+          if (!mountedRef.current || activeLoopRef.current !== currentWatch.loopId) return;
+          void driveTurnRef.current?.(currentWatch.mode, currentWatch.taskText, nextTranscript);
+        });
+      }, SETTLE_IDLE_MS);
+    }
+  }, [surface, threadRunning, threadItems.length, clearAutoTimers, captureTranscript]);
+
+  // Terminal surface: listen for terminal output/activity to capture transcript and detect turn settle
+  useEffect(() => {
+    if (surface !== 'terminal' || !isTauriEnvironment() || !sessionId) return;
     let active = true;
     const unlisteners: Array<() => void> = [];
 
@@ -482,9 +701,19 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
         unlisten();
       }
     };
-  }, [sessionId, paneId, clearAutoTimers, captureTranscript]);
+  }, [surface, sessionId, paneId, clearAutoTimers, captureTranscript]);
+
+  const resetLoopCounters = () => {
+    turnsCompletedRef.current = 0;
+    startedAtUnixMsRef.current = Date.now();
+    previousPromptsRef.current = [];
+    objectiveRef.current = null;
+    objectivesCompletedRef.current = 0;
+    completedObjectivesRef.current = [];
+  };
 
   const handleEngageMode = (m: AutoPilotMode) => {
+    resetLoopCounters();
     dispatch({ type: 'chooseMode', mode: m });
     dispatch({ type: 'setMenu', open: false });
     setCustomTaskOpen(false);
@@ -494,12 +723,21 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   const handleCustomTaskSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!task.trim()) return;
+    resetLoopCounters();
     dispatch({ type: 'chooseMode', mode: 'task' });
     dispatch({ type: 'setMenu', open: false });
     setCustomTaskOpen(false);
     void driveTurn('task', task);
   };
 
+  const toggleGate = (command: string) => {
+    setSelectedGates((prev) =>
+      prev.includes(command) ? prev.filter((item) => item !== command) : [...prev, command]
+    );
+  };
+
+  const isDisabledForSurface =
+    readOnly || (surface === 'terminal' && (terminalPhase === 'loading' || terminalPhase === 'suspended'));
 
   // Render trigger / capsule button
   let triggerElement: React.ReactNode;
@@ -542,7 +780,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
       <button
         type="button"
         className="agent-auto__trigger"
-        disabled={readOnly || terminalPhase === 'loading' || terminalPhase === 'suspended'}
+        disabled={isDisabledForSurface}
         onClick={() => dispatch({ type: 'setMenu', open: !menuOpen })}
         ref={triggerRef}
         title="Let Auto drive this agent"
@@ -556,7 +794,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   }
 
   return (
-    <div className="agent-auto" data-state={phase}>
+    <div className="agent-auto" data-state={phase} data-surface={surface}>
       {triggerElement}
 
       {menuOpen ? (
@@ -632,7 +870,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
                   Auto prompts {engineName} turn by turn — verifying, unblocking, and answering questions — until this is done.
                 </p>
                 <footer className="agent-auto__footer">
-                  <span className="agent-auto__credits">2 credits</span>
+                  <span className="agent-auto__credits">Max {maxTurns} turns · {maxWallClockMins}m</span>
                   <button type="submit" className="primary-button" disabled={!task.trim()}>
                     Engage Auto
                   </button>
@@ -640,7 +878,9 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
               </form>
             ) : (
               <div className="agent-auto__menu">
-                <p className="agent-auto__lede">Pick how Auto should drive {engineName}.</p>
+                <p className="agent-auto__lede">
+                  Pick how Auto should drive {engineName} ({surface === 'thread' ? 'Thread' : 'Terminal'}).
+                </p>
                 <div className="agent-auto__modes" role="menu" aria-label="Auto modes">
                   {MODES.map((item) => {
                     const ItemGlyph = item.glyph;
@@ -668,8 +908,68 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
                     );
                   })}
                 </div>
+
+                <details className="agent-auto__guardrails">
+                  <summary>Guardrails &amp; Verification Gates</summary>
+                  <div className="agent-auto__guardrails-body">
+                    <div className="agent-auto__limits">
+                      <label>
+                        <span>Max turns</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          value={maxTurns}
+                          aria-label="AutoPilot max turns"
+                          onChange={(e) => setMaxTurns(Math.max(1, Math.min(60, Number(e.target.value) || 12)))}
+                        />
+                      </label>
+                      <label>
+                        <span>Max mins</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={240}
+                          value={maxWallClockMins}
+                          aria-label="AutoPilot max wall-clock minutes"
+                          onChange={(e) => setMaxWallClockMins(Math.max(1, Math.min(240, Number(e.target.value) || 20)))}
+                        />
+                      </label>
+                    </div>
+                    <div className="agent-auto__gates">
+                      <span className="agent-auto__gates-label">Verification Gates before Done</span>
+                      {DEFAULT_GATE_PRESETS.map((gate) => (
+                        <label key={gate.id} className="agent-auto__gate-check">
+                          <input
+                            type="checkbox"
+                            checked={selectedGates.includes(gate.command)}
+                            onChange={() => toggleGate(gate.command)}
+                          />
+                          <span>{gate.label}</span>
+                        </label>
+                      ))}
+                      <input
+                        type="text"
+                        className="agent-auto__custom-gate"
+                        placeholder="Custom check (e.g. npm test)"
+                        aria-label="Custom verification gate"
+                        value={customGate}
+                        onChange={(e) => setCustomGate(e.target.value)}
+                      />
+                    </div>
+                    <label className="agent-auto__gate-check">
+                      <input
+                        type="checkbox"
+                        checked={announceViaArgos}
+                        onChange={(e) => setAnnounceViaArgos(e.target.checked)}
+                      />
+                      <span>Announce finish/stuck via Argos</span>
+                    </label>
+                  </div>
+                </details>
+
                 <p className="agent-auto__note">
-                  2 credits per check-in. Auto stops on its own if the agent gets stuck.
+                  Evaluates turns with your connected provider (offline fallback available) and stops on loop detection.
                 </p>
               </div>
             )}

@@ -628,4 +628,46 @@ describe('AgentChatSurface teammate inbox deep-links', () => {
       voiceSessionStore.clearThreadVoiceTurns('agent-voice-t1');
     }
   });
+
+  it('renders Thread AutoPilot bar in AgentChatSurface and wires thread prompt submission', () => {
+    const t1 = createAgentThread('agent-auto-t1', 'Auto Thread');
+    render(
+      createElement(
+        MotionProvider,
+        null,
+        createElement(AgentChatSurface, {
+          agentId: 'agent-1',
+          agentName: 'Orion',
+          engineLabel: 'Antigravity',
+          workspaceId: 'ws-1',
+          workspaceName: 'Workspace',
+          workspaces: [{ id: 'ws-1', name: 'Workspace' }],
+          activeThread: t1,
+          tabs: [{ id: t1.id, title: t1.title }],
+          selectedId: t1.id,
+          isDraft: false,
+          running: false,
+          prompt: '',
+          attachments: [],
+          totalTokens: 0,
+          dynamicModels: [],
+          onNew: vi.fn(),
+          onSelect: vi.fn(),
+          onRename: vi.fn(),
+          onArchive: vi.fn(),
+          onChangePrompt: vi.fn(),
+          onSend: vi.fn(),
+          onStop: vi.fn(),
+          onPickAttachments: vi.fn(),
+          onStageFiles: vi.fn(),
+          onStagePaths: vi.fn(),
+          onRemoveAttachment: vi.fn(),
+          onUpdateConfig: vi.fn(),
+        })
+      )
+    );
+
+    expect(screen.getByText('Thread Autonomy')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Auto$/i })).toBeInTheDocument();
+  });
 });

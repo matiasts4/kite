@@ -11,11 +11,13 @@ import {
   CheckIcon,
   CalendarIcon,
 } from '../chat/ChatIcons';
+import { AgentAutoPilot } from './AgentAutoPilot';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from '../chat/ChatItemRow';
 import { SubagentGroupRow } from '../chat/SubagentActivityCard';
 import { TurnActivityStatus } from '../chat/TurnActivityStatus';
 import { QueuedRunsControl, type QueuedRunRow } from '../chat/QueuedRunsControl';
 import { ChatComposer } from '../chat/ChatComposer';
+import { ConsultativeDraftCard } from '../chat/ConsultativeDraftCard';
 import { buildComposerChangedFilesProps } from '../chat/pane/threadTurnHelpers';
 import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
 import { declarationFromCatalog } from '../chat/driverDeclaration';
@@ -789,6 +791,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             receipts: res.receipts,
             reply: res.reply,
             createdAt: startedAt,
+            completedAt: Math.max(startedAt + 1, Date.now()),
           });
         }
       } catch (err) {
@@ -1078,7 +1081,38 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
 
       {/* Main agent chat body */}
       <section aria-label={`${agentName} chat`} className="_body_85ff1_45">
-        {/* 1. Collapsible Teammate inbox strip */}
+        {/* 1. Thread AutoPilot & Collapsible Teammate inbox strip */}
+        <div className="agent-chat-autopilot-bar">
+          <span className="agent-chat-autopilot-bar__label">Thread Autonomy</span>
+          <AgentAutoPilot
+            surface="thread"
+            profile={{ id: agentId, name: agentName, engine: effectiveProvider }}
+            threadId={activeThread?.id ?? null}
+            workspaceId={effectiveWsId ?? null}
+            threadRunning={running}
+            threadItems={timelineItems}
+            onSubmitThreadPrompt={async (nextPrompt) => {
+              if (activeThread?.id) {
+                try {
+                  await invokeCommand('start_agent_chat_turn', {
+                    threadId: activeThread.id,
+                    agentId,
+                    prompt: nextPrompt,
+                    attachments: [],
+                  });
+                } catch {
+                  onChangePrompt(nextPrompt);
+                  onSend();
+                }
+              } else if (onSendInitial) {
+                onSendInitial(nextPrompt);
+              } else {
+                onChangePrompt(nextPrompt);
+                onSend();
+              }
+            }}
+          />
+        </div>
         <details className="agent-inbox-strip" onToggle={(e) => e.currentTarget.open && void fetchInbox()}>
           <summary>Teammate inbox</summary>
           <section aria-label="Teammate inbox" className="agent-inbox">
@@ -1251,6 +1285,11 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               onEdit={handleStartQueueEdit}
               onCancelEdit={handleCancelQueueEdit}
               onRemove={handleRemoveQueuedRun}
+            />
+
+            <ConsultativeDraftCard
+              threadId={effectiveThreadId}
+              onConfirm={() => handleSendVoiceTurn('confirmar')}
             />
 
             <ChatComposer

@@ -58,6 +58,8 @@ pub mod dispatch_wire;
 pub mod subagent_settings;
 pub mod core_wire;
 pub mod core_daemon;
+pub mod ctx_bridge;
+pub mod user_path;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -126,14 +128,13 @@ fn register_windows_shutdown_handler() {
 /// Keeps a visible Kite window painting when a game or another app sits beside it.
 ///
 /// Chromium's native occlusion check treats that arrangement as a covered window
-/// and drops `requestAnimationFrame` to about one frame per second.
+/// and drops `requestAnimationFrame` to about one frame per second. Timer and
+/// renderer backgrounding remain enabled so a minimized window can throttle idle work.
 #[cfg(windows)]
 fn install_webview_runtime_flags() {
     let mut args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
     for flag in [
-        "--disable-background-timer-throttling",
         "--disable-backgrounding-occluded-windows",
-        "--disable-renderer-backgrounding",
         "--disable-features=CalculateNativeWinOcclusion",
     ] {
         if args.contains(flag) {
@@ -406,11 +407,28 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if window.label() == "main" {
-                if matches!(
-                    event,
-                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-                ) {
-                    crate::core_daemon::on_client_window_close();
+                match event {
+                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed => {
+                        crate::core_daemon::on_client_window_close();
+                    }
+                    tauri::WindowEvent::Focused(focused) => {
+                        use tauri::Emitter;
+                        let minimized = window.is_minimized().unwrap_or(false);
+                        let _ = window.emit(
+                            "kite:window-state",
+                            serde_json::json!({ "minimized": minimized, "focused": *focused }),
+                        );
+                    }
+                    tauri::WindowEvent::Resized(_) => {
+                        use tauri::Emitter;
+                        let minimized = window.is_minimized().unwrap_or(false);
+                        let focused = window.is_focused().unwrap_or(!minimized);
+                        let _ = window.emit(
+                            "kite:window-state",
+                            serde_json::json!({ "minimized": minimized, "focused": focused }),
+                        );
+                    }
+                    _ => {}
                 }
             }
         })
@@ -455,6 +473,7 @@ fn main() {
             auth_sign_out,
             auth_snapshot,
             autopilot_next,
+            local_autopilot::run_autopilot_verification_gates,
             bootstrap,
             zed_memory_reveal,
             cancel_agent_chat_turn,
@@ -765,6 +784,13 @@ fn main() {
             dispatch_wire::dispatch_interrupt,
             dispatch_wire::dispatch_keys,
             dispatch_wire::dispatch_attach,
+            ctx_bridge::ctx_pack_voice_context,
+            ctx_bridge::ctx_kv_plan,
+            ctx_bridge::ctx_share_put,
+            ctx_bridge::ctx_share_get,
+            ctx_bridge::ctx_ccr_retrieve,
+            ctx_bridge::ctx_read_compact,
+            audio_ducking::probe_microphone_privacy_status,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {

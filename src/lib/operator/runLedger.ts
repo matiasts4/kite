@@ -42,6 +42,58 @@ export interface RunTerminalOutput {
   exitCode?: number;
 }
 
+export type VoiceTier = 'L0' | 'L1' | 'L2';
+export type VoiceTransportMode = 'cascaded' | 'realtime';
+export type VoiceTtsEngineKind = 'elevenlabs_ws' | 'elevenlabs_http' | 'browser';
+
+export interface VoiceTokenBreakdown {
+  systemStaticTokens: number;
+  contextDynamicTokens: number;
+  toolsSchemaTokens: number;
+  historyTokens: number;
+  promptTokensTotal: number;
+  cachedTokens: number;
+  completionTokens: number;
+  cacheHitRatio: number;
+}
+
+export interface VoiceLatencyMilestones {
+  sttFinalizedAt?: number;
+  contextReadyAt?: number;
+  routerDecisionAt?: number;
+  providerRequestAt?: number;
+  firstTokenAt?: number;
+  firstActionStartAt?: number;
+  ttsRequestAt?: number;
+  firstAudioAt?: number;
+}
+
+export interface VoicePercentileStats {
+  count: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  avg: number;
+}
+
+export interface VoiceSegmentStats {
+  count: number;
+  ttfaAudio: VoicePercentileStats;
+  ttft: VoicePercentileStats;
+  cacheHitRatio: number;
+}
+
+export interface VoiceLatencyReport {
+  sampleCount: number;
+  ttfaAudio: VoicePercentileStats;
+  ttfaAction: VoicePercentileStats;
+  ttft: VoicePercentileStats;
+  tokenAverages: VoiceTokenBreakdown;
+  byTier: Record<VoiceTier, VoiceSegmentStats>;
+  byTransport: Record<VoiceTransportMode, VoiceSegmentStats>;
+  byTtsEngine: Record<VoiceTtsEngineKind, VoiceSegmentStats>;
+}
+
 export interface RunRecord {
   runId: string;
   startedAt: number;
@@ -52,6 +104,9 @@ export interface RunRecord {
   model?: string;
   reasoningSetting?: string;
   taskType?: string;
+  tier?: VoiceTier;
+  transport?: VoiceTransportMode;
+  ttsEngine?: VoiceTtsEngineKind;
   outcome?: 'success' | 'failure' | 'timeout' | 'cancelled';
   errorCategory?: string;
   exitCode?: number;
@@ -60,15 +115,24 @@ export interface RunRecord {
     completion?: number;
     cache?: number;
   };
+  tokenBreakdown?: VoiceTokenBreakdown;
   timestamps: {
     input?: number;
+    sttFinalizedAt?: number;
+    contextReadyAt?: number;
+    routerDecisionAt?: number;
     providerRequest?: number;
+    providerRequestAt?: number;
     firstToken?: number;
+    firstTokenAt?: number;
     toolCallEmission?: number;
     toolStart?: number;
+    firstActionStartAt?: number;
     toolEnd?: number;
     finalResponse?: number;
     terminalExecution?: number;
+    ttsRequestAt?: number;
+    firstAudioAt?: number;
   };
   toolCalls: RunToolCall[];
   terminalOutputs: RunTerminalOutput[];
@@ -129,9 +193,19 @@ export function redactSecrets(text: string): string {
 const NON_SECRET_TOKEN_TELEMETRY_KEYS = new Set([
   'tokencounts',
   'token_counts',
+  'tokenbreakdown',
+  'token_breakdown',
+  'systemstatictokens',
+  'contextdynamictokens',
+  'toolsschematokens',
+  'historytokens',
+  'prompttokenstotal',
+  'cachehitratio',
   'firsttoken',
+  'firsttokenat',
   'firsttokenms',
   'first_token',
+  'first_token_at',
   'first_token_ms',
   'prompttokens',
   'prompt_tokens',
@@ -383,6 +457,7 @@ export class RunLedger {
       run.model = details.model;
       run.reasoningSetting = details.reasoningSetting;
       run.timestamps.providerRequest = now;
+      run.timestamps.providerRequestAt = run.timestamps.providerRequestAt ?? now;
     }
 
     this.addEvent(runId, 'provider_request', {
@@ -395,11 +470,77 @@ export class RunLedger {
   public recordFirstToken(runId: string, timestamp?: number): void {
     const ts = timestamp || Date.now();
     const run = this.runs.get(runId);
-    if (run && !run.timestamps.firstToken) {
-      run.timestamps.firstToken = ts;
+    if (run) {
+      if (!run.timestamps.firstToken) {
+        run.timestamps.firstToken = ts;
+      }
+      if (!run.timestamps.firstTokenAt) {
+        run.timestamps.firstTokenAt = ts;
+      }
     }
 
     this.addEvent(runId, 'provider_first_token', { timestamp: ts });
+  }
+
+  public recordVoiceMilestones(runId: string, milestones: VoiceLatencyMilestones): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    if (milestones.sttFinalizedAt !== undefined) {
+      run.timestamps.sttFinalizedAt = milestones.sttFinalizedAt;
+    }
+    if (milestones.contextReadyAt !== undefined) {
+      run.timestamps.contextReadyAt = milestones.contextReadyAt;
+    }
+    if (milestones.routerDecisionAt !== undefined) {
+      run.timestamps.routerDecisionAt = milestones.routerDecisionAt;
+    }
+    if (milestones.providerRequestAt !== undefined) {
+      run.timestamps.providerRequestAt = milestones.providerRequestAt;
+      run.timestamps.providerRequest = run.timestamps.providerRequest ?? milestones.providerRequestAt;
+    }
+    if (milestones.firstTokenAt !== undefined) {
+      run.timestamps.firstTokenAt = milestones.firstTokenAt;
+      run.timestamps.firstToken = run.timestamps.firstToken ?? milestones.firstTokenAt;
+    }
+    if (milestones.firstActionStartAt !== undefined) {
+      run.timestamps.firstActionStartAt = milestones.firstActionStartAt;
+      run.timestamps.toolStart = run.timestamps.toolStart ?? milestones.firstActionStartAt;
+    }
+    if (milestones.ttsRequestAt !== undefined) {
+      run.timestamps.ttsRequestAt = milestones.ttsRequestAt;
+    }
+    if (milestones.firstAudioAt !== undefined && run.timestamps.firstAudioAt === undefined) {
+      run.timestamps.firstAudioAt = milestones.firstAudioAt;
+    }
+    this.persistToStorage();
+  }
+
+  public recordVoiceClassification(
+    runId: string,
+    details: {
+      tier?: VoiceTier;
+      transport?: VoiceTransportMode;
+      ttsEngine?: VoiceTtsEngineKind;
+    }
+  ): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    if (details.tier) run.tier = details.tier;
+    if (details.transport) run.transport = details.transport;
+    if (details.ttsEngine) run.ttsEngine = details.ttsEngine;
+    this.persistToStorage();
+  }
+
+  public recordTokenBreakdown(runId: string, breakdown: VoiceTokenBreakdown): void {
+    const run = this.runs.get(runId);
+    if (!run) return;
+    run.tokenBreakdown = { ...breakdown };
+    run.tokenCounts = {
+      prompt: breakdown.promptTokensTotal,
+      completion: breakdown.completionTokens,
+      cache: breakdown.cachedTokens,
+    };
+    this.persistToStorage();
   }
 
   public recordProviderResponse(
@@ -697,6 +838,27 @@ export class RunLedger {
     return result;
   }
 
+  public getRecentRunSummaries(limit = 5): Array<{
+    runId: string;
+    taskType?: string;
+    provider?: string;
+    outcome?: RunRecord['outcome'];
+    durationMs?: number;
+    startedAt: number;
+  }> {
+    return this.getRuns()
+      .slice(-Math.max(1, limit))
+      .reverse()
+      .map((r) => ({
+        runId: r.runId,
+        taskType: r.taskType,
+        provider: r.provider,
+        outcome: r.outcome,
+        durationMs: r.durationMs,
+        startedAt: r.startedAt,
+      }));
+  }
+
   public getLatencyPercentiles(
     source?: RunLedgerFilter | RunRecord[]
   ): { p50: number; p95: number; count: number; avg: number; min: number; max: number } {
@@ -716,6 +878,132 @@ export class RunLedger {
     const p95 = calculatePercentile(latencies, 95);
 
     return { p50, p95, count, avg, min, max };
+  }
+
+  public getVoiceLatencyReport(source?: RunLedgerFilter | RunRecord[]): VoiceLatencyReport {
+    const list = Array.isArray(source) ? source : this.getRuns(source);
+
+    const summarize = (samples: number[]): VoicePercentileStats => {
+      if (samples.length === 0) {
+        return { count: 0, p50: 0, p95: 0, p99: 0, avg: 0 };
+      }
+      const sum = samples.reduce((acc, v) => acc + v, 0);
+      return {
+        count: samples.length,
+        p50: calculatePercentile(samples, 50),
+        p95: calculatePercentile(samples, 95),
+        p99: calculatePercentile(samples, 99),
+        avg: Math.round(sum / samples.length),
+      };
+    };
+
+    const computeSegment = (records: RunRecord[]): VoiceSegmentStats => {
+      const ttfaSamples: number[] = [];
+      const ttftSamples: number[] = [];
+      let cacheSum = 0;
+      let cacheCount = 0;
+
+      for (const r of records) {
+        const t0 = r.timestamps.sttFinalizedAt ?? r.timestamps.input ?? r.startedAt;
+        if (r.timestamps.firstAudioAt !== undefined && r.timestamps.firstAudioAt >= t0) {
+          ttfaSamples.push(r.timestamps.firstAudioAt - t0);
+        }
+        const firstTok = r.timestamps.firstTokenAt ?? r.timestamps.firstToken;
+        if (firstTok !== undefined && firstTok >= t0) {
+          ttftSamples.push(firstTok - t0);
+        }
+        if (r.tokenBreakdown) {
+          cacheSum += r.tokenBreakdown.cacheHitRatio;
+          cacheCount += 1;
+        }
+      }
+
+      return {
+        count: records.length,
+        ttfaAudio: summarize(ttfaSamples),
+        ttft: summarize(ttftSamples),
+        cacheHitRatio: cacheCount > 0 ? Number((cacheSum / cacheCount).toFixed(4)) : 0,
+      };
+    };
+
+    const voiceRuns = list.filter(
+      (r) =>
+        r.tier !== undefined ||
+        r.transport !== undefined ||
+        r.ttsEngine !== undefined ||
+        r.timestamps.sttFinalizedAt !== undefined ||
+        r.timestamps.firstAudioAt !== undefined ||
+        r.tokenBreakdown !== undefined
+    );
+
+    const ttfaAudioSamples: number[] = [];
+    const ttfaActionSamples: number[] = [];
+    const ttftSamples: number[] = [];
+    const breakdowns: VoiceTokenBreakdown[] = [];
+
+    for (const r of voiceRuns) {
+      const t0 = r.timestamps.sttFinalizedAt ?? r.timestamps.input ?? r.startedAt;
+      if (r.timestamps.firstAudioAt !== undefined && r.timestamps.firstAudioAt >= t0) {
+        ttfaAudioSamples.push(r.timestamps.firstAudioAt - t0);
+      }
+      const actionStart = r.timestamps.firstActionStartAt ?? r.timestamps.toolStart;
+      if (actionStart !== undefined && actionStart >= t0) {
+        ttfaActionSamples.push(actionStart - t0);
+      }
+      const firstTok = r.timestamps.firstTokenAt ?? r.timestamps.firstToken;
+      if (firstTok !== undefined && firstTok >= t0) {
+        ttftSamples.push(firstTok - t0);
+      }
+      if (r.tokenBreakdown) {
+        breakdowns.push(r.tokenBreakdown);
+      }
+    }
+
+    const avgField = (pick: (b: VoiceTokenBreakdown) => number): number => {
+      if (breakdowns.length === 0) return 0;
+      const sum = breakdowns.reduce((acc, item) => acc + pick(item), 0);
+      return Math.round(sum / breakdowns.length);
+    };
+
+    const avgRatio =
+      breakdowns.length > 0
+        ? Number(
+            (
+              breakdowns.reduce((acc, item) => acc + item.cacheHitRatio, 0) / breakdowns.length
+            ).toFixed(4)
+          )
+        : 0;
+
+    return {
+      sampleCount: voiceRuns.length,
+      ttfaAudio: summarize(ttfaAudioSamples),
+      ttfaAction: summarize(ttfaActionSamples),
+      ttft: summarize(ttftSamples),
+      tokenAverages: {
+        systemStaticTokens: avgField((b) => b.systemStaticTokens),
+        contextDynamicTokens: avgField((b) => b.contextDynamicTokens),
+        toolsSchemaTokens: avgField((b) => b.toolsSchemaTokens),
+        historyTokens: avgField((b) => b.historyTokens),
+        promptTokensTotal: avgField((b) => b.promptTokensTotal),
+        cachedTokens: avgField((b) => b.cachedTokens),
+        completionTokens: avgField((b) => b.completionTokens),
+        cacheHitRatio: avgRatio,
+      },
+      byTier: {
+        L0: computeSegment(voiceRuns.filter((r) => r.tier === 'L0')),
+        L1: computeSegment(voiceRuns.filter((r) => r.tier === 'L1')),
+        L2: computeSegment(voiceRuns.filter((r) => r.tier === 'L2')),
+      },
+      byTransport: {
+        cascaded: computeSegment(voiceRuns.filter((r) => (r.transport ?? 'cascaded') === 'cascaded')),
+        realtime: computeSegment(voiceRuns.filter((r) => r.transport === 'realtime')),
+      },
+      byTtsEngine: {
+        elevenlabs_ws: computeSegment(voiceRuns.filter((r) => r.ttsEngine === 'elevenlabs_ws')),
+        elevenlabs_http: computeSegment(voiceRuns.filter((r) => r.ttsEngine === 'elevenlabs_http')),
+        browser: computeSegment(voiceRuns.filter((r) => r.ttsEngine === 'browser')),
+      },
+    };
   }
 
   public clearHistory(): void {

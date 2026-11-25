@@ -52,14 +52,18 @@ export interface SttEndTraceEvent extends BaseTraceEvent {
   durationMs?: number;
   chars?: number;
   fallback?: boolean;
+  sttFinalizedAt?: number;
 }
 
 export interface IntentRouteTraceEvent extends BaseTraceEvent {
   ev: 'intent.route';
   route: 'heuristic' | 'llm' | 'clarification' | 'negation';
+  tier?: 'L0' | 'L1' | 'L2';
+  transport?: 'cascaded' | 'realtime';
   reason?: string;
   rawInput?: string;
   normalizedInput?: string;
+  routerDecisionAt?: number;
 }
 
 export interface LlmFirstTokenTraceEvent extends BaseTraceEvent {
@@ -67,18 +71,21 @@ export interface LlmFirstTokenTraceEvent extends BaseTraceEvent {
   provider?: string;
   model?: string;
   firstTokenMs?: number;
+  firstTokenAt?: number;
 }
 
 export interface TtsFirstSentenceTraceEvent extends BaseTraceEvent {
   ev: 'tts.first_sentence';
   chars?: number;
   streamed?: boolean;
+  ttsRequestAt?: number;
 }
 
 export interface TtsFirstAudioTraceEvent extends BaseTraceEvent {
   ev: 'tts.first_audio';
-  engine?: 'elevenlabs' | 'browser' | string;
+  engine?: 'elevenlabs_ws' | 'elevenlabs_http' | 'elevenlabs' | 'browser' | string;
   ttfaMs?: number;
+  firstAudioAt?: number;
 }
 
 export interface TurnStartTraceEvent extends BaseTraceEvent {
@@ -171,6 +178,19 @@ export interface TurnEndTraceEvent extends BaseTraceEvent {
   error?: string;
   reply?: string;
   turnResult?: any;
+  tier?: 'L0' | 'L1' | 'L2';
+  transport?: 'cascaded' | 'realtime';
+  ttsEngine?: 'elevenlabs_ws' | 'elevenlabs_http' | 'browser';
+  tokenBreakdown?: {
+    systemStaticTokens: number;
+    contextDynamicTokens: number;
+    toolsSchemaTokens: number;
+    historyTokens: number;
+    promptTokensTotal: number;
+    cachedTokens: number;
+    completionTokens: number;
+    cacheHitRatio: number;
+  };
 }
 
 export type TraceEvent =
@@ -197,6 +217,7 @@ export interface LatencyPercentileBucket {
   count: number;
   p50: number;
   p95: number;
+  p99?: number;
   avg: number;
 }
 

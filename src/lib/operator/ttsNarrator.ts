@@ -6,8 +6,9 @@
 //     and natural neural voice prioritization.
 import { sanitizeReply } from './planner/sanitize';
 import { loadOperatorConfig, syncNativeCredentialsWithVault } from './operatorConfig';
-import { normalizeForVoiceSpeech } from './voice/speechProsody';
+import { normalizeForVoiceSpeech, SpeechSentenceQueue } from './voice/speechProsody';
 import { emitTrace } from './trace/trace';
+import { runLedger } from './runLedger';
 
 export interface TTSOptions {
   lang?: string; // Default: 'es-ES' or 'en-US'
@@ -23,8 +24,10 @@ export interface TTSOptions {
   elevenlabsSimilarity?: number;
   /** Optional turnId for emitting `tts.first_audio` latency traces. */
   turnId?: string;
-  /** Optional turn start timestamp used to calculate TTFA (`ttfaMs`). */
+  /** Optional turn start / STT finalized timestamp used to calculate TTFA (`ttfaMs`). */
   turnStartedAt?: number;
+  /** Optional STT finalization timestamp (`t = 0`) for Voice SLI reporting. */
+  sttFinalizedAt?: number;
   onStart?: () => void;
   onFirstAudio?: () => void;
   onEnd?: () => void;
@@ -203,15 +206,90 @@ export function splitIntoSpeechSentences(text: string): string[] {
   return chunks.length > 0 ? chunks : [text];
 }
 
+export interface InterruptedPlaybackInfo {
+  playedText: string;
+  audioEndMs: number;
+}
+
+export function estimateSpeechDurationMs(text: string, rate: number = 1.0): number {
+  const clean = (text || '').trim();
+  if (!clean) return 0;
+  const safeRate = Number.isFinite(rate) && rate > 0 ? Math.min(2.0, Math.max(0.5, rate)) : 1.0;
+  // ~14.5 characters per second at 1.0x natural speaking cadence
+  return Math.max(350, Math.round((clean.length / (14.5 * safeRate)) * 1000));
+}
+
+/**
+ * Truncates `text` to the portion proportionally heard in `heardMs` out of `durationMs`,
+ * snapping cleanly at a word boundary so partial words are never emitted.
+ */
+export function truncateTextToHeardMs(
+  text: string,
+  heardMs: number,
+  durationMs?: number
+): string {
+  const clean = (text || '').trim();
+  if (!clean) return '';
+  if (!Number.isFinite(heardMs) || heardMs <= 0) return '';
+
+  const totalMs =
+    typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs > 0
+      ? durationMs
+      : estimateSpeechDurationMs(clean);
+  if (totalMs <= 0) return '';
+
+  const ratio = Math.min(1, Math.max(0, heardMs / totalMs));
+  if (ratio >= 1) return clean;
+
+  const targetChars = Math.floor(clean.length * ratio);
+  if (targetChars <= 0) return '';
+  if (targetChars >= clean.length) return clean;
+
+  if (/\s/.test(clean[targetChars])) {
+    return clean.slice(0, targetChars).trim();
+  }
+
+  const prefix = clean.slice(0, targetChars);
+  const lastSpaceMatch = /\s(?=\S*$)/.exec(prefix);
+  if (lastSpaceMatch && lastSpaceMatch.index > 0) {
+    return prefix.slice(0, lastSpaceMatch.index).trim();
+  }
+
+  if (!/\s/.test(clean) && ratio >= 0.5) {
+    return clean;
+  }
+
+  return '';
+}
+
 class TTSNarrator {
   private speaking = false;
   private activeUtterance: SpeechSynthesisUtterance | null = null;
   private activeAudio: HTMLAudioElement | null = null;
   private activeAudioUrl: string | null = null;
+  private activeAudioContext: AudioContext | null = null;
+  private activeGainNode: GainNode | null = null;
   private activeAbortController: AbortController | null = null;
+  private activeInterruptResolvers = new Set<() => void>();
+  private rampStepInterval: ReturnType<typeof setInterval> | null = null;
+  private rampFinishTimer: ReturnType<typeof setTimeout> | null = null;
+  private rampingAudio: HTMLAudioElement | null = null;
+  private rampingAudioUrl: string | null = null;
+  private rampingAudioContext: AudioContext | null = null;
+  private rampingGainNode: GainNode | null = null;
   private safetyTimer: any = null;
   private keepAliveInterval: any = null;
   private generation = 0;
+
+  // Heard-audio tracking for exact barge-in truncation
+  private activeSpokenText = '';
+  private spokenSentenceStartMs = 0;
+  private estimatedTotalDurationMs = 0;
+  private playedSentences: string[] = [];
+  private completedAudioDurationMs = 0;
+  private lastInterruptedPrefix = '';
+  private lastAudioEndMs = 0;
+  private hasInterruptedPlayback = false;
 
   public isAvailable(): boolean {
     if (typeof window === 'undefined') return false;
@@ -231,8 +309,216 @@ class TTSNarrator {
     return getAvailableVoices();
   }
 
+  public getLastInterruptedPlayback(): InterruptedPlaybackInfo | null {
+    if (!this.hasInterruptedPlayback) return null;
+    return {
+      playedText: this.lastInterruptedPrefix,
+      audioEndMs: this.lastAudioEndMs,
+    };
+  }
+
+  private beginUtteranceTracking(text: string, rate: number = 1.0): void {
+    this.activeSpokenText = text.trim();
+    this.spokenSentenceStartMs = 0;
+    this.estimatedTotalDurationMs = estimateSpeechDurationMs(this.activeSpokenText, rate);
+  }
+
+  private markUtterancePlaybackStarted(): void {
+    if (!this.spokenSentenceStartMs) {
+      this.spokenSentenceStartMs = Date.now();
+    }
+  }
+
+  private markUtteranceCompleted(text: string): void {
+    const clean = text.trim();
+    if (clean) {
+      this.playedSentences.push(clean);
+    }
+    const audioCurrentMs =
+      this.activeAudio &&
+      Number.isFinite(this.activeAudio.currentTime) &&
+      this.activeAudio.currentTime > 0
+        ? this.activeAudio.currentTime * 1000
+        : 0;
+    const elapsedMs =
+      audioCurrentMs > 0
+        ? audioCurrentMs
+        : this.spokenSentenceStartMs > 0
+          ? Math.max(0, Date.now() - this.spokenSentenceStartMs)
+          : this.estimatedTotalDurationMs;
+    this.completedAudioDurationMs += Math.max(0, Math.round(elapsedMs));
+    this.activeSpokenText = '';
+    this.spokenSentenceStartMs = 0;
+    this.estimatedTotalDurationMs = 0;
+  }
+
+  private resetTurnPlaybackState(clearInterruptedRecord: boolean): void {
+    this.activeSpokenText = '';
+    this.spokenSentenceStartMs = 0;
+    this.estimatedTotalDurationMs = 0;
+    this.playedSentences = [];
+    this.completedAudioDurationMs = 0;
+    if (clearInterruptedRecord) {
+      this.lastInterruptedPrefix = '';
+      this.lastAudioEndMs = 0;
+      this.hasInterruptedPlayback = false;
+    }
+  }
+
+  private captureInterruptedPlayback(): InterruptedPlaybackInfo {
+    const hasTurnContent =
+      Boolean(this.activeSpokenText) || this.playedSentences.length > 0;
+    if (!hasTurnContent) {
+      return this.hasInterruptedPlayback
+        ? { playedText: this.lastInterruptedPrefix, audioEndMs: this.lastAudioEndMs }
+        : { playedText: '', audioEndMs: 0 };
+    }
+
+    const audioCurrentMs =
+      this.activeAudio &&
+      Number.isFinite(this.activeAudio.currentTime) &&
+      this.activeAudio.currentTime > 0
+        ? this.activeAudio.currentTime * 1000
+        : 0;
+    const activeHeardMs =
+      audioCurrentMs > 0
+        ? Math.round(audioCurrentMs)
+        : this.spokenSentenceStartMs > 0
+          ? Math.max(0, Date.now() - this.spokenSentenceStartMs)
+          : 0;
+
+    const audioDurationMs =
+      this.activeAudio &&
+      Number.isFinite(this.activeAudio.duration) &&
+      this.activeAudio.duration > 0
+        ? this.activeAudio.duration * 1000
+        : 0;
+    const totalEstimatedMs =
+      audioDurationMs > 0 ? audioDurationMs : this.estimatedTotalDurationMs;
+
+    const activePrefix =
+      this.activeSpokenText && activeHeardMs > 0
+        ? truncateTextToHeardMs(this.activeSpokenText, activeHeardMs, totalEstimatedMs)
+        : '';
+
+    const combinedParts = [...this.playedSentences];
+    if (activePrefix) {
+      combinedParts.push(activePrefix);
+    }
+
+    const playedText = combinedParts.join(' ').trim();
+    const audioEndMs = Math.max(0, this.completedAudioDurationMs + activeHeardMs);
+
+    this.lastInterruptedPrefix = playedText;
+    this.lastAudioEndMs = audioEndMs;
+    this.hasInterruptedPlayback = true;
+    this.resetTurnPlaybackState(false);
+
+    return { playedText, audioEndMs };
+  }
+
+  private detachAudioGain(): void {
+    if (this.activeGainNode) {
+      try {
+        this.activeGainNode.disconnect();
+      } catch {}
+      this.activeGainNode = null;
+    }
+    if (this.activeAudioContext) {
+      try {
+        void this.activeAudioContext.close();
+      } catch {}
+      this.activeAudioContext = null;
+    }
+  }
+
+  private attachAudioGain(audio: HTMLAudioElement, volume: number): void {
+    this.detachAudioGain();
+    if (typeof window === 'undefined') return;
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (typeof AudioCtx !== 'function') return;
+    try {
+      const ctx = new AudioCtx();
+      if (ctx.state === 'suspended') {
+        try {
+          void ctx.close();
+        } catch {}
+        return;
+      }
+      if (
+        typeof ctx.createMediaElementSource !== 'function' ||
+        typeof ctx.createGain !== 'function'
+      ) {
+        try {
+          void ctx.close();
+        } catch {}
+        return;
+      }
+      const source = ctx.createMediaElementSource(audio);
+      const gain = ctx.createGain();
+      gain.gain.value = volume;
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      this.activeAudioContext = ctx;
+      this.activeGainNode = gain;
+    } catch {
+      this.detachAudioGain();
+    }
+  }
+
+  private finalizeRampingAudio(): void {
+    if (this.rampStepInterval) {
+      clearInterval(this.rampStepInterval);
+      this.rampStepInterval = null;
+    }
+    if (this.rampFinishTimer) {
+      clearTimeout(this.rampFinishTimer);
+      this.rampFinishTimer = null;
+    }
+    if (this.rampingAudio) {
+      try {
+        this.rampingAudio.pause();
+        this.rampingAudio.currentTime = 0;
+        this.rampingAudio.src = '';
+      } catch {}
+      this.rampingAudio = null;
+    }
+    if (this.rampingAudioUrl) {
+      try {
+        URL.revokeObjectURL(this.rampingAudioUrl);
+      } catch {}
+      this.rampingAudioUrl = null;
+    }
+    if (this.rampingGainNode) {
+      try {
+        this.rampingGainNode.disconnect();
+      } catch {}
+      this.rampingGainNode = null;
+    }
+    if (this.rampingAudioContext) {
+      try {
+        void this.rampingAudioContext.close();
+      } catch {}
+      this.rampingAudioContext = null;
+    }
+  }
+
+  private resolveActiveInterrupts(): void {
+    if (this.activeInterruptResolvers.size === 0) return;
+    const resolvers = Array.from(this.activeInterruptResolvers);
+    this.activeInterruptResolvers.clear();
+    for (const resolve of resolvers) {
+      try {
+        resolve();
+      } catch {}
+    }
+  }
+
   public stop(): void {
     this.generation++;
+    this.captureInterruptedPlayback();
+    this.finalizeRampingAudio();
+    this.detachAudioGain();
     if (this.activeAbortController) {
       try {
         this.activeAbortController.abort();
@@ -263,11 +549,114 @@ class TTSNarrator {
     }
     this.speaking = false;
     this.activeUtterance = null;
+    this.resolveActiveInterrupts();
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
       } catch {}
     }
+  }
+
+  /**
+   * Interrupts TTS playback immediately logically, applying a smooth `rampMs` (default 20ms)
+   * volume/gain fade-out on active audio before pausing, and returns the exact heard prefix
+   * (`playedText`) and elapsed audio timestamp (`audioEndMs`).
+   */
+  public stopWithRamp(rampMs: number = 20): InterruptedPlaybackInfo {
+    this.generation++;
+    const info = this.captureInterruptedPlayback();
+    this.finalizeRampingAudio();
+
+    if (this.activeAbortController) {
+      try {
+        this.activeAbortController.abort();
+      } catch {}
+      this.activeAbortController = null;
+    }
+    if (this.safetyTimer) {
+      clearTimeout(this.safetyTimer);
+      this.safetyTimer = null;
+    }
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval);
+      this.keepAliveInterval = null;
+    }
+    this.speaking = false;
+    this.activeUtterance = null;
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+    }
+
+    const audio = this.activeAudio;
+    const audioUrl = this.activeAudioUrl;
+    const gainNode = this.activeGainNode;
+    const audioCtx = this.activeAudioContext;
+    this.activeAudio = null;
+    this.activeAudioUrl = null;
+    this.activeGainNode = null;
+    this.activeAudioContext = null;
+    this.resolveActiveInterrupts();
+
+    if (audio && rampMs > 0) {
+      const safeRampMs = Math.max(4, Math.min(200, Math.round(rampMs)));
+      this.rampingAudio = audio;
+      this.rampingAudioUrl = audioUrl;
+      this.rampingGainNode = gainNode;
+      this.rampingAudioContext = audioCtx;
+
+      if (gainNode && audioCtx) {
+        try {
+          const now = audioCtx.currentTime ?? 0;
+          const gainParam = gainNode.gain;
+          if (typeof gainParam.setValueAtTime === 'function') {
+            gainParam.setValueAtTime(gainParam.value ?? 1, now);
+          }
+          if (typeof gainParam.linearRampToValueAtTime === 'function') {
+            gainParam.linearRampToValueAtTime(0, now + safeRampMs / 1000);
+          } else {
+            gainParam.value = 0;
+          }
+        } catch {}
+      }
+
+      const startVolume = typeof audio.volume === 'number' ? Math.max(0, Math.min(1, audio.volume)) : 1;
+      const steps = 4;
+      const stepMs = Math.max(1, Math.floor(safeRampMs / steps));
+      let stepIndex = 0;
+      this.rampStepInterval = setInterval(() => {
+        stepIndex += 1;
+        const ratio = Math.max(0, 1 - stepIndex / steps);
+        try {
+          audio.volume = startVolume * ratio;
+        } catch {}
+        if (stepIndex >= steps && this.rampStepInterval) {
+          clearInterval(this.rampStepInterval);
+          this.rampStepInterval = null;
+        }
+      }, stepMs);
+
+      this.rampFinishTimer = setTimeout(() => {
+        this.finalizeRampingAudio();
+      }, safeRampMs);
+    } else {
+      if (audio) {
+        try {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.src = '';
+        } catch {}
+      }
+      if (audioUrl) {
+        try {
+          URL.revokeObjectURL(audioUrl);
+        } catch {}
+      }
+      this.detachAudioGain();
+    }
+
+    return info;
   }
 
   public pause(): void {
@@ -296,12 +685,79 @@ class TTSNarrator {
     }
   }
 
+  public createStreamingQueue(optionsOrLang: TTSOptions | string = {}): SpeechSentenceQueue {
+    const options: TTSOptions =
+      typeof optionsOrLang === 'string' ? { lang: optionsOrLang } : optionsOrLang;
+    // Reset any prior audio once at the start of the streaming utterance
+    this.stop();
+    this.resetTurnPlaybackState(true);
+    const streamGen = this.generation;
+    let firstNotified = false;
+
+    return new SpeechSentenceQueue({
+      onFirstSentence: () => {
+        if (!firstNotified) {
+          firstNotified = true;
+          options.onStart?.();
+        }
+      },
+      speakSentence: async (sentence, index) => {
+        if (this.generation !== streamGen) return;
+        await this.speakSentenceWithoutReset(sentence, {
+          ...options,
+          onStart: index === 0 && !firstNotified ? options.onStart : undefined,
+          onEnd: undefined,
+        }, streamGen);
+      },
+      onComplete: () => {
+        if (this.generation === streamGen) {
+          this.resetTurnPlaybackState(true);
+          options.onEnd?.();
+        }
+      },
+      onError: options.onError,
+    });
+  }
+
+  private async speakSentenceWithoutReset(
+    text: string,
+    options: TTSOptions,
+    myGen: number
+  ): Promise<void> {
+    if (this.generation !== myGen) return;
+    const sanitized = sanitizeReply(text, '', 2000);
+    const textToSpeak = cleanTextForSpeech(sanitized);
+    if (!textToSpeak) return;
+
+    let config: any = null;
+    try {
+      config = loadOperatorConfig();
+    } catch {}
+
+    const engine = options.engine || config?.ttsEngine || 'browser';
+    const apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
+    if (engine === 'elevenlabs' && apiKey.length > 0) {
+      try {
+        await this.speakElevenLabs(textToSpeak, { ...options, onError: undefined }, config, myGen);
+        return;
+      } catch (err: any) {
+        if (this.generation !== myGen || err?.name === 'AbortError' || err?.code === 20) {
+          return;
+        }
+      }
+    }
+
+    if (this.generation !== myGen) return;
+    return this.speakBrowser(textToSpeak, options, myGen);
+  }
+
   public async speak(text: string, optionsOrLang: TTSOptions | string = {}): Promise<void> {
     const options: TTSOptions =
       typeof optionsOrLang === 'string' ? { lang: optionsOrLang } : optionsOrLang;
 
     // Cancel any previous speech and record generation
     this.stop();
+    this.resetTurnPlaybackState(true);
     const myGen = this.generation;
 
     // Sanitize to prevent prompt echo, code fences or noise from reaching TTS
@@ -328,6 +784,9 @@ class TTSNarrator {
         // Suppress caller onError during ElevenLabs attempt so playback/stream failures
         // fall back cleanly to speakBrowser without prematurely re-arming the mic or calling stop().
         await this.speakElevenLabs(textToSpeak, { ...options, onError: undefined }, config, myGen);
+        if (this.generation === myGen) {
+          this.resetTurnPlaybackState(true);
+        }
         return;
       } catch (err: any) {
         // If interrupted, stopped by user, or superseded, NEVER fall back to local voice!
@@ -354,7 +813,10 @@ class TTSNarrator {
       return;
     }
 
-    return this.speakBrowser(textToSpeak, options, myGen);
+    await this.speakBrowser(textToSpeak, options, myGen);
+    if (this.generation === myGen) {
+      this.resetTurnPlaybackState(true);
+    }
   }
 
   private async speakElevenLabs(
@@ -371,6 +833,8 @@ class TTSNarrator {
     const stability = options.elevenlabsStability ?? config?.elevenlabsStability ?? 0.5;
     const similarity = options.elevenlabsSimilarity ?? config?.elevenlabsSimilarity ?? 0.8;
     const speed = options.rate ?? config?.ttsRate ?? 1.0;
+
+    this.beginUtteranceTracking(textToSpeak, speed);
 
     const controller = new AbortController();
     this.activeAbortController = controller;
@@ -417,14 +881,21 @@ class TTSNarrator {
         const audio = new Audio(audioUrl);
         this.activeAudio = audio;
         audio.volume = options.volume ?? 1.0;
+        this.attachAudioGain(audio, audio.volume);
 
         let finished = false;
+        let onInterruptResolve: (() => void) | null = null;
         const cleanup = () => {
           if (finished) return;
           finished = true;
           this.speaking = false;
+          if (onInterruptResolve) {
+            this.activeInterruptResolvers.delete(onInterruptResolve);
+            onInterruptResolve = null;
+          }
           if (this.activeAudio === audio) {
             this.activeAudio = null;
+            this.detachAudioGain();
           }
           if (this.activeAudioUrl === audioUrl) {
             try {
@@ -437,6 +908,12 @@ class TTSNarrator {
           }
         };
 
+        onInterruptResolve = () => {
+          cleanup();
+          resolve();
+        };
+        this.activeInterruptResolvers.add(onInterruptResolve);
+
         audio.onplay = () => {
           if (this.generation !== myGen || controller.signal.aborted) {
             cleanup();
@@ -447,14 +924,24 @@ class TTSNarrator {
             return;
           }
           this.speaking = true;
+          this.markUtterancePlaybackStarted();
+          const firstAudioTs = Date.now();
           options.onFirstAudio?.();
           if (options.turnId) {
             try {
+              const t0 = options.sttFinalizedAt ?? options.turnStartedAt;
+              runLedger.recordVoiceClassification(options.turnId, {
+                ttsEngine: 'elevenlabs_http',
+              });
+              runLedger.recordVoiceMilestones(options.turnId, {
+                firstAudioAt: firstAudioTs,
+              });
               emitTrace({
                 turnId: options.turnId,
                 ev: 'tts.first_audio',
-                engine: 'elevenlabs',
-                ttfaMs: options.turnStartedAt ? Math.max(0, Date.now() - options.turnStartedAt) : undefined,
+                engine: 'elevenlabs_http',
+                firstAudioAt: firstAudioTs,
+                ttfaMs: t0 ? Math.max(0, firstAudioTs - t0) : undefined,
               });
             } catch {}
           }
@@ -462,6 +949,9 @@ class TTSNarrator {
         };
 
         audio.onended = () => {
+          if (this.generation === myGen) {
+            this.markUtteranceCompleted(textToSpeak);
+          }
           cleanup();
           options.onEnd?.();
           resolve();
@@ -586,14 +1076,21 @@ class TTSNarrator {
       const audio = new Audio(audioUrl);
       this.activeAudio = audio;
       audio.volume = options.volume ?? 1.0;
+      this.attachAudioGain(audio, audio.volume);
 
       let finished = false;
+      let onInterruptResolve: (() => void) | null = null;
       const cleanup = () => {
         if (finished) return;
         finished = true;
         this.speaking = false;
+        if (onInterruptResolve) {
+          this.activeInterruptResolvers.delete(onInterruptResolve);
+          onInterruptResolve = null;
+        }
         if (this.activeAudio === audio) {
           this.activeAudio = null;
+          this.detachAudioGain();
         }
         if (this.activeAudioUrl === audioUrl) {
           try {
@@ -606,6 +1103,12 @@ class TTSNarrator {
         }
       };
 
+      onInterruptResolve = () => {
+        cleanup();
+        resolve();
+      };
+      this.activeInterruptResolvers.add(onInterruptResolve);
+
       audio.onplay = () => {
         if (this.generation !== myGen || controller.signal.aborted) {
           cleanup();
@@ -616,10 +1119,34 @@ class TTSNarrator {
           return;
         }
         this.speaking = true;
+        this.markUtterancePlaybackStarted();
+        const firstAudioTs = Date.now();
+        options.onFirstAudio?.();
+        if (options.turnId) {
+          try {
+            const t0 = options.sttFinalizedAt ?? options.turnStartedAt;
+            runLedger.recordVoiceClassification(options.turnId, {
+              ttsEngine: 'elevenlabs_http',
+            });
+            runLedger.recordVoiceMilestones(options.turnId, {
+              firstAudioAt: firstAudioTs,
+            });
+            emitTrace({
+              turnId: options.turnId,
+              ev: 'tts.first_audio',
+              engine: 'elevenlabs_http',
+              firstAudioAt: firstAudioTs,
+              ttfaMs: t0 ? Math.max(0, firstAudioTs - t0) : undefined,
+            });
+          } catch {}
+        }
         options.onStart?.();
       };
 
       audio.onended = () => {
+        if (this.generation === myGen) {
+          this.markUtteranceCompleted(textToSpeak);
+        }
         cleanup();
         options.onEnd?.();
         resolve();
@@ -687,10 +1214,15 @@ class TTSNarrator {
       let chunkIdx = 0;
       let hasStarted = false;
       let isDone = false;
+      let onInterruptResolve: (() => void) | null = null;
 
       const finishAll = () => {
         if (isDone) return;
         isDone = true;
+        if (onInterruptResolve) {
+          this.activeInterruptResolvers.delete(onInterruptResolve);
+          onInterruptResolve = null;
+        }
         if (this.keepAliveInterval) {
           clearInterval(this.keepAliveInterval);
           this.keepAliveInterval = null;
@@ -703,6 +1235,9 @@ class TTSNarrator {
         this.activeUtterance = null;
         resolve();
       };
+
+      onInterruptResolve = () => finishAll();
+      this.activeInterruptResolvers.add(onInterruptResolve);
 
       if (this.keepAliveInterval) {
         clearInterval(this.keepAliveInterval);
@@ -728,6 +1263,8 @@ class TTSNarrator {
 
         const chunkText = chunks[chunkIdx];
         chunkIdx++;
+
+        this.beginUtteranceTracking(chunkText, tunedRate);
 
         const utterance = new SpeechSynthesisUtterance(chunkText);
         this.activeUtterance = utterance;
@@ -768,16 +1305,26 @@ class TTSNarrator {
             this.safetyTimer = null;
           }
           this.speaking = true;
+          this.markUtterancePlaybackStarted();
           if (!hasStarted) {
             hasStarted = true;
+            const firstAudioTs = Date.now();
             options.onFirstAudio?.();
             if (options.turnId) {
               try {
+                const t0 = options.sttFinalizedAt ?? options.turnStartedAt;
+                runLedger.recordVoiceClassification(options.turnId, {
+                  ttsEngine: 'browser',
+                });
+                runLedger.recordVoiceMilestones(options.turnId, {
+                  firstAudioAt: firstAudioTs,
+                });
                 emitTrace({
                   turnId: options.turnId,
                   ev: 'tts.first_audio',
                   engine: 'browser',
-                  ttfaMs: options.turnStartedAt ? Math.max(0, Date.now() - options.turnStartedAt) : undefined,
+                  firstAudioAt: firstAudioTs,
+                  ttfaMs: t0 ? Math.max(0, firstAudioTs - t0) : undefined,
                 });
               } catch {}
             }
@@ -786,6 +1333,9 @@ class TTSNarrator {
         };
 
         utterance.onend = () => {
+          if (myGen === undefined || this.generation === myGen) {
+            this.markUtteranceCompleted(chunkText);
+          }
           finishChunk();
           speakNextChunk();
         };

@@ -566,4 +566,123 @@ describe('Run Ledger — T9 Integration Scenarios', () => {
     expect(args.tokenCounts).toEqual({ prompt: 10 });
     expect(args.firstTokenMs).toBe(250);
   });
+
+  it('S1/T1: records voice milestones, granular tokenBreakdown without secret leak, and segmented p50/p95/p99 percentiles', () => {
+    const t0 = 1_700_000_000_000;
+
+    const r1 = ledger.startRun('hola argos Bearer sk-proj-topsecretvalue1234567890', {
+      runId: 'voice-run-1',
+      taskType: 'voice_turn',
+    });
+    ledger.recordVoiceClassification(r1, {
+      tier: 'L1',
+      transport: 'cascaded',
+      ttsEngine: 'elevenlabs_ws',
+    });
+    ledger.recordVoiceMilestones(r1, {
+      sttFinalizedAt: t0,
+      contextReadyAt: t0 + 35,
+      routerDecisionAt: t0 + 40,
+      providerRequestAt: t0 + 45,
+      firstTokenAt: t0 + 210,
+      firstActionStartAt: t0 + 230,
+      ttsRequestAt: t0 + 240,
+      firstAudioAt: t0 + 540,
+    });
+    ledger.recordTokenBreakdown(r1, {
+      systemStaticTokens: 420,
+      contextDynamicTokens: 110,
+      toolsSchemaTokens: 80,
+      historyTokens: 190,
+      promptTokensTotal: 800,
+      cachedTokens: 560,
+      completionTokens: 45,
+      cacheHitRatio: 0.7,
+    });
+    ledger.completeRun(r1, { outcome: 'success', reply: 'Todo listo.' });
+
+    const r2 = ledger.startRun('abre dos terminales', {
+      runId: 'voice-run-2',
+      taskType: 'voice_turn',
+    });
+    ledger.recordVoiceClassification(r2, {
+      tier: 'L0',
+      transport: 'cascaded',
+      ttsEngine: 'browser',
+    });
+    ledger.recordVoiceMilestones(r2, {
+      sttFinalizedAt: t0 + 10_000,
+      contextReadyAt: t0 + 10_005,
+      routerDecisionAt: t0 + 10_007,
+      firstActionStartAt: t0 + 10_012,
+      ttsRequestAt: t0 + 10_020,
+      firstAudioAt: t0 + 10_220,
+    });
+    ledger.completeRun(r2, { outcome: 'success', reply: 'Abriendo terminales.' });
+
+    const r3 = ledger.startRun('diagnostica arquitectura', {
+      runId: 'voice-run-3',
+      taskType: 'voice_turn',
+    });
+    ledger.recordVoiceClassification(r3, {
+      tier: 'L2',
+      transport: 'realtime',
+      ttsEngine: 'elevenlabs_ws',
+    });
+    ledger.recordVoiceMilestones(r3, {
+      sttFinalizedAt: t0 + 20_000,
+      contextReadyAt: t0 + 20_030,
+      routerDecisionAt: t0 + 20_035,
+      providerRequestAt: t0 + 20_040,
+      firstTokenAt: t0 + 20_180,
+      ttsRequestAt: t0 + 20_190,
+      firstAudioAt: t0 + 20_390,
+    });
+    ledger.recordTokenBreakdown(r3, {
+      systemStaticTokens: 420,
+      contextDynamicTokens: 150,
+      toolsSchemaTokens: 210,
+      historyTokens: 220,
+      promptTokensTotal: 1000,
+      cachedTokens: 600,
+      completionTokens: 90,
+      cacheHitRatio: 0.6,
+    });
+    ledger.completeRun(r3, { outcome: 'success', reply: 'Diagnóstico listo.' });
+
+    const run1 = ledger.getRun(r1)!;
+    expect(run1.tier).toBe('L1');
+    expect(run1.transport).toBe('cascaded');
+    expect(run1.ttsEngine).toBe('elevenlabs_ws');
+    expect(run1.timestamps.sttFinalizedAt).toBe(t0);
+    expect(run1.timestamps.firstAudioAt).toBe(t0 + 540);
+    expect(run1.tokenBreakdown).toEqual({
+      systemStaticTokens: 420,
+      contextDynamicTokens: 110,
+      toolsSchemaTokens: 80,
+      historyTokens: 190,
+      promptTokensTotal: 800,
+      cachedTokens: 560,
+      completionTokens: 45,
+      cacheHitRatio: 0.7,
+    });
+    expect(JSON.stringify(run1)).not.toContain('sk-proj-topsecretvalue1234567890');
+
+    const report = ledger.getVoiceLatencyReport();
+    expect(report.sampleCount).toBe(3);
+    // TTFA-Audio samples: [220, 390, 540]
+    expect(report.ttfaAudio.p50).toBe(390);
+    expect(report.ttfaAudio.p95).toBeGreaterThanOrEqual(525);
+    expect(report.ttfaAudio.p99).toBeGreaterThanOrEqual(537);
+    expect(report.byTier.L0.count).toBe(1);
+    expect(report.byTier.L0.ttfaAudio.p50).toBe(220);
+    expect(report.byTier.L1.ttfaAudio.p50).toBe(540);
+    expect(report.byTier.L2.ttfaAudio.p50).toBe(390);
+    expect(report.byTransport.cascaded.count).toBe(2);
+    expect(report.byTransport.realtime.ttfaAudio.p50).toBe(390);
+    expect(report.byTtsEngine.elevenlabs_ws.count).toBe(2);
+    expect(report.byTtsEngine.browser.count).toBe(1);
+    expect(report.tokenAverages.promptTokensTotal).toBe(900);
+    expect(report.tokenAverages.cacheHitRatio).toBeCloseTo(0.65, 2);
+  });
 });

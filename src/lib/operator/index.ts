@@ -7,7 +7,11 @@ import {
   type ActionReceipt,
 } from './contract';
 import { emitTrace } from './trace/trace';
-import { planTurnHeuristic } from './planner/heuristic';
+import {
+  hasExplicitImmediateExecutionCue,
+  isDirectLocalControlAction,
+  planTurnHeuristic,
+} from './planner/heuristic';
 import { planTurnLLM } from './planner/llm';
 import { normalizeSpanishVoiceStt } from './planner/voiceNormalizer';
 import { analyzeClausePolarity } from './planner/clausePolarity';
@@ -17,6 +21,7 @@ import {
   isDisambiguationCancellation,
 } from './planner/disambiguation';
 import { executePlan, composeReplyFromReceipts } from './executor';
+import { isPeekActionType } from './executor/actions/peekWorkspace';
 import { ttsNarrator } from './ttsNarrator';
 import { loadOperatorConfig } from './operatorConfig';
 import { runLedger } from './runLedger';
@@ -46,6 +51,7 @@ export * from './planner/llm';
 export * from './planner/sanitize';
 export * from './planner/prompt';
 export * from './executor';
+export * from './context/ctxClient';
 export * from './verify/postconditions';
 export * from './providers/types';
 export * from './providers/local';
@@ -60,11 +66,25 @@ export interface RunOperatorTurnOptions {
   ttsEnabled?: boolean;
   muted?: boolean;
   turnId?: string;
+  /** Timestamp (ms) when STT delivered the final transcript (`t = 0` for voice TTFA). */
+  sttFinalizedAt?: number;
   context?: TurnContext;
   /** Prior user and assistant messages from the operator run, oldest first. */
   history?: ProviderMessage[];
   /** Optional streaming callback invoked as each complete conversational sentence arrives from LLM. */
   onStreamSentence?: (sentence: string) => void;
+}
+
+/**
+ * Formats read-only ReAct observations concisely for multi-hop planning loops.
+ */
+export function formatReactObservation(receipts: ActionReceipt[]): string {
+  return receipts
+    .map(
+      (r) =>
+        `[Observación ${r.type}]: ${r.summaryEs}${r.data ? ` | ${JSON.stringify(r.data).slice(0, 400)}` : ''}`
+    )
+    .join('\n');
 }
 
 export interface OperatorTurnResult {
@@ -134,7 +154,20 @@ export async function runOperatorTurn(
 ): Promise<OperatorTurnResult> {
   ensureEpisodicSessionHook();
   const startTime = Date.now();
+  const sttFinalizedAt = options.sttFinalizedAt ?? (options.source === 'voz' ? startTime : undefined);
   const turnId = options.turnId || `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  if (!runLedger.getRun(turnId)) {
+    runLedger.startRun(input, {
+      runId: turnId,
+      taskType: options.source === 'voz' ? 'voice_turn' : 'operator_turn',
+    });
+  }
+  runLedger.recordVoiceClassification(turnId, {
+    transport: 'cascaded',
+  });
+  if (sttFinalizedAt !== undefined) {
+    runLedger.recordVoiceMilestones(turnId, { sttFinalizedAt });
+  }
   const context =
     options.context ||
     (await buildEnrichedTurnContext(options.mode, options.workspaceId).catch(() =>
@@ -143,6 +176,7 @@ export async function runOperatorTurn(
   if (context.workspaceId) {
     await loadWorkspaceEpisodicMemory(context.workspaceId).catch(() => {});
   }
+  runLedger.recordVoiceMilestones(turnId, { contextReadyAt: Date.now() });
 
   emitTrace({
     turnId,
@@ -212,7 +246,8 @@ export async function runOperatorTurn(
 
     // 2. Plan turn with Confidence-Gated Hybrid Router (Fast-Path Heuristic vs LLM Planner)
     let plan: OperatorPlan;
-    let fastPlan = planTurnHeuristic(normalizedInput);
+    let fastPlan = planTurnHeuristic(normalizedInput, { scopeKey: disambiguationScope });
+    const activeDraftProposal = voiceSessionStore.getDraftProposal(disambiguationScope);
     const negatedEntireUtterance = polarity.isEntireUtteranceNegated;
     const hasDeterministicActions =
       fastPlan.strategy === 'heuristic' &&
@@ -261,11 +296,25 @@ export async function runOperatorTurn(
       fastPlan.actions[0].type === 'open_terminals' &&
       !/\b(?:terminal|terminales|consola|consolas|powershell|pane|panes)\b/i.test(normalizedInput);
 
+    // S3.2: In active voice/thread consultative sessions, non-local-control delegations
+    // route to the consultative LLM loop (`propose_task` / `refine_proposal`) unless
+    // the user explicitly asks for immediate execution ("hazlo directo / sin preguntar").
+    const isConsultativeProposalRefinement =
+      Boolean(activeDraftProposal) &&
+      !fastPlan.actions.some((a) => a.type === 'confirm_proposal' || a.type === 'cancel_proposal');
+    const requiresConsultativeDelegation =
+      (context.mode === 'thread' || Boolean(context.voiceSessionActive)) &&
+      fastPlan.actions.length > 0 &&
+      !fastPlan.actions.every((a) => isDirectLocalControlAction(a.type)) &&
+      !hasExplicitImmediateExecutionCue(normalizedInput);
+
     // S8: If a pending disambiguation is open, route the user's answer to the LLM so it resolves the missing slot.
     const mustDeferToLlm =
       Boolean(activePending) ||
       isGenericNarrateWithoutTerminals ||
-      isAgentHijackedToTerminalInThreadMode;
+      isAgentHijackedToTerminalInThreadMode ||
+      isConsultativeProposalRefinement ||
+      requiresConsultativeDelegation;
 
     const useFastPlan =
       (!mustDeferToLlm &&
@@ -279,12 +328,19 @@ export async function runOperatorTurn(
         ? voiceSessionStore.getConversationHistory(context.boundThreadId)
         : undefined);
 
+    const accumulatedPeekReceipts: ActionReceipt[] = [];
+
     if (provider.id === 'local' || useFastPlan) {
       plan = fastPlan;
+      runLedger.recordVoiceClassification(turnId, { tier: 'L0' });
+      runLedger.recordVoiceMilestones(turnId, { routerDecisionAt: Date.now() });
       emitTrace({
         turnId,
         ev: 'intent.route',
         route: negatedEntireUtterance ? 'negation' : 'heuristic',
+        tier: 'L0',
+        transport: 'cascaded',
+        routerDecisionAt: Date.now(),
         reason: provider.id === 'local' ? 'local_provider' : 'deterministic_fast_path',
         rawInput: input,
         normalizedInput,
@@ -296,22 +352,79 @@ export async function runOperatorTurn(
         actions: plan.actions,
       });
     } else {
+      runLedger.recordVoiceClassification(turnId, { tier: 'L1' });
+      runLedger.recordVoiceMilestones(turnId, { routerDecisionAt: Date.now() });
       emitTrace({
         turnId,
         ev: 'intent.route',
         route: activePending ? 'clarification' : 'llm',
+        tier: 'L1',
+        transport: 'cascaded',
+        routerDecisionAt: Date.now(),
         reason: activePending
           ? 'resolving_pending_disambiguation'
           : isAgentHijackedToTerminalInThreadMode
             ? 'surface_selection_llm'
-            : 'planner_required',
+            : isConsultativeProposalRefinement
+              ? 'proposal_refinement'
+              : 'planner_required',
         rawInput: input,
         normalizedInput,
       });
-      plan = await planTurnLLM(normalizedInput, provider, context, turnId, effectiveHistory, {
-        onStreamSentence: options.onStreamSentence,
+
+      const streamingQueue =
+        options.ttsEnabled && !options.muted && !options.onStreamSentence
+          ? ttsNarrator.createStreamingQueue({
+              voiceName: config.persona?.voice || 'Ara',
+              rate: config.ttsRate || 1.0,
+              lang: config.persona?.language === 'en' ? 'en-US' : 'es-ES',
+              turnId,
+              turnStartedAt: startTime,
+              sttFinalizedAt,
+            })
+          : null;
+      const streamSentenceHandler =
+        options.onStreamSentence ??
+        (streamingQueue ? (sentence: string) => streamingQueue.enqueue(sentence) : undefined);
+
+      const MAX_PEEK_HOPS = 3;
+      let workingHistory: ProviderMessage[] = effectiveHistory ? [...effectiveHistory] : [];
+      plan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
+        onStreamSentence: streamSentenceHandler,
         pendingDisambiguation: activePending,
+        draftProposal: activeDraftProposal,
       });
+
+      // S3.1: Bounded ReAct loop (max 3 read-only peek_* hops before answering or proposing)
+      let peekHop = 0;
+      while (
+        peekHop < MAX_PEEK_HOPS &&
+        plan.actions.length > 0 &&
+        plan.actions.every((a) => isPeekActionType(a.type))
+      ) {
+        const peekExec = await executePlan(plan, context, turnId);
+        accumulatedPeekReceipts.push(...peekExec.receipts);
+        const obsSummary = formatReactObservation(peekExec.receipts);
+        workingHistory = [
+          ...workingHistory,
+          { role: 'assistant', content: JSON.stringify({ actions: plan.actions }) },
+          { role: 'user', content: `Resultados de inspección rápida (solo lectura):\n${obsSummary}\nResponde al usuario o emite "propose_task" según corresponda.` },
+        ];
+        peekHop += 1;
+        plan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
+          onStreamSentence: streamSentenceHandler,
+          pendingDisambiguation: activePending,
+          draftProposal: voiceSessionStore.getDraftProposal(disambiguationScope),
+        });
+      }
+
+      if (streamingQueue) {
+        if (streamingQueue.hasSpokenAny()) {
+          await streamingQueue.close();
+        } else {
+          streamingQueue.abort();
+        }
+      }
     }
 
     // S8: Active Disambiguation Guard (max 1 concrete question before delegating or executing ambiguous actions)
@@ -347,23 +460,42 @@ export async function runOperatorTurn(
     }
 
     // 2. Execute actions and collect verified receipts
+    const isSilentTurn =
+      plan.actions.length > 0 && plan.actions.every((a) => a.type === 'stay_silent');
+    if (plan.actions.length > 0 && !isSilentTurn) {
+      runLedger.recordVoiceMilestones(turnId, { firstActionStartAt: Date.now() });
+    }
     const execution = await executePlan(plan, context, turnId);
-    const receipts = execution.receipts;
-    const reply = execution.reply || composeReplyFromReceipts(plan, receipts);
+    const receipts = [...accumulatedPeekReceipts, ...execution.receipts];
+    const reply = isSilentTurn
+      ? ''
+      : execution.reply || composeReplyFromReceipts(plan, execution.receipts);
     const overallSuccess = execution.overallSuccess;
+
+    // S3.3: Automatically open a 12s hands-free reply window when proposing/refining or asking a question
+    const hasProposalInteraction = plan.actions.some(
+      (a) => a.type === 'propose_task' || a.type === 'refine_proposal'
+    );
+    if (!isSilentTurn && (hasProposalInteraction || reply.trim().endsWith('?'))) {
+      voiceSessionStore.setHandsFreeReplyWindow(12_000);
+    }
 
     // S6: Persist verified delegations into workspace-scoped episodic ledger
     if (receipts.length > 0) {
       void recordDelegationsFromReceipts(context.workspaceId, receipts).catch(() => {});
     }
 
-    // 3. Speak reply via TTS if requested and not muted
-    if (options.ttsEnabled && !options.muted && reply) {
+    // 3. Speak reply via TTS if requested, not muted, and not a silent turn
+    if (options.ttsEnabled && !options.muted && reply && !isSilentTurn) {
       try {
+        runLedger.recordVoiceMilestones(turnId, { ttsRequestAt: Date.now() });
         ttsNarrator.speak(reply, {
           voiceName: config.persona?.voice || 'Ara',
           rate: config.ttsRate || 1.0,
           lang: config.persona?.language === 'en' ? 'en-US' : 'es-ES',
+          turnId,
+          turnStartedAt: startTime,
+          sttFinalizedAt,
         });
         emitTrace({
           turnId,

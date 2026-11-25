@@ -10,6 +10,16 @@ import { normalizeForVoiceSpeech, SpeechSentenceQueue } from './voice/speechPros
 import { emitTrace } from './trace/trace';
 import { runLedger } from './runLedger';
 
+export interface TtsWebSocketLike {
+  readyState: number;
+  onopen: ((ev?: any) => void) | null;
+  onmessage: ((ev: { data: any }) => void) | null;
+  onerror: ((ev?: any) => void) | null;
+  onclose: ((ev?: any) => void) | null;
+  send: (data: string) => void;
+  close: (code?: number, reason?: string) => void;
+}
+
 export interface TTSOptions {
   lang?: string; // Default: 'es-ES' or 'en-US'
   rate?: number; // 0.8 - 1.5, default: 1.0
@@ -22,6 +32,8 @@ export interface TTSOptions {
   elevenlabsVoiceId?: string;
   elevenlabsStability?: number;
   elevenlabsSimilarity?: number;
+  /** Optional WebSocket factory (primarily for deterministic testing or custom transports). */
+  wsFactory?: (url: string) => TtsWebSocketLike;
   /** Optional turnId for emitting `tts.first_audio` latency traces. */
   turnId?: string;
   /** Optional turn start / STT finalized timestamp used to calculate TTFA (`ttfaMs`). */
@@ -32,6 +44,84 @@ export interface TTSOptions {
   onFirstAudio?: () => void;
   onEnd?: () => void;
   onError?: (err: any) => void;
+}
+
+export interface SentenceStreamChunkerOptions {
+  minChars?: number;
+  firstSentenceMaxChars?: number;
+}
+
+/**
+ * Buffers streaming LLM text into natural spoken sentences with a 35-50 char minimum
+ * threshold (avoiding choppy micro-requests) and a 180-char first-sentence cap for low TTFA.
+ */
+export class SentenceStreamChunker {
+  private readonly minChars: number;
+  private readonly firstSentenceMaxChars: number;
+  private buffer = '';
+  private emittedFirst = false;
+
+  constructor(options: SentenceStreamChunkerOptions = {}) {
+    this.minChars = Math.max(20, options.minChars ?? 35);
+    this.firstSentenceMaxChars = Math.max(60, options.firstSentenceMaxChars ?? 180);
+  }
+
+  public push(delta: string): string[] {
+    if (!delta) return [];
+    this.buffer += delta;
+    const ready: string[] = [];
+
+    // Enforce low-latency cap on the very first sentence so TTS begins promptly.
+    if (!this.emittedFirst && this.buffer.length > this.firstSentenceMaxChars) {
+      const slice = this.buffer.slice(0, this.firstSentenceMaxChars);
+      const boundaryMatch = /^([\s\S]*?[.!?:;,\n])(?=\s|$)/.exec(slice);
+      let cutIdx = boundaryMatch ? boundaryMatch[1].length : slice.lastIndexOf(' ');
+      if (cutIdx < this.minChars) {
+        cutIdx = this.firstSentenceMaxChars;
+      }
+      const head = this.buffer.slice(0, cutIdx).trim();
+      if (head.length >= 2) {
+        ready.push(head);
+        this.emittedFirst = true;
+      }
+      this.buffer = this.buffer.slice(cutIdx).trimStart();
+    }
+
+    const boundaryRe = /[^.!?\n]+[.!?\n]+(?=\s|$)/g;
+    let lastIndex = 0;
+    let pending = '';
+    let match: RegExpExecArray | null;
+
+    while ((match = boundaryRe.exec(this.buffer)) !== null) {
+      const end = match.index + match[0].length;
+      if (end >= this.buffer.length) {
+        // Wait for trailing space or flush so abbreviations aren't split prematurely.
+        break;
+      }
+      pending = pending ? `${pending} ${match[0].trim()}` : match[0].trim();
+      lastIndex = end;
+      if (pending.length >= this.minChars) {
+        ready.push(pending);
+        this.emittedFirst = true;
+        pending = '';
+      }
+    }
+
+    if (lastIndex > 0) {
+      const unconsumed = this.buffer.slice(lastIndex).trimStart();
+      this.buffer = pending ? `${pending} ${unconsumed}`.trimStart() : unconsumed;
+    }
+
+    return ready;
+  }
+
+  public flush(): string[] {
+    const rest = this.buffer.trim();
+    this.buffer = '';
+    if (!rest) return [];
+    this.emittedFirst = true;
+    return [rest];
+  }
 }
 
 export interface PersonaVoiceProfile {
@@ -280,6 +370,11 @@ class TTSNarrator {
   private safetyTimer: any = null;
   private keepAliveInterval: any = null;
   private generation = 0;
+  private activeLlmAbortControllers = new Set<AbortController>();
+  private persistentWs: TtsWebSocketLike | null = null;
+  private persistentWsKey = '';
+  private persistentWsKeepAlive: ReturnType<typeof setInterval> | null = null;
+  private persistentWsRejectors = new Set<(err: Error) => void>();
 
   // Heard-audio tracking for exact barge-in truncation
   private activeSpokenText = '';
@@ -514,8 +609,75 @@ class TTSNarrator {
     }
   }
 
+  public registerActiveLlmAbort(controller: AbortController): () => void {
+    this.activeLlmAbortControllers.add(controller);
+    return () => {
+      this.activeLlmAbortControllers.delete(controller);
+    };
+  }
+
+  private abortActiveLlmStreams(): void {
+    if (this.activeLlmAbortControllers.size === 0) return;
+    const controllers = Array.from(this.activeLlmAbortControllers);
+    this.activeLlmAbortControllers.clear();
+    for (const ctrl of controllers) {
+      try {
+        if (!ctrl.signal.aborted) {
+          ctrl.abort(new Error('Barge-in aborted active LLM stream'));
+        }
+      } catch {}
+    }
+  }
+
+  public closePersistentTtsSocket(): void {
+    if (this.persistentWsKeepAlive) {
+      clearInterval(this.persistentWsKeepAlive);
+      this.persistentWsKeepAlive = null;
+    }
+    const rejectors = Array.from(this.persistentWsRejectors);
+    this.persistentWsRejectors.clear();
+    for (const reject of rejectors) {
+      try {
+        reject(new Error('Persistent TTS socket closed'));
+      } catch {}
+    }
+    if (this.persistentWs) {
+      const ws = this.persistentWs;
+      this.persistentWs = null;
+      this.persistentWsKey = '';
+      try {
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({ text: '' }));
+        }
+      } catch {}
+      try {
+        ws.close(1000, 'Session closed');
+      } catch {}
+    }
+  }
+
+  private abortPersistentWsTurn(): void {
+    if (this.persistentWsRejectors.size > 0) {
+      const rejectors = Array.from(this.persistentWsRejectors);
+      this.persistentWsRejectors.clear();
+      for (const reject of rejectors) {
+        try {
+          const err = new Error('TTS stream interrupted');
+          err.name = 'AbortError';
+          reject(err);
+        } catch {}
+      }
+    }
+    if (this.persistentWs) {
+      // Close and clear so stale trailing audio frames from the aborted generation cannot leak.
+      this.closePersistentTtsSocket();
+    }
+  }
+
   public stop(): void {
     this.generation++;
+    this.abortActiveLlmStreams();
+    this.abortPersistentWsTurn();
     this.captureInterruptedPlayback();
     this.finalizeRampingAudio();
     this.detachAudioGain();
@@ -564,6 +726,8 @@ class TTSNarrator {
    */
   public stopWithRamp(rampMs: number = 20): InterruptedPlaybackInfo {
     this.generation++;
+    this.abortActiveLlmStreams();
+    this.abortPersistentWsTurn();
     const info = this.captureInterruptedPlayback();
     this.finalizeRampingAudio();
 
@@ -819,6 +983,346 @@ class TTSNarrator {
     }
   }
 
+  private resolveWsFactory(options: TTSOptions): ((url: string) => TtsWebSocketLike) | null {
+    if (options.wsFactory) return options.wsFactory;
+    if (typeof window !== 'undefined' && typeof (window as any).WebSocket === 'function') {
+      const WsCtor = (window as any).WebSocket;
+      return (url: string) => new WsCtor(url);
+    }
+    return null;
+  }
+
+  private decodeBase64ToBytes(b64: string): Uint8Array {
+    const clean = (b64 || '').trim();
+    if (!clean) return new Uint8Array(0);
+    if (typeof atob === 'function') {
+      const bin = atob(clean);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) {
+        out[i] = bin.charCodeAt(i);
+      }
+      return out;
+    }
+    if (typeof Buffer !== 'undefined') {
+      return new Uint8Array(Buffer.from(clean, 'base64'));
+    }
+    return new Uint8Array(0);
+  }
+
+  private async speakElevenLabsWs(
+    textToSpeak: string,
+    options: TTSOptions,
+    config: any,
+    myGen: number,
+    wsFactory: (url: string) => TtsWebSocketLike
+  ): Promise<void> {
+    if (this.generation !== myGen) return;
+
+    const apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
+    const voiceId = options.elevenlabsVoiceId || config?.elevenlabsVoiceId || '21m00Tcm4TlvDq8ikWAM';
+    const model = options.elevenlabsModel || config?.elevenlabsModel || 'eleven_v4_turbo';
+    const stability = options.elevenlabsStability ?? config?.elevenlabsStability ?? 0.5;
+    const similarity = options.elevenlabsSimilarity ?? config?.elevenlabsSimilarity ?? 0.8;
+    const speed = options.rate ?? config?.ttsRate ?? 1.0;
+
+    const wsKey = `${voiceId}::${model}::${apiKey}`;
+    const wsUrl = `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
+      voiceId
+    )}/stream-input?model_id=${encodeURIComponent(model)}&output_format=mp3_44100_128&optimize_streaming_latency=3`;
+
+    if (this.persistentWs && this.persistentWsKey !== wsKey) {
+      this.closePersistentTtsSocket();
+    }
+
+    const ensureSocketOpen = async (): Promise<TtsWebSocketLike> => {
+      if (this.persistentWs && this.persistentWs.readyState === 1) {
+        return this.persistentWs;
+      }
+      if (this.persistentWs && this.persistentWs.readyState !== 0) {
+        this.closePersistentTtsSocket();
+      }
+
+      const ws = this.persistentWs ?? wsFactory(wsUrl);
+      this.persistentWs = ws;
+      this.persistentWsKey = wsKey;
+
+      if (ws.readyState === 1) {
+        ws.send(
+          JSON.stringify({
+            text: ' ',
+            voice_settings: { stability, similarity_boost: similarity, speed },
+            xi_api_key: apiKey,
+          })
+        );
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('ElevenLabs WS connect timeout'));
+          }, 4000);
+          ws.onopen = () => {
+            clearTimeout(timeout);
+            try {
+              ws.send(
+                JSON.stringify({
+                  text: ' ',
+                  voice_settings: { stability, similarity_boost: similarity, speed },
+                  xi_api_key: apiKey,
+                })
+              );
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          };
+          ws.onerror = (err) => {
+            clearTimeout(timeout);
+            reject(err instanceof Error ? err : new Error('ElevenLabs WS connect error'));
+          };
+          ws.onclose = () => {
+            clearTimeout(timeout);
+            if (this.persistentWs === ws) {
+              this.persistentWs = null;
+              this.persistentWsKey = '';
+            }
+            reject(new Error('ElevenLabs WS closed before open'));
+          };
+        });
+      }
+
+      if (!this.persistentWsKeepAlive) {
+        this.persistentWsKeepAlive = setInterval(() => {
+          try {
+            if (this.persistentWs && this.persistentWs.readyState === 1 && !this.speaking) {
+              this.persistentWs.send(JSON.stringify({ text: ' ' }));
+            }
+          } catch {}
+        }, 15_000);
+      }
+
+      return ws;
+    };
+
+    const ws = await ensureSocketOpen();
+    if (this.generation !== myGen) return;
+
+    this.beginUtteranceTracking(textToSpeak, speed);
+
+    const audioChunks: Uint8Array[] = [];
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          this.persistentWsRejectors.delete(onAbortReject);
+          reject(new Error('ElevenLabs WS synthesis timeout'));
+        }
+      }, 15_000);
+
+      const onAbortReject = (err: Error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          this.persistentWsRejectors.delete(onAbortReject);
+          reject(err);
+        }
+      };
+      this.persistentWsRejectors.add(onAbortReject);
+
+      ws.onmessage = (ev) => {
+        if (settled || this.generation !== myGen) return;
+        try {
+          const payload = typeof ev.data === 'string' ? JSON.parse(ev.data) : null;
+          if (!payload) return;
+          if (payload.error) {
+            settled = true;
+            clearTimeout(timeout);
+            this.persistentWsRejectors.delete(onAbortReject);
+            reject(new Error(String(payload.error)));
+            return;
+          }
+          if (typeof payload.audio === 'string' && payload.audio.length > 0) {
+            const bytes = this.decodeBase64ToBytes(payload.audio);
+            if (bytes.length > 0) audioChunks.push(bytes);
+          }
+          if (payload.isFinal) {
+            settled = true;
+            clearTimeout(timeout);
+            this.persistentWsRejectors.delete(onAbortReject);
+            resolve();
+          }
+        } catch {
+          // ignore malformed WS frames
+        }
+      };
+
+      ws.onerror = (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          this.persistentWsRejectors.delete(onAbortReject);
+          this.closePersistentTtsSocket();
+          reject(err instanceof Error ? err : new Error('ElevenLabs WS error'));
+        }
+      };
+
+      ws.onclose = () => {
+        if (this.persistentWs === ws) {
+          this.persistentWs = null;
+          this.persistentWsKey = '';
+        }
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          this.persistentWsRejectors.delete(onAbortReject);
+          if (audioChunks.length > 0) {
+            resolve();
+          } else {
+            reject(new Error('ElevenLabs WS closed prematurely'));
+          }
+        }
+      };
+
+      try {
+        ws.send(
+          JSON.stringify({
+            text: `${textToSpeak} `,
+            try_trigger_generation: true,
+          })
+        );
+      } catch (sendErr) {
+        settled = true;
+        clearTimeout(timeout);
+        this.persistentWsRejectors.delete(onAbortReject);
+        this.closePersistentTtsSocket();
+        reject(sendErr instanceof Error ? sendErr : new Error('ElevenLabs WS send error'));
+      }
+    });
+
+    if (this.generation !== myGen) return;
+    if (audioChunks.length === 0) {
+      throw new Error('ElevenLabs WS produced empty audio');
+    }
+
+    const totalLen = audioChunks.reduce((sum, c) => sum + c.length, 0);
+    const merged = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const chunk of audioChunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    if (typeof Audio === 'undefined') {
+      options.onFirstAudio?.();
+      options.onStart?.();
+      options.onEnd?.();
+      return;
+    }
+
+    const blob = new Blob([merged], { type: 'audio/mpeg' });
+    return new Promise<void>((resolve, reject) => {
+      if (this.generation !== myGen) {
+        resolve();
+        return;
+      }
+
+      const audioUrl = URL.createObjectURL(blob);
+      this.activeAudioUrl = audioUrl;
+      const audio = new Audio(audioUrl);
+      this.activeAudio = audio;
+      audio.volume = options.volume ?? 1.0;
+      this.attachAudioGain(audio, audio.volume);
+
+      let finished = false;
+      let onInterruptResolve: (() => void) | null = null;
+      const cleanup = () => {
+        if (finished) return;
+        finished = true;
+        this.speaking = false;
+        if (onInterruptResolve) {
+          this.activeInterruptResolvers.delete(onInterruptResolve);
+          onInterruptResolve = null;
+        }
+        if (this.activeAudio === audio) {
+          this.activeAudio = null;
+          this.detachAudioGain();
+        }
+        if (this.activeAudioUrl === audioUrl) {
+          try {
+            URL.revokeObjectURL(audioUrl);
+          } catch {}
+          this.activeAudioUrl = null;
+        }
+      };
+
+      onInterruptResolve = () => {
+        cleanup();
+        resolve();
+      };
+      this.activeInterruptResolvers.add(onInterruptResolve);
+
+      audio.onplay = () => {
+        if (this.generation !== myGen) {
+          cleanup();
+          try {
+            audio.pause();
+          } catch {}
+          resolve();
+          return;
+        }
+        this.speaking = true;
+        this.markUtterancePlaybackStarted();
+        const firstAudioTs = Date.now();
+        options.onFirstAudio?.();
+        if (options.turnId) {
+          try {
+            const t0 = options.sttFinalizedAt ?? options.turnStartedAt;
+            runLedger.recordVoiceClassification(options.turnId, {
+              ttsEngine: 'elevenlabs_ws',
+            });
+            runLedger.recordVoiceMilestones(options.turnId, {
+              firstAudioAt: firstAudioTs,
+            });
+            emitTrace({
+              turnId: options.turnId,
+              ev: 'tts.first_audio',
+              engine: 'elevenlabs_ws',
+              firstAudioAt: firstAudioTs,
+              ttfaMs: t0 ? Math.max(0, firstAudioTs - t0) : undefined,
+            });
+          } catch {}
+        }
+        options.onStart?.();
+      };
+
+      audio.onended = () => {
+        if (this.generation === myGen) {
+          this.markUtteranceCompleted(textToSpeak);
+        }
+        cleanup();
+        options.onEnd?.();
+        resolve();
+      };
+
+      audio.onerror = (e) => {
+        cleanup();
+        if (this.generation !== myGen) {
+          resolve();
+          return;
+        }
+        reject(e);
+      };
+
+      audio.play().catch((playErr) => {
+        cleanup();
+        if (this.generation !== myGen) {
+          resolve();
+          return;
+        }
+        reject(playErr);
+      });
+    });
+  }
+
   private async speakElevenLabs(
     textToSpeak: string,
     options: TTSOptions,
@@ -826,6 +1330,19 @@ class TTSNarrator {
     myGen: number
   ): Promise<void> {
     if (this.generation !== myGen) return;
+
+    const wsFactory = this.resolveWsFactory(options);
+    if (wsFactory) {
+      try {
+        await this.speakElevenLabsWs(textToSpeak, options, config, myGen, wsFactory);
+        return;
+      } catch (wsErr: any) {
+        if (this.generation !== myGen || wsErr?.name === 'AbortError') {
+          return;
+        }
+        console.warn('[TTSNarrator] ElevenLabs WS stream-input falló, degradando a HTTP /stream:', wsErr);
+      }
+    }
 
     const apiKey = (options.elevenlabsApiKey || config?.elevenlabsApiKey || '').trim();
     const voiceId = options.elevenlabsVoiceId || config?.elevenlabsVoiceId || '21m00Tcm4TlvDq8ikWAM';

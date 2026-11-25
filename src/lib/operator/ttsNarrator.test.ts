@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ttsNarrator, cleanTextForSpeech, resolveBestVoice, splitIntoSpeechSentences } from './ttsNarrator';
+import {
+  ttsNarrator,
+  cleanTextForSpeech,
+  resolveBestVoice,
+  splitIntoSpeechSentences,
+  truncateTextToHeardMs,
+  SentenceStreamChunker,
+} from './ttsNarrator';
 
 describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
   beforeEach(() => {
@@ -538,6 +545,377 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
       expect(consoleWarnSpy).toHaveBeenCalled();
       expect((globalThis as any).window.speechSynthesis.speak).toHaveBeenCalled();
       expect(onEnd).toHaveBeenCalledTimes(1);
+    });
+
+    it('creates a FIFO streaming sentence queue that speaks streamed sentences sequentially without aborting prior chunks', async () => {
+      const spokenTexts: string[] = [];
+      const synth = (globalThis as any).window.speechSynthesis;
+      synth.speak = vi.fn((utterance: any) => {
+        spokenTexts.push(utterance.text);
+        setTimeout(() => {
+          utterance.onstart?.();
+          utterance.onend?.();
+        }, 5);
+      });
+
+      const onStart = vi.fn();
+      const onEnd = vi.fn();
+      const queue = ttsNarrator.createStreamingQueue({ engine: 'browser', onStart, onEnd });
+      queue.enqueue('Primera oración del stream.');
+      queue.enqueue('Segunda oración en cola.');
+      await queue.close();
+
+      expect(spokenTexts).toEqual([
+        'Primera oración del stream.',
+        'Segunda oración en cola.',
+      ]);
+      expect(onStart).toHaveBeenCalledTimes(1);
+      expect(onEnd).toHaveBeenCalledTimes(1);
+      expect(ttsNarrator.getLastInterruptedPlayback()).toBeNull();
+    });
+  });
+
+  describe('Barge-in Heard-Audio Truncation & 20ms Smooth Ramp (T5)', () => {
+    it('truncateTextToHeardMs slices proportionally at word boundaries without cutting words', () => {
+      const text = 'Uno dos tres cuatro cinco'; // 25 chars
+      expect(truncateTextToHeardMs(text, 0, 2500)).toBe('');
+      expect(truncateTextToHeardMs(text, 1100, 2500)).toBe('Uno dos');
+      expect(truncateTextToHeardMs(text, 1500, 2500)).toBe('Uno dos tres');
+      expect(truncateTextToHeardMs(text, 3000, 2500)).toBe(text);
+      expect(truncateTextToHeardMs('', 500, 1000)).toBe('');
+      // Uses estimated duration when durationMs is omitted
+      const partial = truncateTextToHeardMs('Primera parte de una oración suficientemente larga.', 600);
+      expect(partial.length).toBeGreaterThan(0);
+      expect(partial.length).toBeLessThan('Primera parte de una oración suficientemente larga.'.length);
+    });
+
+    it('stopWithRamp applies 20ms GainNode + volume fade and returns exact audio.currentTime heard prefix', async () => {
+      vi.useFakeTimers();
+      const originalAudioContext = (globalThis as any).window.AudioContext;
+      const originalAudio = (globalThis as any).Audio;
+      const originalURL = (globalThis as any).URL;
+      const originalMediaSource = (globalThis as any).MediaSource;
+      delete (globalThis as any).MediaSource;
+
+      try {
+        const linearRampSpy = vi.fn();
+        const setValueSpy = vi.fn();
+        class MockAudioContext {
+          state = 'running';
+          currentTime = 1.0;
+          destination = {};
+          createMediaElementSource = vi.fn(() => ({ connect: vi.fn() }));
+          createGain = vi.fn(() => ({
+            gain: {
+              value: 1,
+              setValueAtTime: setValueSpy,
+              linearRampToValueAtTime: linearRampSpy,
+            },
+            connect: vi.fn(),
+            disconnect: vi.fn(),
+          }));
+          close = vi.fn();
+        }
+        (globalThis as any).window.AudioContext = MockAudioContext;
+
+        const mockBlob = new Blob(['audio-bytes'], { type: 'audio/mpeg' });
+        vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+          ok: true,
+          status: 200,
+          blob: vi.fn().mockResolvedValue(mockBlob),
+        } as any);
+
+        const revokeSpy = vi.fn();
+        (globalThis as any).URL = {
+          createObjectURL: vi.fn(() => 'blob:http://localhost/ramp-audio'),
+          revokeObjectURL: revokeSpy,
+        };
+
+        let audioInst: any = null;
+        const pauseSpy = vi.fn();
+        (globalThis as any).Audio = class {
+          src = '';
+          volume = 1;
+          currentTime = 0;
+          duration = 4.0;
+          paused = true;
+          ended = false;
+          onplay: (() => void) | null = null;
+          onended: (() => void) | null = null;
+          onerror: ((err: any) => void) | null = null;
+          constructor(src: string) {
+            this.src = src;
+            audioInst = this;
+          }
+          play() {
+            this.paused = false;
+            this.onplay?.();
+            return Promise.resolve();
+          }
+          pause() {
+            this.paused = true;
+            pauseSpy();
+          }
+        };
+
+        const speakPromise = ttsNarrator.speak('Uno dos tres cuatro cinco seis siete ocho.', {
+          engine: 'elevenlabs',
+          elevenlabsApiKey: 'xi_ramp_key',
+        });
+
+        await vi.advanceTimersByTimeAsync(10);
+        expect(audioInst).not.toBeNull();
+
+        // Simulate 1.6s of 4.0s (40%) actually heard before user barge-in
+        audioInst.currentTime = 1.6;
+        const result = ttsNarrator.stopWithRamp(20);
+
+        expect(ttsNarrator.isSpeaking()).toBe(false);
+        expect(result.audioEndMs).toBe(1600);
+        expect(result.playedText).toBe('Uno dos tres');
+        expect(ttsNarrator.getLastInterruptedPlayback()).toEqual(result);
+
+        // GainNode ramped linearly over 20ms; pause happens after the 20ms fade completes
+        expect(setValueSpy).toHaveBeenCalledWith(1, 1.0);
+        expect(linearRampSpy).toHaveBeenCalledWith(0, 1.02);
+        expect(pauseSpy).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(20);
+        expect(pauseSpy).toHaveBeenCalledTimes(1);
+        expect(audioInst.volume).toBe(0);
+        expect(revokeSpy).toHaveBeenCalledWith('blob:http://localhost/ramp-audio');
+        await speakPromise;
+      } finally {
+        vi.useRealTimers();
+        (globalThis as any).window.AudioContext = originalAudioContext;
+        (globalThis as any).Audio = originalAudio;
+        (globalThis as any).URL = originalURL;
+        (globalThis as any).MediaSource = originalMediaSource;
+      }
+    });
+
+    it('combines completed streaming sentences with truncated active sentence on interruption', async () => {
+      vi.useFakeTimers();
+      try {
+        const synth = (globalThis as any).window.speechSynthesis;
+        const utterances: any[] = [];
+        synth.speak = vi.fn((utterance: any) => {
+          utterances.push(utterance);
+          setTimeout(() => {
+            utterance.onstart?.();
+          }, 5);
+        });
+
+        const queue = ttsNarrator.createStreamingQueue({ engine: 'browser' });
+        queue.enqueue('Primera frase completa.');
+        queue.enqueue('Segunda frase bastante larga para poder cortarla justo a tiempo.');
+        const closePromise = queue.close();
+
+        // Sentence 1 starts at 5ms and finishes at 805ms
+        await vi.advanceTimersByTimeAsync(10);
+        expect(utterances).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(800);
+        utterances[0].onend?.();
+
+        // Sentence 2 starts and plays for 1000ms before barge-in
+        await vi.advanceTimersByTimeAsync(10);
+        expect(utterances).toHaveLength(2);
+        await vi.advanceTimersByTimeAsync(1000);
+
+        const interrupted = ttsNarrator.stopWithRamp(20);
+        await closePromise;
+
+        expect(interrupted.playedText.startsWith('Primera frase completa.')).toBe(true);
+        expect(interrupted.playedText.length).toBeGreaterThan('Primera frase completa.'.length);
+        expect(interrupted.playedText).not.toContain('tiempo.');
+        expect(interrupted.audioEndMs).toBeGreaterThanOrEqual(1700);
+        expect(ttsNarrator.getLastInterruptedPlayback()).toEqual(interrupted);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('S4/T4 — SentenceStreamChunker, Persistent ElevenLabs stream-input WS & Atomic Barge-In', () => {
+    it('SentenceStreamChunker respects 35-char min threshold and 180-char first-sentence cap', () => {
+      const chunker = new SentenceStreamChunker({ minChars: 35, firstSentenceMaxChars: 180 });
+      // Short 10-char sentence is buffered until >= 35 chars
+      expect(chunker.push('Hola! ')).toEqual([]);
+      const out = chunker.push('Todo el entorno de pruebas ya quedó completamente listo. ');
+      expect(out).toHaveLength(1);
+      expect(out[0].length).toBeGreaterThanOrEqual(35);
+
+      const longChunker = new SentenceStreamChunker({ minChars: 35, firstSentenceMaxChars: 180 });
+      const longFirst =
+        'Esta primera oración es deliberadamente muy extensa para verificar que el recortador inicial respete el límite máximo de ciento ochenta caracteres sin cortar palabras a la mitad ni esperar demasiado para hablar.';
+      const firstBatch = longChunker.push(longFirst);
+      expect(firstBatch.length).toBeGreaterThanOrEqual(1);
+      expect(firstBatch[0].length).toBeLessThanOrEqual(180);
+    });
+
+    it('reuses one persistent ElevenLabs stream-input WebSocket across multiple sentences and closes cleanly', async () => {
+      const sockets: any[] = [];
+      const sentPayloads: any[] = [];
+      const originalAudio = (globalThis as any).Audio;
+      const originalURL = (globalThis as any).URL;
+      const originalMediaSource = (globalThis as any).MediaSource;
+
+      try {
+        (globalThis as any).MediaSource = undefined;
+        (globalThis as any).URL = {
+          createObjectURL: vi.fn(() => 'blob:http://localhost/ws-audio'),
+          revokeObjectURL: vi.fn(),
+        };
+        (globalThis as any).Audio = class {
+          src = '';
+          volume = 1;
+          paused = true;
+          ended = false;
+          onplay: (() => void) | null = null;
+          onended: (() => void) | null = null;
+          onerror: ((err: any) => void) | null = null;
+          constructor(src: string) {
+            this.src = src;
+          }
+          play() {
+            this.paused = false;
+            setTimeout(() => {
+              this.onplay?.();
+              this.paused = true;
+              this.ended = true;
+              this.onended?.();
+            }, 2);
+            return Promise.resolve();
+          }
+          pause() {
+            this.paused = true;
+          }
+        };
+
+        class MockWebSocket {
+          static OPEN = 1;
+          static CLOSED = 3;
+          readyState = 1;
+          url: string;
+          onopen: (() => void) | null = null;
+          onmessage: ((ev: { data: string }) => void) | null = null;
+          onerror: ((ev: any) => void) | null = null;
+          onclose: (() => void) | null = null;
+          constructor(url: string) {
+            this.url = url;
+            sockets.push(this);
+            setTimeout(() => this.onopen?.(), 0);
+          }
+          send(data: string) {
+            const parsed = JSON.parse(data);
+            sentPayloads.push(parsed);
+            if (typeof parsed.text === 'string' && parsed.text.trim().length > 0) {
+              setTimeout(() => {
+                this.onmessage?.({
+                  data: JSON.stringify({
+                    audio: btoa('fake-mp3-chunk'),
+                    isFinal: true,
+                  }),
+                });
+              }, 2);
+            }
+          }
+          close() {
+            this.readyState = 3;
+            this.onclose?.();
+          }
+        }
+
+        const queue = ttsNarrator.createStreamingQueue({
+          engine: 'elevenlabs',
+          elevenlabsApiKey: 'xi_ws_test',
+          elevenlabsVoiceId: 'voice-ws-1',
+          wsFactory: (url) => new MockWebSocket(url) as any,
+        });
+
+        queue.enqueue('Primera oración suficientemente larga para hablar.');
+        queue.enqueue('Segunda oración reutilizando el mismo WebSocket.');
+        await queue.close();
+
+        expect(sockets).toHaveLength(1);
+        expect(sockets[0].url).toContain('wss://api.elevenlabs.io/v1/text-to-speech/voice-ws-1/stream-input');
+        expect(sentPayloads[0].xi_api_key).toBe('xi_ws_test');
+        ttsNarrator.closePersistentTtsSocket();
+      } finally {
+        (globalThis as any).Audio = originalAudio;
+        (globalThis as any).URL = originalURL;
+        (globalThis as any).MediaSource = originalMediaSource;
+      }
+    });
+
+    it('falls back cleanly to ElevenLabs HTTP /stream when WebSocket transport fails', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        blob: vi.fn().mockResolvedValue(new Blob(['http-fallback-mp3'], { type: 'audio/mpeg' })),
+      } as any);
+      const originalAudio = (globalThis as any).Audio;
+      const originalURL = (globalThis as any).URL;
+      try {
+        (globalThis as any).URL = {
+          createObjectURL: vi.fn(() => 'blob:http://localhost/http-fallback'),
+          revokeObjectURL: vi.fn(),
+        };
+        (globalThis as any).Audio = class {
+          volume = 1;
+          paused = true;
+          ended = false;
+          onplay: (() => void) | null = null;
+          onended: (() => void) | null = null;
+          play() {
+            this.paused = false;
+            setTimeout(() => {
+              this.onplay?.();
+              this.ended = true;
+              this.onended?.();
+            }, 2);
+            return Promise.resolve();
+          }
+          pause() {}
+        };
+
+        class FailingWs {
+          readyState = 0;
+          onopen: (() => void) | null = null;
+          onerror: ((e: any) => void) | null = null;
+          onclose: (() => void) | null = null;
+          constructor() {
+            setTimeout(() => this.onerror?.(new Error('ws down')), 0);
+          }
+          send() {}
+          close() {}
+        }
+
+        await ttsNarrator.speak('Probando fallback a HTTP stream.', {
+          engine: 'elevenlabs',
+          elevenlabsApiKey: 'xi_ws_fallback',
+          wsFactory: () => new FailingWs() as any,
+        });
+
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expect(String(fetchSpy.mock.calls[0][0])).toContain('/stream');
+      } finally {
+        ttsNarrator.closePersistentTtsSocket();
+        (globalThis as any).Audio = originalAudio;
+        (globalThis as any).URL = originalURL;
+      }
+    });
+
+    it('aborts active LLM AbortController and TTS playback in <50ms on stopWithRamp(20)', () => {
+      const controller = new AbortController();
+      const unregister = ttsNarrator.registerActiveLlmAbort(controller);
+      const t0 = performance.now();
+      ttsNarrator.stopWithRamp(20);
+      const elapsed = performance.now() - t0;
+
+      expect(controller.signal.aborted).toBe(true);
+      expect(elapsed).toBeLessThan(50);
+      unregister();
     });
   });
 });

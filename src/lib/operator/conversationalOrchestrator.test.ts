@@ -883,5 +883,63 @@ describe('SETH Conversational Orchestrator — S1..S4', () => {
         })
       ).toBeNull();
     });
+
+    it('S4/T4: never calls ttsNarrator.speak(reply) twice when response was already streamed via streamingQueue', async () => {
+      localStorage.setItem(
+        'kite.operator.providerConfig.v2',
+        JSON.stringify({
+          activeProvider: 'opencode',
+          opencodeApiKey: 'test-key',
+          opencodeModel: 'deepseek-v4.1-flash',
+          ttsEngine: 'browser',
+        })
+      );
+
+      const enqueueSpy = vi.fn();
+      const closeSpy = vi.fn().mockResolvedValue(undefined);
+      let spokenCount = 0;
+      const createQueueSpy = vi.spyOn(ttsNarrator, 'createStreamingQueue').mockReturnValue({
+        enqueue: (s: string) => {
+          spokenCount += 1;
+          enqueueSpy(s);
+        },
+        close: closeSpy,
+        abort: vi.fn(),
+        hasSpokenAny: () => spokenCount > 0,
+      } as any);
+      const speakSpy = vi.spyOn(ttsNarrator, 'speak').mockResolvedValue(undefined);
+
+      const streamingProvider: PlannerProvider = {
+        id: 'opencode',
+        plan: vi.fn(async (_messages, opts) => {
+          opts?.onDelta?.('{"answer": "Primera oración suficientemente larga para streaming. ');
+          opts?.onDelta?.('Segunda oración de cierre.", "actions": []}');
+          return {
+            rawText: JSON.stringify({
+              answer:
+                'Primera oración suficientemente larga para streaming. Segunda oración de cierre.',
+              reply:
+                'Primera oración suficientemente larga para streaming. Segunda oración de cierre.',
+              actions: [],
+            }),
+            latencyMs: 90,
+            model: 'deepseek-v4.1-flash',
+          };
+        }),
+      };
+
+      await runOperatorTurn('hola, ¿cómo va todo?', {
+        source: 'voz',
+        ttsEnabled: true,
+        muted: false,
+        provider: streamingProvider,
+        context: { workspaceId: 'ws-kite', workspaceName: 'kite', mode: 'thread' },
+      });
+
+      expect(createQueueSpy).toHaveBeenCalledTimes(1);
+      expect(enqueueSpy).toHaveBeenCalled();
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(speakSpy).not.toHaveBeenCalled();
+    });
   });
 });

@@ -375,6 +375,7 @@ export async function runOperatorTurn(
         : undefined);
 
     const accumulatedPeekReceipts: ActionReceipt[] = [];
+    let streamedViaQueue = false;
 
     if (provider.id === 'local' || useFastPlan) {
       plan = fastPlan;
@@ -429,76 +430,95 @@ export async function runOperatorTurn(
               sttFinalizedAt,
             })
           : null;
-      const streamSentenceHandler =
-        options.onStreamSentence ??
-        (streamingQueue ? (sentence: string) => streamingQueue.enqueue(sentence) : undefined);
+      const streamSentenceHandler = options.onStreamSentence
+        ? (sentence: string) => {
+            streamedViaQueue = true;
+            options.onStreamSentence!(sentence);
+          }
+        : streamingQueue
+          ? (sentence: string) => {
+              streamedViaQueue = true;
+              streamingQueue.enqueue(sentence);
+            }
+          : undefined;
+
+      const llmAbortController = new AbortController();
+      const unregisterLlmAbort = ttsNarrator.registerActiveLlmAbort(llmAbortController);
 
       const MAX_PEEK_HOPS = 3;
       let workingHistory: ProviderMessage[] = effectiveHistory ? [...effectiveHistory] : [];
-      let llmPlan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
-        onStreamSentence: streamSentenceHandler,
-        pendingDisambiguation: activePending,
-        draftProposal: activeDraftProposal,
-      });
-
-      // S3.1: Bounded ReAct loop (max 3 read-only peek_* hops before answering or proposing)
-      let peekHop = 0;
-      while (
-        peekHop < MAX_PEEK_HOPS &&
-        llmPlan.actions.length > 0 &&
-        llmPlan.actions.every((a) => isPeekActionType(a.type))
-      ) {
-        const peekExec = await executePlan(llmPlan, context, turnId);
-        accumulatedPeekReceipts.push(...peekExec.receipts);
-        const obsSummary = formatReactObservation(peekExec.receipts);
-        workingHistory = [
-          ...workingHistory,
-          { role: 'assistant', content: JSON.stringify({ actions: llmPlan.actions }) },
-          { role: 'user', content: `Resultados de inspección rápida (solo lectura):\n${obsSummary}\nResponde al usuario o emite "propose_task" según corresponda.` },
-        ];
-        peekHop += 1;
-        llmPlan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
+      try {
+        let llmPlan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
           onStreamSentence: streamSentenceHandler,
           pendingDisambiguation: activePending,
-          draftProposal: voiceSessionStore.getDraftProposal(disambiguationScope),
+          draftProposal: activeDraftProposal,
+          signal: llmAbortController.signal,
         });
-      }
 
-      // L1 -> L2 Diagnosis Escalation (reusing already-collected peek_* context & cached prefix)
-      if (llmPlan.escalate && (options.diagnosisProvider || tieredProviders.canEscalate)) {
-        runLedger.recordVoiceClassification(turnId, { tier: 'L2' });
-        emitTrace({
-          turnId,
-          ev: 'intent.route',
-          route: 'llm',
-          tier: 'L2',
-          transport: 'cascaded',
-          routerDecisionAt: Date.now(),
-          reason: 'l1_escalate_diagnosis',
-          rawInput: input,
-          normalizedInput,
-        });
-        if (accumulatedPeekReceipts.length > 0) {
+        // S3.1: Bounded ReAct loop (max 3 read-only peek_* hops before answering or proposing)
+        let peekHop = 0;
+        while (
+          peekHop < MAX_PEEK_HOPS &&
+          llmPlan.actions.length > 0 &&
+          llmPlan.actions.every((a) => isPeekActionType(a.type))
+        ) {
+          const peekExec = await executePlan(llmPlan, context, turnId);
+          accumulatedPeekReceipts.push(...peekExec.receipts);
+          const obsSummary = formatReactObservation(peekExec.receipts);
           workingHistory = [
             ...workingHistory,
-            {
-              role: 'user',
-              content: `Contexto ya inspeccionado en L1:\n${formatReactObservation(accumulatedPeekReceipts)}`,
-            },
+            { role: 'assistant', content: JSON.stringify({ actions: llmPlan.actions }) },
+            { role: 'user', content: `Resultados de inspección rápida (solo lectura):\n${obsSummary}\nResponde al usuario o emite "propose_task" según corresponda.` },
           ];
+          peekHop += 1;
+          llmPlan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
+            onStreamSentence: streamSentenceHandler,
+            pendingDisambiguation: activePending,
+            draftProposal: voiceSessionStore.getDraftProposal(disambiguationScope),
+            signal: llmAbortController.signal,
+          });
         }
-        llmPlan = await planTurnLLM(normalizedInput, l2Provider, context, turnId, workingHistory, {
-          onStreamSentence: streamSentenceHandler,
-          pendingDisambiguation: activePending,
-          draftProposal: voiceSessionStore.getDraftProposal(disambiguationScope),
-          forceFullToolCatalog: true,
-        });
-      }
 
-      plan = llmPlan;
+        // L1 -> L2 Diagnosis Escalation (reusing already-collected peek_* context & cached prefix)
+        if (llmPlan.escalate && (options.diagnosisProvider || tieredProviders.canEscalate)) {
+          runLedger.recordVoiceClassification(turnId, { tier: 'L2' });
+          emitTrace({
+            turnId,
+            ev: 'intent.route',
+            route: 'llm',
+            tier: 'L2',
+            transport: 'cascaded',
+            routerDecisionAt: Date.now(),
+            reason: 'l1_escalate_diagnosis',
+            rawInput: input,
+            normalizedInput,
+          });
+          if (accumulatedPeekReceipts.length > 0) {
+            workingHistory = [
+              ...workingHistory,
+              {
+                role: 'user',
+                content: `Contexto ya inspeccionado en L1:\n${formatReactObservation(accumulatedPeekReceipts)}`,
+              },
+            ];
+          }
+          llmPlan = await planTurnLLM(normalizedInput, l2Provider, context, turnId, workingHistory, {
+            onStreamSentence: streamSentenceHandler,
+            pendingDisambiguation: activePending,
+            draftProposal: voiceSessionStore.getDraftProposal(disambiguationScope),
+            signal: llmAbortController.signal,
+            forceFullToolCatalog: true,
+          });
+        }
+
+        plan = llmPlan;
+      } finally {
+        unregisterLlmAbort();
+      }
 
       if (streamingQueue) {
         if (streamingQueue.hasSpokenAny()) {
+          streamedViaQueue = true;
           await streamingQueue.close();
         } else {
           streamingQueue.abort();
@@ -588,12 +608,13 @@ export async function runOperatorTurn(
       void recordDelegationsFromReceipts(context.workspaceId, receipts).catch(() => {});
     }
 
-    // 3. Speak reply via TTS if requested, not muted, and not already optimistically spoken (unless execution failed)
+    // 3. Speak reply via TTS if requested, not muted, not already streamed via queue, and not already optimistically spoken
     if (
       options.ttsEnabled &&
       !options.muted &&
       reply &&
       !isSilentTurn &&
+      !streamedViaQueue &&
       (!optimisticSpoken || !overallSuccess)
     ) {
       try {

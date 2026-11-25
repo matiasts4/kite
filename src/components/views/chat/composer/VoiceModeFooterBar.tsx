@@ -5,12 +5,17 @@ import React, { useEffect, useRef } from 'react';
 import { ArrowUpIcon } from '../ChatIcons';
 import { useVoiceSession } from '../../../../lib/operator/voice/voiceSessionStore';
 import { ttsNarrator } from '../../../../lib/operator/ttsNarrator';
+import { formatVoicePlaybackSpeed } from '../../../../lib/operator/voice/callResilience';
 
 export interface VoiceModeFooterBarProps {
   threadId?: string | null;
   hasDraftText?: boolean;
   onSendDraft?: () => void;
   onEndSession?: () => void;
+  playbackSpeed?: number;
+  onCyclePlaybackSpeed?: () => void;
+  micFlatlined?: boolean;
+  onReconnectMic?: () => void;
   className?: string;
 }
 
@@ -31,35 +36,70 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   hasDraftText = false,
   onSendDraft,
   onEndSession,
+  playbackSpeed,
+  onCyclePlaybackSpeed,
+  micFlatlined = false,
+  onReconnectMic,
   className = '',
 }) => {
   const voice = useVoiceSession();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hasObservedListeningRef = useRef(false);
+
+  if (voice.phase === 'inactive') {
+    hasObservedListeningRef.current = false;
+  } else if (voice.isListening) {
+    hasObservedListeningRef.current = true;
+  }
 
   const isThinking =
     voice.activeTurnStage === 'planning' ||
     voice.activeTurnStage === 'executing' ||
     voice.activeTurnStage === 'verifying';
   const isSpeaking = Boolean(voice.isSpeaking) || voice.activeTurnStage === 'speaking';
+  const isTransitioningMic =
+    voice.phase === 'starting' ||
+    voice.activeTurnStage === 'post_tts_guard' ||
+    (!voice.isListening &&
+      !voice.isTranscribing &&
+      !isSpeaking &&
+      !isThinking &&
+      (voice.activeTurnStage === 'done' || hasObservedListeningRef.current));
+  const isAwaitingConfirmation =
+    voice.draftProposal?.status === 'awaiting_confirmation' &&
+    !isTransitioningMic;
+  const isInHandsFreeWindow =
+    typeof voice.handsFreeReplyUntilMs === 'number' &&
+    voice.handsFreeReplyUntilMs > Date.now() &&
+    Boolean(voice.isListening);
+  const showFlatlineWarning = Boolean(
+    micFlatlined && !voice.micMuted && !voice.isPausedForDictation
+  );
+  const showSpeedControl = playbackSpeed !== undefined || Boolean(onCyclePlaybackSpeed);
+  const formattedSpeed = formatVoicePlaybackSpeed(playbackSpeed ?? 1);
 
   const statusText = (() => {
     if (voice.micMuted) return 'Micrófono en pausa';
     if (voice.isPausedForDictation) return 'En pausa por dictado';
+    if (showFlatlineWarning) return 'Sin señal de micrófono';
     if (isThinking) return voice.activeTurnDetail || 'Ejecutando en el espacio de trabajo…';
     if (isSpeaking) return 'Respondiendo en voz alta…';
     if (voice.isTranscribing) return 'Transcribiendo tu orden…';
+    if (isTransitioningMic) return 'Preparando micrófono…';
+    if (isAwaitingConfirmation) return 'Esperando tu confirmación…';
+    if (isInHandsFreeWindow) return 'Esperando tu respuesta…';
     return 'Escuchando en vivo';
   })();
 
   const statusTone = voice.micMuted
     ? 'muted'
-    : voice.isPausedForDictation
+    : voice.isPausedForDictation || showFlatlineWarning
     ? 'paused'
     : isThinking
     ? 'thinking'
     : isSpeaking
     ? 'speaking'
-    : voice.isTranscribing
+    : voice.isTranscribing || isTransitioningMic
     ? 'transcribing'
     : 'listening';
 
@@ -145,13 +185,22 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
 
   const handleToggleSpeaker = () => {
     if (!voice.speakerMuted) {
-      ttsNarrator.stop();
+      if (typeof ttsNarrator.stopWithRamp === 'function') {
+        ttsNarrator.stopWithRamp(20);
+      } else {
+        ttsNarrator.stop();
+      }
     }
     voice.toggleSpeakerMuted();
   };
 
   const handleEnd = () => {
-    ttsNarrator.stop();
+    if (typeof ttsNarrator.stopWithRamp === 'function') {
+      ttsNarrator.stopWithRamp(20);
+    } else {
+      ttsNarrator.stop();
+    }
+    ttsNarrator.closePersistentTtsSocket?.();
     voice.stopSession();
     onEndSession?.();
   };
@@ -163,11 +212,12 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
       className={`kite-composer-footer kite-voice-footer ${className}`.trim()}
     >
       {/* Left cluster — clean live voice status without Zed or technical badges */}
-      <div className="kite-composer-footer-left">
+      <div className="kite-composer-footer-left flex items-center gap-1.5">
         <span
           data-testid="voice-live-status-pill"
           className="kite-voice-status"
           data-tone={statusTone}
+          data-flatlined={showFlatlineWarning || undefined}
           role="status"
           aria-live="polite"
         >
@@ -179,6 +229,18 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
           </span>
           <span className="kite-voice-status__text">{statusText}</span>
         </span>
+        {showFlatlineWarning && onReconnectMic ? (
+          <button
+            type="button"
+            onClick={onReconnectMic}
+            data-testid="voice-reconnect-mic-btn"
+            aria-label="Reconectar micrófono"
+            title="Reconectar micrófono"
+            className="h-8 rounded-control px-2.5 text-xs font-medium inline-flex items-center justify-center border border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 transition-colors shrink-0 cursor-pointer"
+          >
+            Reconectar
+          </button>
+        ) : null}
       </div>
 
       {/* Right cluster — 32px call controls, or Send while a draft is typed */}
@@ -245,6 +307,25 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
                 </svg>
               )}
             </button>
+
+            {showSpeedControl ? (
+              <button
+                type="button"
+                onClick={onCyclePlaybackSpeed}
+                disabled={!onCyclePlaybackSpeed}
+                data-testid="voice-playback-speed-btn"
+                title={`Velocidad de reproducción: ${formattedSpeed}`}
+                aria-label={`Velocidad de reproducción ${formattedSpeed}`}
+                className="kite-voice-ctrl-btn h-8 rounded-control text-xs font-medium tabular-nums"
+                style={{
+                  width: 'auto',
+                  minWidth: 'var(--vl-control-md, 32px)',
+                  paddingInline: '0.5rem',
+                }}
+              >
+                {formattedSpeed}
+              </button>
+            ) : null}
 
             <button
               type="button"

@@ -1,11 +1,12 @@
 // Thread Voice Mode footer bar: displays live voice status on the left without assistant/model pills,
 // and keeps 32px call controls (or Send when typed draft exists) on the right.
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ArrowUpIcon } from '../ChatIcons';
 import { useVoiceSession } from '../../../../lib/operator/voice/voiceSessionStore';
 import { ttsNarrator } from '../../../../lib/operator/ttsNarrator';
 import { formatVoicePlaybackSpeed } from '../../../../lib/operator/voice/callResilience';
+import { loadOperatorConfig } from '../../../../lib/operator/operatorConfig';
 
 export interface VoiceModeFooterBarProps {
   threadId?: string | null;
@@ -45,6 +46,17 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   const voice = useVoiceSession();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hasObservedListeningRef = useRef(false);
+  const [transportMode, setTransportMode] = useState<'cascaded' | 'realtime'>(
+    () => loadOperatorConfig().voiceTransportMode ?? 'cascaded'
+  );
+
+  useEffect(() => {
+    const syncTransport = () => {
+      setTransportMode(loadOperatorConfig().voiceTransportMode ?? 'cascaded');
+    };
+    window.addEventListener('kite:operator-config-updated', syncTransport);
+    return () => window.removeEventListener('kite:operator-config-updated', syncTransport);
+  }, []);
 
   if (voice.phase === 'inactive') {
     hasObservedListeningRef.current = false;
@@ -209,6 +221,7 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
     <div
       data-testid="voice-mode-footer-bar"
       data-thread-id={threadId || undefined}
+      data-transport={transportMode}
       className={`kite-composer-footer kite-voice-footer ${className}`.trim()}
     >
       {/* Left cluster — clean live voice status without Zed or technical badges */}

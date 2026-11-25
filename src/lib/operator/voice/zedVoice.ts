@@ -22,6 +22,14 @@ import {
 import { getCachedLiveChatCatalog } from './sessionPrewarm';
 import { buildEnrichedTurnContext } from '../context/workspaceSnapshot';
 import type { TurnContext } from '../contract';
+import {
+  decodeWavBase64ToBlob,
+  getCachedNativeAudioLevel,
+  isNativeRustAudioSupported,
+  startNativeAudioCapture,
+  stopNativeAudioCapture,
+  subscribeNativeAudioEvents,
+} from './nativeAudioBridge';
 export { joinSpeechPartial, isSpanishOpenClause };
 import {
   AdaptiveVadController,
@@ -185,6 +193,8 @@ let streamingSttTranscript = '';
 let sessionMuted = false;
 let recognitionEpoch = 0;
 let recognitionRestartTimer: ReturnType<typeof setTimeout> | null = null;
+let nativeCaptureActive = false;
+let nativeEventUnsub: (() => void) | null = null;
 
 const speculativePreCapture = new SpeculativePartialPreCapture<TurnContext>({
   stabilityMs: 250,
@@ -206,6 +216,11 @@ export function resetSpeculativeTurnContextForTests(): void {
 }
 
 export function getCurrentAudioLevel(): number {
+  if (nativeCaptureActive) {
+    const nativeLevel = getCachedNativeAudioLevel();
+    audioLevel = Math.max(nativeLevel, audioLevel * 0.85);
+    return Math.min(1, audioLevel);
+  }
   if (!activeAnalyser) return 0;
   try {
     const buffer = new Uint8Array(activeAnalyser.frequencyBinCount);
@@ -919,8 +934,39 @@ export async function startOperatorListening(
   }
 
   startingPromise = (async () => {
-    // 1. Open or reuse microphone stream + AudioWorklet/Analyser
-    if (typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getUserMedia === 'function') {
+    // 0. Prefer native Rust cpal WASAPI capture when running inside Tauri desktop builds
+    if (isNativeRustAudioSupported()) {
+      const nativeStart = await startNativeAudioCapture({
+        deviceId: options.deviceId ?? null,
+        sampleRate: 16000,
+      });
+      if (nativeStart.ok && isSessionActive) {
+        nativeCaptureActive = true;
+        nativeEventUnsub = await subscribeNativeAudioEvents({
+          onAudioLevel: (lvl) => options.onAudioLevel?.(lvl),
+          onSttPartial: (txt) => {
+            if (!isSessionActive) return;
+            streamingSttTranscript = txt;
+            hasDetectedSpeech = true;
+            if (!speechStartTimestamp) speechStartTimestamp = Date.now();
+            resetSilenceTimer();
+            speculativePreCapture.update(txt);
+            options.onInterim?.(txt);
+          },
+          onSttFinal: (txt) => {
+            if (!isSessionActive) return;
+            streamingSttTranscript = txt;
+            lastRecognizedText = txt;
+            resetSilenceTimer();
+            speculativePreCapture.update(txt);
+            options.onInterim?.(txt);
+          },
+        });
+      }
+    }
+
+    // 1. Open or reuse WebView2 microphone stream + AudioWorklet/Analyser (fallback or browser preview)
+    if (!nativeCaptureActive && typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.getUserMedia === 'function') {
       try {
         await ensureAudioGraphOpen(options.deviceId, reuseGraph);
         if (!isSessionActive) {
@@ -968,8 +1014,8 @@ export async function startOperatorListening(
       }
     }
 
-    // 2. Start SpeechRecognition in continuous mode with clean per-turn instance creation
-    const SpeechImpl = getSpeechRecognitionImpl();
+    // 2. Start SpeechRecognition only as browser-preview/fallback when native Rust capture is inactive
+    const SpeechImpl = !nativeCaptureActive ? getSpeechRecognitionImpl() : null;
     if (SpeechImpl && isSessionActive && turnRecognitionEpoch === recognitionEpoch) {
       try {
         createAndStartRecognition(SpeechImpl, options, turnRecognitionEpoch, false);
@@ -1033,7 +1079,19 @@ export async function stopOperatorListening(options?: {
   const promise = currentSessionPromise;
   currentSessionPromise = null;
 
+  const wasNativeCapture = nativeCaptureActive;
+  nativeCaptureActive = false;
+  if (nativeEventUnsub) {
+    try {
+      nativeEventUnsub();
+    } catch {}
+    nativeEventUnsub = null;
+  }
+
   if (discard) {
+    if (wasNativeCapture) {
+      void stopNativeAudioCapture();
+    }
     currentOptions = {};
     activeWsHandshakeBuffer?.clear();
     preConnectBuffer.clear();
@@ -1087,7 +1145,17 @@ export async function stopOperatorListening(options?: {
   const effectivePcmChunks =
     samplesToTrim > 0 ? trimTrailingPcmSamples(rawPcmChunks, samplesToTrim) : rawPcmChunks;
   const totalPcmSamples = effectivePcmChunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  if (hasSpeechPayload && totalPcmSamples > 0) {
+  if (wasNativeCapture) {
+    try {
+      const nativeStop = await stopNativeAudioCapture();
+      if (nativeStop.ok && nativeStop.wavBase64) {
+        audioBlob = decodeWavBase64ToBlob(nativeStop.wavBase64);
+      }
+    } catch (e) {
+      console.warn('[ZedVoice] stopNativeAudioCapture error:', e);
+    }
+  }
+  if (!audioBlob && hasSpeechPayload && totalPcmSamples > 0) {
     try {
       audioBlob = encodeWavBlob(effectivePcmChunks, audioSampleRate);
     } catch (e) {
@@ -1335,6 +1403,16 @@ function stopAudioAnalysis(): void {
  */
 export async function releaseOperatorCapture(): Promise<void> {
   speculativePreCapture.reset();
+  if (nativeCaptureActive) {
+    nativeCaptureActive = false;
+    void stopNativeAudioCapture();
+  }
+  if (nativeEventUnsub) {
+    try {
+      nativeEventUnsub();
+    } catch {}
+    nativeEventUnsub = null;
+  }
   isSessionActive = false;
   isPersistentGraphActive = false;
   currentContinuousMode = false;

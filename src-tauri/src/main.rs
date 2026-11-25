@@ -60,6 +60,7 @@ pub mod core_wire;
 pub mod core_daemon;
 pub mod ctx_bridge;
 pub mod user_path;
+pub mod voice_audio;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -398,6 +399,7 @@ fn main() {
                 }
             });
             crate::system_metrics::init_benchmark_from_env();
+            crate::window::init_companion_global_shortcut(app.handle().clone());
             let windows = app.webview_windows();
             log_trace(&format!("Windows count in setup: {}", windows.len()));
             for (label, w) in &windows {
@@ -455,6 +457,9 @@ fn main() {
             app_window_minimize,
             app_window_start_dragging,
             app_window_toggle_maximize,
+            register_companion_global_shortcut,
+            unregister_companion_global_shortcut,
+            get_companion_global_shortcut,
             apply_voice_import,
             archive_agent_chat_thread,
             archive_chat_thread,
@@ -791,6 +796,10 @@ fn main() {
             ctx_bridge::ctx_ccr_retrieve,
             ctx_bridge::ctx_read_compact,
             audio_ducking::probe_microphone_privacy_status,
+            voice_audio::voice_audio_list_devices,
+            voice_audio::voice_audio_start_capture,
+            voice_audio::voice_audio_stop_capture,
+            voice_audio::voice_audio_status,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {

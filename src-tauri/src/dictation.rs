@@ -230,9 +230,21 @@ pub async fn update_dictation_settings(request: Option<Value>) -> Value {
 }
 
 pub fn list_dictation_input_devices_direct(_request: Option<Value>) -> Value {
+    let devices: Vec<Value> = crate::voice_audio::capture::list_input_devices()
+        .into_iter()
+        .map(|d| {
+            json!({
+                "id": d.id,
+                "label": d.name,
+                "isDefault": d.is_default,
+                "sampleRate": d.sample_rate,
+                "channels": d.channels
+            })
+        })
+        .collect();
     json!({
         "schemaVersion": 1,
-        "devices": [],
+        "devices": devices,
         "selectedId": current_settings().get("deviceId").cloned().unwrap_or(Value::Null)
     })
 }
@@ -268,7 +280,35 @@ pub async fn request_dictation_permission(request: Option<Value>) -> Value {
 
 pub fn start_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
-    let result = dictation_error(&id);
+    let settings = current_settings();
+    let device_id = settings
+        .get("deviceId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let result = match crate::voice_audio::capture::start_capture(device_id, 16000) {
+        Ok(_) => json!({
+            "schemaVersion": 1,
+            "requestId": id,
+            "phase": "listening",
+            "level": 0.0,
+            "durationMs": 0,
+            "transcript": "",
+            "error": Value::Null
+        }),
+        Err(err) => json!({
+            "schemaVersion": 1,
+            "requestId": id,
+            "phase": "error",
+            "level": 0.0,
+            "durationMs": 0,
+            "transcript": "",
+            "error": {
+                "code": "captureFailed",
+                "message": err
+            }
+        }),
+    };
     dictation_takes().lock().unwrap().insert(id, result.clone());
     result
 }
@@ -282,12 +322,15 @@ pub async fn start_dictation(request: Option<Value>) -> Value {
 
 pub fn read_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
-    dictation_takes()
-        .lock()
-        .unwrap()
-        .get(&id)
-        .cloned()
-        .unwrap_or_else(|| dictation_error(&id))
+    let status = crate::voice_audio::capture::get_capture_status();
+    let mut takes = dictation_takes().lock().unwrap();
+    if let Some(entry) = takes.get_mut(&id) {
+        if entry.get("phase").and_then(|v| v.as_str()) == Some("listening") && status.active {
+            entry["level"] = json!(status.level);
+        }
+        return entry.clone();
+    }
+    dictation_error(&id)
 }
 
 #[tauri::command]
@@ -299,8 +342,48 @@ pub async fn read_dictation(request: Option<Value>) -> Value {
 
 pub fn stop_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
-    dictation_takes().lock().unwrap().remove(&id);
-    Value::Null
+    let wav = crate::voice_audio::capture::stop_capture_and_export_wav();
+    let settings = current_settings();
+    let language = settings
+        .get("language")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .to_string();
+
+    let mut transcript = String::new();
+    let mut err_obj = Value::Null;
+
+    if let Some(wav_bytes) = wav {
+        let grok_key = crate::credentials::get_vault_credential("grok_transcription")
+            .or_else(|| crate::credentials::get_vault_credential("grok"));
+        if let Some(api_key) = grok_key.filter(|k| !k.trim().is_empty()) {
+            let res = tauri::async_runtime::block_on(
+                crate::voice_audio::stt_ws::transcribe_wav_http_fallback(
+                    wav_bytes,
+                    &api_key,
+                    "https://api.x.ai/v1",
+                    "grok-voice-transcribe-2.0",
+                    &language,
+                ),
+            );
+            match res {
+                Ok(text) => transcript = text,
+                Err(err) => err_obj = json!({ "code": "sttFailed", "message": err }),
+            }
+        }
+    }
+
+    let result = json!({
+        "schemaVersion": 1,
+        "requestId": id,
+        "phase": if err_obj.is_null() { "done" } else { "error" },
+        "level": 0.0,
+        "durationMs": 0,
+        "transcript": transcript,
+        "error": err_obj
+    });
+    dictation_takes().lock().unwrap().insert(id, result.clone());
+    result
 }
 
 #[tauri::command]
@@ -312,6 +395,7 @@ pub async fn stop_dictation(request: Option<Value>) -> Value {
 
 pub fn cancel_dictation_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
+    crate::voice_audio::capture::stop_capture();
     dictation_takes().lock().unwrap().remove(&id);
     Value::Null
 }

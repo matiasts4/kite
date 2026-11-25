@@ -1,8 +1,20 @@
+import { listNativeAudioInputDevices } from './nativeAudioBridge';
+
 export interface AudioInputDeviceInfo {
   deviceId: string;
   label: string;
   groupId?: string;
 }
+
+export interface AudioOutputDeviceInfo {
+  deviceId: string;
+  label: string;
+  groupId?: string;
+}
+
+type SinkIdCapableMediaElement = HTMLMediaElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
 
 export interface MicrophoneTester {
   stop: () => void;
@@ -117,8 +129,12 @@ export async function getAudioInputStream(preferredDeviceId?: string | null): Pr
  * Enumerate connected audio input devices (microphones)
  */
 export async function listAudioInputDevices(): Promise<AudioInputDeviceInfo[]> {
+  const nativeDevices = await listNativeAudioInputDevices().catch(() => []);
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
-    return [];
+    return nativeDevices.map((d) => ({
+      deviceId: d.id,
+      label: d.name,
+    }));
   }
   try {
     let devices = await navigator.mediaDevices.enumerateDevices();
@@ -139,15 +155,102 @@ export async function listAudioInputDevices(): Promise<AudioInputDeviceInfo[]> {
       }
     }
 
-    return audioInputs.map((d, idx) => ({
+    const browserMapped = audioInputs.map((d, idx) => ({
       deviceId: d.deviceId,
       label: d.label || `Micrófono ${idx + 1}`,
       groupId: d.groupId,
     }));
+    if (nativeDevices.length === 0) {
+      return browserMapped;
+    }
+    const existingLabels = new Set(browserMapped.map((d) => d.label.toLowerCase()));
+    const merged = [...browserMapped];
+    for (const nd of nativeDevices) {
+      if (!existingLabels.has(nd.name.toLowerCase())) {
+        merged.push({ deviceId: nd.id, label: nd.name });
+      }
+    }
+    return merged;
   } catch (err) {
     console.warn('[ZedVoice] Error al enumerar micrófonos:', err);
+    return nativeDevices.map((d) => ({ deviceId: d.id, label: d.name }));
+  }
+}
+
+/**
+ * Enumerate connected audio output devices (speakers / headphones)
+ */
+export async function listAudioOutputDevices(): Promise<AudioOutputDeviceInfo[]> {
+  if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
     return [];
   }
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioOutputs = devices.filter((d) => d.kind === 'audiooutput');
+    return audioOutputs.map((d, idx) => ({
+      deviceId: d.deviceId,
+      label: d.label || `Altavoz ${idx + 1}`,
+      groupId: d.groupId,
+    }));
+  } catch (err) {
+    console.warn('[ArgosVoice] Error al enumerar altavoces:', err);
+    return [];
+  }
+}
+
+/**
+ * Routes an HTMLMediaElement output to a specific audio sink when supported by the runtime.
+ * Falls back gracefully to false when setSinkId is unavailable or rejected.
+ */
+export async function applyAudioOutputDevice(
+  audioElement: HTMLMediaElement,
+  sinkId?: string | null
+): Promise<boolean> {
+  const target = audioElement as SinkIdCapableMediaElement | null | undefined;
+  if (!target || typeof target.setSinkId !== 'function') {
+    return false;
+  }
+
+  const normalizedSinkId =
+    !sinkId || sinkId === 'automatic' || sinkId === 'default' ? '' : sinkId;
+
+  try {
+    await target.setSinkId(normalizedSinkId);
+    return true;
+  } catch (err) {
+    console.warn('[ArgosVoice] No se pudo aplicar el dispositivo de salida:', err);
+    return false;
+  }
+}
+
+/**
+ * Subscribes to navigator.mediaDevices 'devicechange' events for hot-swap recovery.
+ */
+export function subscribeAudioDeviceChanges(onDeviceChange: () => void): () => void {
+  if (
+    typeof navigator === 'undefined' ||
+    !navigator.mediaDevices ||
+    typeof navigator.mediaDevices.addEventListener !== 'function'
+  ) {
+    return () => {};
+  }
+
+  let active = true;
+  const listener = () => {
+    if (!active) return;
+    onDeviceChange();
+  };
+
+  navigator.mediaDevices.addEventListener('devicechange', listener);
+  return () => {
+    if (!active) return;
+    active = false;
+    try {
+      navigator.mediaDevices.removeEventListener?.('devicechange', listener);
+    } catch {
+      // ignore
+    }
+  };
 }
 
 /**

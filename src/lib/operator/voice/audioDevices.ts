@@ -167,7 +167,7 @@ export async function listAudioInputDevices(): Promise<AudioInputDeviceInfo[]> {
     const merged = [...browserMapped];
     for (const nd of nativeDevices) {
       if (!existingLabels.has(nd.name.toLowerCase())) {
-        merged.push({ deviceId: nd.id, label: nd.name });
+        merged.push({ deviceId: nd.id, label: nd.name, groupId: '' });
       }
     }
     return merged;
@@ -196,6 +196,23 @@ export async function listAudioOutputDevices(): Promise<AudioOutputDeviceInfo[]>
     console.warn('[ArgosVoice] Error al enumerar altavoces:', err);
     return [];
   }
+}
+
+export function getSelectedAudioOutputDeviceId(): string | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem('kite_selected_output_device_id');
+    if (!raw || raw === 'automatic' || raw === 'default') return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+export async function applyPreferredAudioOutputDevice(
+  audioElement: HTMLMediaElement
+): Promise<boolean> {
+  return applyAudioOutputDevice(audioElement, getSelectedAudioOutputDeviceId());
 }
 
 /**

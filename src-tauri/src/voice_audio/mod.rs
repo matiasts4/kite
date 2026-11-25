@@ -1,4 +1,6 @@
+pub mod call_receipts;
 pub mod capture;
+pub mod offline_stt;
 pub mod resampler;
 pub mod ring_buffer;
 pub mod stt_ws;

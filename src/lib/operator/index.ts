@@ -42,6 +42,7 @@ import {
   recordDelegationsFromReceipts,
 } from './context/episodicMemory';
 import { ensureVoiceSessionPrewarmHook } from './voice/sessionPrewarm';
+import { ensureVoiceCallReceiptsHook } from './voice/voiceCallReceipts';
 
 export { resolvePlannerProvider } from './providers/resolvePlanner';
 
@@ -194,6 +195,7 @@ export async function runOperatorTurn(
 ): Promise<OperatorTurnResult> {
   ensureEpisodicSessionHook();
   ensureVoiceSessionPrewarmHook();
+  ensureVoiceCallReceiptsHook();
   const startTime = Date.now();
   const sttFinalizedAt = options.sttFinalizedAt ?? (options.source === 'voz' ? startTime : undefined);
   const turnId = options.turnId || `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;

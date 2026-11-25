@@ -1,10 +1,12 @@
-// Kite Code — Operator System Prompt Builder
-// Single source of truth for SETH operator identity, rules, workspace roster, episodic memory, and JSON schema.
+// Kite Code — Operator System Prompt Builder (Argos)
+// Splits static cacheable Argos instructions (`messages[0]` prefix) from dynamic workspace context tail
+// compressed with `kite-ctx` (`< 250 tokens`) and consultative multi-turn proposal state.
 
 import type { TurnContext } from '../contract';
 import type { ConsultChatsResult } from '../chatIndex';
 import { cleanAgentTitle } from '../../agentNames';
 import { loadOperatorConfig, loadZedMemoryNotes, type ZedMemoryNote } from '../operatorConfig';
+import { ctxClient } from '../context/ctxClient';
 import { formatWorkspaceRosterForPrompt } from '../context/workspaceSnapshot';
 import {
   formatEpisodicMemoryForPrompt,
@@ -15,7 +17,11 @@ import {
   getSessionWorkingContext,
   type SessionWorkingContext,
 } from '../context/workingContext';
-import type { PendingDisambiguationState } from '../voice/voiceSessionStore';
+import {
+  voiceSessionStore,
+  type DraftTaskProposal,
+  type PendingDisambiguationState,
+} from '../voice/voiceSessionStore';
 
 function filterMemoryNotesForWorkspace(
   notes: ZedMemoryNote[],
@@ -38,7 +44,8 @@ function buildPersonaSection(): { assistantName: string; personaBlock: string } 
     const config = loadOperatorConfig();
     const p = config.persona;
     const rawName = p?.name?.trim();
-    const assistantName = rawName && rawName.toLowerCase() !== 'zed' ? rawName : 'SETH';
+    const assistantName =
+      rawName && rawName.toLowerCase() !== 'zed' ? rawName : 'Argos';
     const parts: string[] = [];
     if (p?.builderCallMe?.trim()) {
       parts.push(`Dirígete al usuario como "${p.builderCallMe.trim()}" cuando sea natural.`);
@@ -61,85 +68,37 @@ function buildPersonaSection(): { assistantName: string; personaBlock: string } 
       personaBlock: parts.length > 0 ? `\nIDENTIDAD Y ESTILO (${assistantName}):\n- ${parts.join('\n- ')}` : '',
     };
   } catch {
-    return { assistantName: 'SETH', personaBlock: '' };
+    return { assistantName: 'Argos', personaBlock: '' };
   }
 }
 
 export interface BuildPromptOptions {
   pendingDisambiguation?: PendingDisambiguationState | null;
   workingContext?: SessionWorkingContext | null;
+  draftProposal?: DraftTaskProposal | TurnContext['draftProposal'] | null;
+  packedVoiceContext?: string;
+  /** When true (native tool calling active), omit redundant textual JSON schema and few-shot examples. */
+  nativeToolsEnabled?: boolean;
 }
 
-export function buildOperatorSystemPrompt(
-  context?: TurnContext,
-  chatReach?: ConsultChatsResult,
-  options?: BuildPromptOptions
+export interface OperatorPromptParts {
+  staticPrefix: string;
+  dynamicTail: string;
+  fullPrompt: string;
+}
+
+export function buildStaticOperatorPromptPrefix(
+  assistantNameArg?: string,
+  personaBlockArg?: string,
+  options?: { nativeToolsEnabled?: boolean }
 ): string {
-  const { assistantName, personaBlock } = buildPersonaSection();
+  const persona =
+    assistantNameArg !== undefined
+      ? { assistantName: assistantNameArg, personaBlock: personaBlockArg ?? '' }
+      : buildPersonaSection();
+  const { assistantName, personaBlock } = persona;
 
-  let terminalsDesc = 'No hay terminales activas en este momento.';
-  if (context?.activeTerminals && context.activeTerminals.length > 0) {
-    terminalsDesc = context.activeTerminals
-      .map((t, i) => {
-        const agentCodename = t.who || cleanAgentTitle(t.title) || '';
-        return `Terminal ${i + 1}: ID="${t.sessionId}", Motor=${t.engine || 'desconocido'}, Agente="${agentCodename}", Título="${t.title || ''}", Estado=${t.state || 'activo'}`;
-      })
-      .join('\n');
-  }
-
-  // Strictly filter local notes by active workspace (S5) while preserving unscoped notes.
-  const notes = filterMemoryNotesForWorkspace(loadZedMemoryNotes(), context);
-  const notesSection =
-    notes.length > 0
-      ? `\n\nNOTAS DE MEMORIA DEL ASISTENTE:\n${notes.map((note) => `- ${note.content}`).join('\n')}`
-      : '';
-
-  // Reconciled workspace episodic memory (S6)
-  const episodicSection = context?.workspaceId
-    ? formatEpisodicMemoryForPrompt(
-        getCachedWorkspaceEpisodicMemory(context.workspaceId),
-        context
-      )
-    : '';
-
-  // Compact roster for threads, subagents, and autonomous agents (S5)
-  const hasExtendedRoster =
-    Boolean(context?.activeThreads?.length) ||
-    Boolean(context?.activeSubagents?.length) ||
-    Boolean(context?.autonomousAgents?.length);
-  const rosterSection = hasExtendedRoster
-    ? `\n${formatWorkspaceRosterForPrompt(context)}`
-    : `\nTerminales abiertas en este proyecto:\n${terminalsDesc}`;
-
-  // Live long-session working context (S4: topic, decisions, subagent findings, rolled-off digest)
-  const resolvedWorkingContext =
-    options?.workingContext !== undefined
-      ? options.workingContext
-      : context?.boundThreadId
-        ? getSessionWorkingContext(context.boundThreadId)
-        : null;
-  const workingContextSection = formatWorkingContextForPrompt(resolvedWorkingContext);
-
-  // Active pending disambiguation state (S8)
-  const pending = options?.pendingDisambiguation;
-  const pendingSection = pending
-    ? `\n\nDESAMBIGUACIÓN PENDIENTE DEL TURNO ANTERIOR:\n- Orden original: "${pending.originalInput}"\n- Pregunta ya formulada: "${pending.question}"\n- Dato faltante: ${pending.missingSlot}${pending.candidates?.length ? `\n- Candidatos ofrecidos: ${pending.candidates.join(', ')}` : ''}\n- Instrucción: Usa la respuesta actual del usuario para resolver este dato y ejecutar la acción (o cancela si pide dejarlo). NO hagas otra pregunta de aclaración consecutiva.`
-    : '';
-
-  let chatReachSection = '';
-  if (chatReach) {
-    if (chatReach.kind === 'read') {
-      chatReachSection = `\n\nCONTENIDO DE LA CONVERSACIÓN CONSULTADA (${chatReach.entry.title} - ${chatReach.entry.cli}):\n${chatReach.body}`;
-    } else if (chatReach.kind === 'index' && chatReach.entries.length > 0) {
-      chatReachSection = `\n\nÍNDICE DE CONVERSACIONES Y CHATS (CLIs / HILOS DISPONIBLES):\n${chatReach.entries
-        .map((e) => `- ${e.title} [Motor: ${e.cli}, ID: ${e.id}]${e.lastDecision ? `: ${e.lastDecision}` : ''}`)
-        .join('\n')}`;
-    } else if (chatReach.kind === 'miss') {
-      chatReachSection = `\n\nBÚSQUEDA DE CHATS: No se encontró ninguna conversación que coincida con "${chatReach.named}" en este proyecto.`;
-    }
-  }
-
-  return `Eres ${assistantName}, el Asistente Operador y Coordinador conversacional de Kite Code. Tu función es conversar con el usuario en español, afinar instrucciones cuando falte un dato crítico y delegar o ejecutar acciones sobre hilos (Threads), subagentes, agentes autónomos y terminales.${personaBlock}
+  const coreStaticRules = `Eres ${assistantName}, el Asistente Operador y Coordinador conversacional de Kite Code. Tu función es conversar con el usuario en español, inspeccionar rápidamente el estado real del proyecto, acordar y afinar propuestas de trabajo cuando corresponda y delegar o ejecutar acciones sobre hilos (Threads), subagentes, agentes autónomos y terminales.${personaBlock}
 
 REGLAS CRÍTICAS:
 1. Responde SIEMPRE con un ÚNICO objeto JSON válido.
@@ -200,14 +159,40 @@ REGLAS CRÍTICAS:
    - Autoajustar / igualar dimensiones ("autoajusta las terminales", "iguala los paneles") => {"type": "manage_pane_layout", "operation": "equalize"}.
    - También existen "split-horizontal", "split-vertical", "focus" y "zoom" con "target" opcional.
 15. MEMORIA ENTRE SESIONES Y CONVERSACIONES PREVIAS:
-   - Si el usuario pregunta por decisiones anteriores, "continúa lo de ayer", o sobre chats previos de este proyecto, REVISA las secciones MEMORIA EPISÓDICA e ÍNDICE DE CONVERSACIONES provistas al final del contexto.
+   - Si el usuario pregunta por decisiones anteriores, "continúa lo de ayer", o sobre chats previos de este proyecto, puedes usar {"type": "recall_conversations", "query": "..."} o revisar ÍNDICE DE CONVERSACIONES y MEMORIA EPISÓDICA si están en tu contexto.
    - Responde con precisión citando lo registrado en este proyecto. NUNCA digas que no tienes acceso cuando la información esté en tu contexto.
+16. FLUJO CONSULTIVO MULTI-TURNO (INSPECCIÓN -> PROPUESTA -> CONFIRMACIÓN):
+   - **Inspección rápida de solo lectura ("peek_*", < 450ms)**: antes de contestar o proponer tareas complejas sobre cambios, archivos o runs, puedes emitir "peek_changes", "peek_runs", "peek_agents", "peek_files" o "recall_conversations". El sistema ejecutará esas lecturas y te volverá a llamar con el resultado real.
+   - **Propuesta consultiva ("propose_task")**: cuando el usuario describa una tarea de desarrollo, análisis o delegación (salvo que pida ejecución inmediata "hazlo directo / sin preguntar"), usa "propose_task" con "title", "taskBrief", "targetKind" y "questionForUser" para acordar alcance, motor o enfoque antes de lanzar subagentes.
+   - **Refinamiento ("refine_proposal")**: si ya existe una PROPUESTA DE TAREA ACTIVA en el contexto y el usuario pide ajustes ("mejor con Claude", "agrega pruebas"), usa "refine_proposal" actualizando solo los campos modificados.
+   - **Confirmación / Cancelación ("confirm_proposal" / "cancel_proposal")**: cuando el usuario apruebe la propuesta activa ("dale", "confirmar", "lánzalo", "hazlo"), emite "confirm_proposal"; si la descarta, emite "cancel_proposal".
+   - **Silencio intencional ("stay_silent")**: si la transcripción fue ruido ambiental o no requiere respuesta hablada, emite {"actions": [{"type": "stay_silent"}], "reply": ""}.`;
+
+  if (options?.nativeToolsEnabled) {
+    return `${coreStaticRules}
+
+MODO HERRAMIENTAS NATIVAS:
+- Usa directamente las tool calls declaradas en la solicitud para ejecutar acciones; para respuesta puramente conversacional devuelve JSON con "answer" primero y "actions": [].
+- Si la solicitud requiere razonamiento arquitectónico profundo, planificación ODD extensa o múltiples pasos complejos, devuelve {"escalate": true, "answer": "Un momento, estoy analizando el detalle completo.", "actions": []}.`;
+  }
+
+  return `${coreStaticRules}
 
 ESQUEMA JSON PERMITIDO:
 {
   "answer": "Respuesta conversacional breve (2-4 oraciones) cuando actions esté vacío (colócalo primero para streaming)",
   "reply": "Confirmación breve y natural en español cuando ejecutes acciones",
   "actions": [
+    // { "type": "peek_changes", "includeDiff": false }
+    // { "type": "peek_runs", "limit": 5, "filterStatus": "all" }
+    // { "type": "peek_agents", "scope": "all" }
+    // { "type": "peek_files", "path": "src/ruta.ts", "mode": "signatures" | "map" | "lines" | "full", "startLine": 1, "endLine": 80 }
+    // { "type": "recall_conversations", "query": "tema o nombre", "limit": 5 }
+    // { "type": "propose_task", "targetKind": "subagent" | "thread" | "agent" | "terminal", "title": "título corto", "taskBrief": "brief accionable", "role": "Explorer" | "ODD Planner", "provider": "grok" | "claude" | "codex" | "antigravity" | "opencode", "mode": "explore" | "odd" | "execute", "oddMode": false, "workspaceMode": "inherit" | "share" | "branch", "questionForUser": "pregunta breve de confirmación" }
+    // { "type": "refine_proposal", "title": "opcional", "taskBrief": "opcional", "provider": "opcional", "mode": "explore" | "odd" | "execute", "oddMode": true, "workspaceMode": "inherit" | "share" | "branch", "questionForUser": "¿Confirmamos así?" }
+    // { "type": "confirm_proposal" }
+    // { "type": "cancel_proposal", "reason": "opcional" }
+    // { "type": "stay_silent", "reason": "ruido ambiental" }
     // { "type": "spawn_subagent", "provider": "grok" | "claude" | "codex" | "antigravity" | "opencode", "role": "Explorer" | "ODD Planner" | "rol corto", "workspace": "inherit" | "share" | "branch", "via": "thread" | "terminal", "mode": "explore" | "odd" | "execute", "oddMode": false, "task": "tarea acotada a delegar" }
     // { "type": "launch_thread", "threadId": "id opcional", "provider": "grok" | "claude" | "codex" | "antigravity" | "opencode", "title": "título corto opcional", "body": "instrucción clara para el hilo", "oddMode": true, "focusThread": false }
     // { "type": "launch_agent", "agentQuery": "nombre del agente autónomo", "provider": "grok" | "claude" | "codex" | "antigravity" | "opencode", "body": "instrucción para el agente", "oddMode": true, "focusAgent": false }
@@ -260,6 +245,14 @@ Entrada: "quiero revisar cómo funciona el asistente y el orquestador para charl
 Salida:
 {"reply": "Mandé un subagente explorador a revisar el asistente y el orquestador; apenas vuelva te cuento qué encontró.", "actions": [{"type": "spawn_subagent", "role": "Explorer", "via": "thread", "mode": "explore", "oddMode": false, "task": "Inspeccionar el asistente operador y el orquestador de subagentes para resumir su arquitectura actual y cuellos de botella."}]}
 
+Entrada: "quiero refactorizar el módulo de autenticación"
+Salida:
+{"reply": "Propongo lanzar un subagente explorador sobre auth antes de editar. ¿Querés que revise los cambios actuales primero o armamos el ODD directo?", "actions": [{"type": "propose_task", "targetKind": "subagent", "title": "Refactorizar módulo de autenticación", "role": "Explorer", "mode": "explore", "oddMode": false, "taskBrief": "Inspeccionar el módulo de autenticación actual, dependencias y tests antes de planificar el refactor.", "questionForUser": "¿Querés que empiece con esa exploración o armamos el ODD directo?"}]}
+
+Entrada: "mejor que arme el ODD directo con Claude"
+Salida:
+{"reply": "Actualicé la propuesta para armar el ODD de autenticación con Claude. ¿Lo confirmo?", "actions": [{"type": "refine_proposal", "provider": "claude", "role": "ODD Planner", "mode": "odd", "oddMode": true, "taskBrief": "Explorar el módulo de autenticación y redactar el ODD completo para refactorizarlo.", "questionForUser": "¿Lo confirmo así?"}]}
+
 Entrada: "lanza un subagente con antigravity para armar el ODD de notificaciones"
 Salida:
 {"reply": "Lanzando un subagente con AntiGravity para armar el ODD de notificaciones.", "actions": [{"type": "spawn_subagent", "provider": "antigravity", "role": "ODD Planner", "via": "thread", "mode": "odd", "oddMode": true, "task": "Explorar el sistema actual de notificaciones y armar la especificación ODD en odd/tasks/."}]}
@@ -270,9 +263,186 @@ Salida:
 
 Entrada: "hola, ¿cómo estás?"
 Salida:
-{"answer": "Hola, todo listo en el proyecto actual. ¿Qué coordinamos ahora?", "reply": "Hola, todo listo en el proyecto actual. ¿Qué coordinamos ahora?", "actions": []}
+{"answer": "Hola, todo listo en el proyecto actual. ¿Qué coordinamos ahora?", "reply": "Hola, todo listo en el proyecto actual. ¿Qué coordinamos ahora?", "actions": []}`;
+}
 
-CONTEXTO ACTUAL DEL SISTEMA:
+export function buildDynamicVoiceContextTail(
+  context?: TurnContext,
+  chatReach?: ConsultChatsResult,
+  options?: BuildPromptOptions
+): string {
+  let terminalsDesc = 'No hay terminales activas en este momento.';
+  if (context?.activeTerminals && context.activeTerminals.length > 0) {
+    terminalsDesc = context.activeTerminals
+      .map((t, i) => {
+        const agentCodename = t.who || cleanAgentTitle(t.title) || '';
+        return `Terminal ${i + 1}: ID="${t.sessionId}", Motor=${t.engine || 'desconocido'}, Agente="${agentCodename}", Título="${t.title || ''}", Estado=${t.state || 'activo'}`;
+      })
+      .join('\n');
+  }
+
+  // Strictly filter local notes by active workspace (S5) while preserving unscoped notes.
+  const notes = filterMemoryNotesForWorkspace(loadZedMemoryNotes(), context);
+  const notesSection =
+    notes.length > 0
+      ? `\n\nNOTAS DE MEMORIA DEL ASISTENTE:\n${notes.map((note) => `- ${note.content}`).join('\n')}`
+      : '';
+
+  // Reconciled workspace episodic memory (S6)
+  const episodicSection = context?.workspaceId
+    ? formatEpisodicMemoryForPrompt(
+        getCachedWorkspaceEpisodicMemory(context.workspaceId),
+        context
+      )
+    : '';
+
+  // Compact roster for threads, subagents, and autonomous agents (S5)
+  const hasExtendedRoster =
+    Boolean(context?.activeThreads?.length) ||
+    Boolean(context?.activeSubagents?.length) ||
+    Boolean(context?.autonomousAgents?.length);
+  const rosterSection = hasExtendedRoster
+    ? `\n${formatWorkspaceRosterForPrompt(context)}`
+    : `\nTerminales abiertas en este proyecto:\n${terminalsDesc}`;
+
+  // Live long-session working context (S4: topic, decisions, subagent findings, rolled-off digest)
+  const resolvedWorkingContext =
+    options?.workingContext !== undefined
+      ? options.workingContext
+      : context?.boundThreadId
+        ? getSessionWorkingContext(context.boundThreadId)
+        : null;
+  const workingContextSection = formatWorkingContextForPrompt(resolvedWorkingContext);
+
+  // Active DraftTaskProposal (S3: multi-turn consultative agreement)
+  const scopeKey = context?.boundThreadId || context?.workspaceId || '__default__';
+  const activeDraftProposal =
+    options?.draftProposal !== undefined
+      ? options.draftProposal
+      : context?.draftProposal !== undefined
+        ? context.draftProposal
+        : voiceSessionStore.getDraftProposal(scopeKey);
+  const proposalSection = activeDraftProposal
+    ? `\n\nPROPUESTA DE TAREA ACTIVA (PENDIENTE DE CONFIRMACIÓN):\n- ID: ${activeDraftProposal.proposalId} (rev ${activeDraftProposal.revision}, estado=${activeDraftProposal.status})\n- Destino: ${activeDraftProposal.targetKind}${activeDraftProposal.provider ? ` | Motor=${activeDraftProposal.provider}` : ''}${activeDraftProposal.role ? ` | Rol=${activeDraftProposal.role}` : ''}${activeDraftProposal.mode ? ` | Modo=${activeDraftProposal.mode}` : ''}\n- Título: "${activeDraftProposal.title}"\n- Brief: ${activeDraftProposal.taskBrief}${activeDraftProposal.questionForUser ? `\n- Pregunta pendiente: "${activeDraftProposal.questionForUser}"` : ''}\n- Instrucción: Si el usuario confirma, usa "confirm_proposal"; si pide ajustes, usa "refine_proposal"; si cancela, usa "cancel_proposal".`
+    : '';
+
+  // Active pending disambiguation state (S8)
+  const pending = options?.pendingDisambiguation;
+  const pendingSection = pending
+    ? `\n\nDESAMBIGUACIÓN PENDIENTE DEL TURNO ANTERIOR:\n- Orden original: "${pending.originalInput}"\n- Pregunta ya formulada: "${pending.question}"\n- Dato faltante: ${pending.missingSlot}${pending.candidates?.length ? `\n- Candidatos ofrecidos: ${pending.candidates.join(', ')}` : ''}\n- Instrucción: Usa la respuesta actual del usuario para resolver este dato y ejecutar la acción (o cancela si pide dejarlo). NO hagas otra pregunta de aclaración consecutiva.`
+    : '';
+
+  let chatReachSection = '';
+  if (chatReach) {
+    if (chatReach.kind === 'read') {
+      chatReachSection = `\n\nCONTENIDO DE LA CONVERSACIÓN CONSULTADA (${chatReach.entry.title} - ${chatReach.entry.cli}):\n${chatReach.body}`;
+    } else if (chatReach.kind === 'index' && chatReach.entries.length > 0) {
+      chatReachSection = `\n\nÍNDICE DE CONVERSACIONES Y CHATS (CLIs / HILOS DISPONIBLES):\n${chatReach.entries
+        .map((e) => `- ${e.title} [Motor: ${e.cli}, ID: ${e.id}]${e.lastDecision ? `: ${e.lastDecision}` : ''}`)
+        .join('\n')}`;
+    } else if (chatReach.kind === 'miss') {
+      chatReachSection = `\n\nBÚSQUEDA DE CHATS: No se encontró ninguna conversación que coincida con "${chatReach.named}" en este proyecto.`;
+    }
+  }
+
+  // Compact kite-ctx dynamic voice summary (< 250 tokens)
+  const packedVoiceSummary =
+    options?.packedVoiceContext ??
+    ctxClient.packVoiceContextSync({
+      workspaceId: context?.workspaceId,
+      workspaceName: context?.workspaceName,
+      gitBranch: context?.gitBranch,
+      mode: context?.mode,
+      boundThreadId: context?.boundThreadId,
+      voiceSessionActive: context?.voiceSessionActive,
+      terminalsSummary: context?.activeTerminals?.length
+        ? `${context.activeTerminals.length} activas`
+        : undefined,
+      subagentsSummary: context?.activeSubagents?.length
+        ? context.activeSubagents.map((s) => `${s.role}:${s.status}`).join(', ')
+        : undefined,
+      threadsSummary: context?.activeThreads?.length
+        ? `${context.activeThreads.length} hilos`
+        : undefined,
+      agentsSummary: context?.autonomousAgents?.length
+        ? context.autonomousAgents.map((a) => a.name).join(', ')
+        : undefined,
+      workingContextSummary: resolvedWorkingContext?.currentTopic,
+      draftProposalSummary: activeDraftProposal?.title,
+    }).packedText;
+  const kiteCtxCompactLine = packedVoiceSummary
+    ? `\nResumen compacto kite-ctx: ${packedVoiceSummary.replace(/\n+/g, ' | ')}`
+    : '';
+
+  return `CONTEXTO ACTUAL DEL SISTEMA:
 Proyecto actual: ${context?.workspaceName ? `"${context.workspaceName}"` : 'Proyecto activo'}${context?.gitBranch ? ` (Rama: ${context.gitBranch})` : ''}${context?.workspacePath ? ` (Ruta: ${context.workspacePath})` : ''}${context?.workspaceId ? ` [ID: ${context.workspaceId}]` : ''}
-Modo actual: ${context?.mode || 'code'}${context?.voiceSessionActive ? `\nSesión de voz activa: sí${context.boundThreadId ? ` (Hilo de voz: ${context.boundThreadId})` : ''}` : ''}${rosterSection}${workingContextSection}${notesSection}${episodicSection}${chatReachSection}${pendingSection}`;
+Modo actual: ${context?.mode || 'code'}${context?.voiceSessionActive ? `\nSesión de voz activa: sí${context.boundThreadId ? ` (Hilo de voz: ${context.boundThreadId})` : ''}` : ''}${kiteCtxCompactLine}${rosterSection}${workingContextSection}${proposalSection}${notesSection}${episodicSection}${chatReachSection}${pendingSection}`;
+}
+
+export function buildOperatorPromptParts(
+  context?: TurnContext,
+  chatReach?: ConsultChatsResult,
+  options?: BuildPromptOptions
+): OperatorPromptParts {
+  const staticPrefix = buildStaticOperatorPromptPrefix(undefined, undefined, {
+    nativeToolsEnabled: options?.nativeToolsEnabled,
+  });
+  const dynamicTail = buildDynamicVoiceContextTail(context, chatReach, options);
+  return {
+    staticPrefix,
+    dynamicTail,
+    fullPrompt: `${staticPrefix}\n\n${dynamicTail}`,
+  };
+}
+
+export async function buildOperatorPromptPartsAsync(
+  context?: TurnContext,
+  chatReach?: ConsultChatsResult,
+  options?: BuildPromptOptions
+): Promise<OperatorPromptParts> {
+  const staticPrefix = buildStaticOperatorPromptPrefix(undefined, undefined, {
+    nativeToolsEnabled: options?.nativeToolsEnabled,
+  });
+  const packed = await ctxClient.packVoiceContext({
+    workspaceId: context?.workspaceId,
+    workspaceName: context?.workspaceName,
+    workspacePath: context?.workspacePath,
+    gitBranch: context?.gitBranch,
+    mode: context?.mode,
+    boundThreadId: context?.boundThreadId,
+    voiceSessionActive: context?.voiceSessionActive,
+    terminalsSummary: context?.activeTerminals?.length
+      ? `${context.activeTerminals.length} activas`
+      : undefined,
+    subagentsSummary: context?.activeSubagents?.length
+      ? context.activeSubagents.map((s) => `${s.role}:${s.status}`).join(', ')
+      : undefined,
+    threadsSummary: context?.activeThreads?.length
+      ? `${context.activeThreads.length} hilos`
+      : undefined,
+    agentsSummary: context?.autonomousAgents?.length
+      ? context.autonomousAgents.map((a) => a.name).join(', ')
+      : undefined,
+    draftProposalSummary: options?.draftProposal?.title,
+  });
+
+  const dynamicTail = buildDynamicVoiceContextTail(context, chatReach, {
+    ...options,
+    packedVoiceContext: packed.packedText,
+  });
+
+  const kvPlanned = await ctxClient.kvPlan({ staticPrefix, dynamicTail });
+  return {
+    staticPrefix: kvPlanned.stablePrefix,
+    dynamicTail: kvPlanned.dynamicTail,
+    fullPrompt: `${kvPlanned.stablePrefix}\n\n${kvPlanned.dynamicTail}`,
+  };
+}
+
+export function buildOperatorSystemPrompt(
+  context?: TurnContext,
+  chatReach?: ConsultChatsResult,
+  options?: BuildPromptOptions
+): string {
+  return buildOperatorPromptParts(context, chatReach, options).fullPrompt;
 }

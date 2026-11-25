@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadZedMemoryNotes, saveZedMemoryNotes, type ZedMemoryNote } from '../operatorConfig';
-import { buildOperatorSystemPrompt } from './prompt';
+import {
+  buildOperatorPromptParts,
+  buildOperatorPromptPartsAsync,
+  buildOperatorSystemPrompt,
+} from './prompt';
 
 /** Stable notes heading. Chat index text must not reuse this line. */
 const NOTES_HEADING = 'NOTAS DE MEMORIA DEL ASISTENTE:';
@@ -161,5 +165,96 @@ describe('buildOperatorSystemPrompt local notes', () => {
     expect(prompt).toContain('spawn_subagent');
     expect(prompt).toContain('Modo actual: thread');
     expect(prompt).toContain('Sesión de voz activa: sí (Hilo de voz: thread-voice-1)');
+  });
+
+  it('uses Argos as default identity, splits static cacheable prefix from dynamic tail, and injects DraftTaskProposal', async () => {
+    const parts = buildOperatorPromptParts(
+      {
+        workspaceId: 'ws-kite',
+        workspaceName: 'kite',
+        mode: 'thread',
+        voiceSessionActive: true,
+        boundThreadId: 'thr-argos-1',
+      },
+      undefined,
+      {
+        draftProposal: {
+          proposalId: 'prop-1',
+          status: 'awaiting_confirmation',
+          targetKind: 'subagent',
+          title: 'Revisar auth',
+          taskBrief: 'Inspeccionar el flujo de login y reportar hallazgos.',
+          provider: 'claude',
+          role: 'Explorer',
+          mode: 'explore',
+          questionForUser: '¿Lo lanzo con Claude?',
+          revision: 1,
+          createdAt: 1000,
+          updatedAt: 1000,
+        },
+      }
+    );
+
+    expect(parts.staticPrefix).toContain('Eres Argos');
+    expect(parts.staticPrefix).toContain('FLUJO CONSULTIVO MULTI-TURNO');
+    expect(parts.staticPrefix).toContain('propose_task');
+    expect(parts.staticPrefix).toContain('stay_silent');
+    expect(parts.staticPrefix).not.toContain('thr-argos-1');
+    expect(parts.dynamicTail).toContain('PROPUESTA DE TAREA ACTIVA');
+    expect(parts.dynamicTail).toContain('Revisar auth');
+    expect(parts.dynamicTail).toContain('Resumen compacto kite-ctx:');
+
+    const asyncParts = await buildOperatorPromptPartsAsync({
+      workspaceName: 'kite',
+      mode: 'thread',
+    });
+    expect(asyncParts.staticPrefix).toContain('Eres Argos');
+    expect(asyncParts.dynamicTail).toContain('Proyecto actual: "kite"');
+  });
+
+  it('omits duplicated JSON schema & few-shot examples when nativeToolsEnabled=true and keeps staticPrefix byte-identical across turns (S2/T2)', () => {
+    const legacy = buildOperatorPromptParts({ workspaceName: 'kite', mode: 'thread' }, undefined, {
+      nativeToolsEnabled: false,
+    });
+    const turn1 = buildOperatorPromptParts(
+      {
+        workspaceId: 'ws-1',
+        workspaceName: 'kite',
+        gitBranch: 'feat/response-thread',
+        mode: 'thread',
+        activeTerminals: [{ sessionId: 's1', engine: 'grok', who: 'Orion', state: 'running' }],
+      },
+      undefined,
+      { nativeToolsEnabled: true }
+    );
+    const turn2 = buildOperatorPromptParts(
+      {
+        workspaceId: 'ws-1',
+        workspaceName: 'kite',
+        gitBranch: 'main',
+        mode: 'code',
+        activeTerminals: [
+          { sessionId: 's1', engine: 'grok', who: 'Orion', state: 'idle' },
+          { sessionId: 's2', engine: 'claude', who: 'Nova', state: 'running' },
+        ],
+        draftProposal: {
+          proposalId: 'prop-99',
+          status: 'awaiting_confirmation',
+          targetKind: 'subagent',
+          title: 'Refactor auth',
+          taskBrief: 'Inspect auth',
+          revision: 2,
+        },
+      },
+      undefined,
+      { nativeToolsEnabled: true }
+    );
+
+    expect(turn1.staticPrefix).toBe(turn2.staticPrefix);
+    expect(turn1.staticPrefix).not.toContain('ESQUEMA JSON PERMITIDO:');
+    expect(turn1.staticPrefix).not.toContain('EJEMPLOS DE REFERENCIA:');
+    expect(turn1.staticPrefix.length).toBeLessThan(legacy.staticPrefix.length * 0.65);
+    expect(turn2.dynamicTail).toContain('Nova');
+    expect(turn2.dynamicTail).toContain('Refactor auth');
   });
 });

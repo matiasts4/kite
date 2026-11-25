@@ -101,12 +101,13 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
     }
 
     const wantStream = options?.stream !== false;
-    const tools = options?.tools || OPERATOR_NATIVE_TOOLS;
+    const tools = options?.tools !== undefined ? options.tools : OPERATOR_NATIVE_TOOLS;
+    const gatewayMessages = this.formatMessagesForGateway(messages);
 
     try {
       if (wantStream) {
         try {
-          return await this.executeStreaming(endpoint, messages, tools, startTime, controller.signal, options);
+          return await this.executeStreaming(endpoint, gatewayMessages, tools, startTime, controller.signal, options);
         } catch (streamErr: any) {
           // If error was cancellation or timeout or malformed tool args, rethrow directly
           if (
@@ -122,10 +123,10 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
             throw streamErr;
           }
           console.warn('[OpenAiCompat] Streaming failed; falling back to non-streaming JSON:', streamErr);
-          return await this.executeNonStreaming(endpoint, messages, tools, startTime, controller.signal, options);
+          return await this.executeNonStreaming(endpoint, gatewayMessages, tools, startTime, controller.signal, options);
         }
       } else {
-        return await this.executeNonStreaming(endpoint, messages, tools, startTime, controller.signal, options);
+        return await this.executeNonStreaming(endpoint, gatewayMessages, tools, startTime, controller.signal, options);
       }
     } catch (err: any) {
       if (timedOut || /timed out/i.test(err?.message || '')) {
@@ -139,41 +140,86 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
     }
   }
 
+  private formatMessagesForGateway(messages: ProviderMessage[]): unknown[] {
+    const isAnthropicGateway = /anthropic|claude/i.test(this.model);
+    if (!isAnthropicGateway) {
+      return messages;
+    }
+
+    // Keep messages[0] byte-immutable with explicit ephemeral cache_control and fold
+    // trailing system context blocks into the final user turn so Anthropic-backed
+    // gateways never reject secondary system messages.
+    const formatted: Array<Record<string, unknown>> = [];
+    const trailingContextChunks: string[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (i === 0 && msg.role === 'system') {
+        formatted.push({
+          role: 'system',
+          content: [
+            {
+              type: 'text',
+              text: msg.content,
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        });
+        continue;
+      }
+      if (msg.role === 'system') {
+        trailingContextChunks.push(msg.content);
+        continue;
+      }
+      if (i === messages.length - 1 && msg.role === 'user' && trailingContextChunks.length > 0) {
+        formatted.push({
+          role: 'user',
+          content: `${trailingContextChunks.join('\n\n')}\n\n${msg.content}`,
+        });
+        trailingContextChunks.length = 0;
+        continue;
+      }
+      formatted.push({ role: msg.role, content: msg.content });
+    }
+
+    if (trailingContextChunks.length > 0) {
+      formatted.push({ role: 'user', content: trailingContextChunks.join('\n\n') });
+    }
+    return formatted;
+  }
+
   private async executeStreaming(
     endpoint: string,
-    messages: ProviderMessage[],
+    messages: unknown[],
     tools: unknown[],
     startTime: number,
     signal: AbortSignal,
     options?: PlannerProviderOptions
   ): Promise<PlannerProviderResult> {
+    const payload: Record<string, unknown> = {
+      model: this.model,
+      temperature: this.temperature,
+      max_tokens: this.maxTokens,
+      stream: true,
+      stream_options: { include_usage: true },
+      messages,
+    };
+    if (tools.length > 0) {
+      payload.tools = tools;
+    }
+    const serializedBody = JSON.stringify(payload);
+
     const response = await (typeof fetch === 'function' && !((window as any)?.__TAURI_INTERNALS__)
       ? fetch(endpoint, {
           method: 'POST',
           headers: this.requestHeaders(),
-          body: JSON.stringify({
-            model: this.model,
-            temperature: this.temperature,
-            max_tokens: this.maxTokens,
-            stream: true,
-            stream_options: { include_usage: true },
-            tools,
-            messages,
-          }),
+          body: serializedBody,
           signal,
         })
       : operatorHttpStreamFetch(endpoint, {
           method: 'POST',
           headers: this.requestHeaders(),
-          body: JSON.stringify({
-            model: this.model,
-            temperature: this.temperature,
-            max_tokens: this.maxTokens,
-            stream: true,
-            stream_options: { include_usage: true },
-            tools,
-            messages,
-          }),
+          body: serializedBody,
           signal,
         }, { credentialProvider: this.credentialProvider }));
 
@@ -199,7 +245,9 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
           tokenCounts = {
             prompt: parsed.usage.prompt_tokens,
             completion: parsed.usage.completion_tokens,
-            cache: parsed.usage.prompt_tokens_details?.cached_tokens,
+            cache:
+              parsed.usage.prompt_tokens_details?.cached_tokens ??
+              parsed.usage.cache_read_input_tokens,
           };
         }
 
@@ -306,35 +354,34 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
 
   private async executeNonStreaming(
     endpoint: string,
-    messages: ProviderMessage[],
+    messages: unknown[],
     tools: unknown[],
     startTime: number,
     signal: AbortSignal,
     options?: PlannerProviderOptions
   ): Promise<PlannerProviderResult> {
+    const payload: Record<string, unknown> = {
+      model: this.model,
+      temperature: this.temperature,
+      max_tokens: this.maxTokens,
+      messages,
+    };
+    if (tools.length > 0) {
+      payload.tools = tools;
+    }
+    const serializedBody = JSON.stringify(payload);
+
     const response = await (typeof fetch === 'function' && !((window as any)?.__TAURI_INTERNALS__)
       ? fetch(endpoint, {
           method: 'POST',
           headers: this.requestHeaders(),
-          body: JSON.stringify({
-            model: this.model,
-            temperature: this.temperature,
-            max_tokens: this.maxTokens,
-            tools,
-            messages,
-          }),
+          body: serializedBody,
           signal,
         })
       : operatorHttpFetch(endpoint, {
           method: 'POST',
           headers: this.requestHeaders(),
-          body: JSON.stringify({
-            model: this.model,
-            temperature: this.temperature,
-            max_tokens: this.maxTokens,
-            tools,
-            messages,
-          }),
+          body: serializedBody,
           signal,
         }, { credentialProvider: this.credentialProvider }));
 
@@ -379,7 +426,9 @@ export class OpenAiCompatPlannerProvider implements PlannerProvider {
       ? {
           prompt: data.usage.prompt_tokens,
           completion: data.usage.completion_tokens,
-          cache: data.usage.prompt_tokens_details?.cached_tokens,
+          cache:
+            data.usage.prompt_tokens_details?.cached_tokens ??
+            data.usage.cache_read_input_tokens,
         }
       : undefined;
 

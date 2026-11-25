@@ -40,6 +40,7 @@ import {
   loadWorkspaceEpisodicMemory,
   recordDelegationsFromReceipts,
 } from './context/episodicMemory';
+import { ensureVoiceSessionPrewarmHook } from './voice/sessionPrewarm';
 
 export { resolvePlannerProvider } from './providers/resolvePlanner';
 
@@ -153,6 +154,7 @@ export async function runOperatorTurn(
   options: RunOperatorTurnOptions = {}
 ): Promise<OperatorTurnResult> {
   ensureEpisodicSessionHook();
+  ensureVoiceSessionPrewarmHook();
   const startTime = Date.now();
   const sttFinalizedAt = options.sttFinalizedAt ?? (options.source === 'voz' ? startTime : undefined);
   const turnId = options.turnId || `turn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;

@@ -1,251 +1,198 @@
-// Kite Code — Level C Tests: LLM Planner with Mock Provider
-// Validates C1 through C6:
-// C1: Valid JSON output parses into OperatorPlan identically
-// C2: Markdown code-fenced JSON output parses cleanly
-// C3: Invalid JSON output triggers 1-shot retry and falls back to heuristic if retry fails
-// C4: Prompt echo output is detected and rejected without echo leakage, falling back to heuristic
-// C5: Provider timeout falls back to heuristic with fallbackReason
-// C6: Out-of-schema actions (e.g. unknown action type) rejected by Zod and triggers retry
-
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { planTurnLLM } from './llm';
-import type { PlannerProvider, ProviderMessage, PlannerProviderResult } from '../providers/types';
+import { runLedger } from '../runLedger';
+import { OPERATOR_NATIVE_TOOLS } from '../contract';
+import type { PlannerProvider, ProviderMessage } from '../providers/types';
+import {
+  getCachedLiveChatCatalog,
+  invalidateChatCatalogCache,
+  prewarmVoiceSession,
+  resetSessionPrewarmForTests,
+} from '../voice/sessionPrewarm';
+import * as ipc from '../../ipc';
 
-class MockPlannerProvider implements PlannerProvider {
-  public id = 'mock-provider';
-  public calls: ProviderMessage[][] = [];
-  public responses: (PlannerProviderResult | Error)[] = [];
-
-  constructor(responses: (PlannerProviderResult | Error)[] = []) {
-    this.responses = [...responses];
-  }
-
-  async plan(messages: ProviderMessage[]): Promise<PlannerProviderResult> {
-    this.calls.push(messages);
-    const next = this.responses.shift();
-    if (!next) {
-      return {
-        rawText: JSON.stringify({ reply: 'Respuesta por defecto', actions: [] }),
-        latencyMs: 10,
-        model: 'mock-model-v1',
-      };
-    }
-    if (next instanceof Error) {
-      throw next;
-    }
-    return next;
-  }
-}
-
-describe('Level C: LLM Planner (planTurnLLM)', () => {
-  it('C1: Valid JSON output parses into identical OperatorPlan', async () => {
-    const validJson = JSON.stringify({
-      reply: 'Abriendo dos terminales con Grok para ejecutar pruebas.',
-      actions: [
-        {
-          type: 'open_terminals',
-          count: 2,
-          engine: 'grok',
-          prompts: ['correr los tests'],
-        },
-      ],
-    });
-
-    const mock = new MockPlannerProvider([
-      { rawText: validJson, latencyMs: 45, model: 'gpt-4o-mini' },
-    ]);
-
-    const plan = await planTurnLLM('abrí dos terminales con grok y corre los tests', mock);
-
-    expect(mock.calls.length).toBe(1);
-    expect(plan.strategy).toBe('llm');
-    expect(plan.reply).toBe('Abriendo dos terminales con Grok para ejecutar pruebas.');
-    expect(plan.actions).toHaveLength(1);
-    expect(plan.actions[0]).toEqual({
-      type: 'open_terminals',
-      count: 2,
-      engine: 'grok',
-      prompts: ['correr los tests'],
-    });
-  });
-
-  it('C2: Markdown code-fenced JSON output parses cleanly', async () => {
-    const fencedJson =
-      '```json\n{\n  "reply": "Cerrando la terminal activa.",\n  "actions": [\n    { "type": "close_terminals", "target": "active" }\n  ]\n}\n```';
-
-    const mock = new MockPlannerProvider([
-      { rawText: fencedJson, latencyMs: 50, model: 'claude-3-5-sonnet' },
-    ]);
-
-    const plan = await planTurnLLM('cierra la terminal activa', mock);
-
-    expect(mock.calls.length).toBe(1);
-    expect(plan.strategy).toBe('llm');
-    expect(plan.reply).toBe('Cerrando la terminal activa.');
-    expect(plan.actions).toHaveLength(1);
-    expect(plan.actions[0]).toEqual({
-      type: 'close_terminals',
-      target: 'active',
-    });
-  });
-
-  it('C3: Invalid JSON output triggers 1-shot retry and succeeds on valid correction', async () => {
-    const invalidFirst = 'Aquí tienes el plan:\n{ reply: "broken json without quotes", actions: [ ';
-    const validSecond = JSON.stringify({
-      reply: 'Abriendo el navegador en Google.',
-      actions: [{ type: 'open_browser', url: 'https://google.com' }],
-    });
-
-    const mock = new MockPlannerProvider([
-      { rawText: invalidFirst, latencyMs: 40, model: 'test-model' },
-      { rawText: validSecond, latencyMs: 35, model: 'test-model' },
-    ]);
-
-    const plan = await planTurnLLM('abrir google en el navegador', mock);
-
-    expect(mock.calls.length).toBe(2);
-    // Second call should have correction instruction
-    const secondCall = mock.calls[1];
-    expect(secondCall[secondCall.length - 1].content).toContain('esquema JSON');
-    expect(plan.strategy).toBe('llm');
-    expect(plan.actions).toHaveLength(1);
-    expect(plan.actions[0].type).toBe('open_browser');
-  });
-
-  it('C3-fallback: Invalid JSON triggers retry and falls back to heuristic if retry also fails', async () => {
-    const mock = new MockPlannerProvider([
-      { rawText: 'No sé qué formato devolver', latencyMs: 30, model: 'test-model' },
-      { rawText: 'Sigo sin poder dar JSON', latencyMs: 30, model: 'test-model' },
-    ]);
-
-    const plan = await planTurnLLM('abrir 2 terminales', mock);
-
-    expect(mock.calls.length).toBe(2);
-    expect(plan.strategy).toBe('heuristic-fallback');
-    expect(plan.fallbackReason).toBeDefined();
-    // Heuristic parses 'abrir 2 terminales' successfully
-    expect(plan.actions.length).toBeGreaterThan(0);
-    expect(plan.actions[0].type).toBe('open_terminals');
-  });
-
-  it('C4: Prompt echo output is detected and rejected without echo leakage, falling back to heuristic', async () => {
-    const systemPromptLeak =
-      'Eres el Operador de Kite Code. Tu rol es orquestar la interfaz. Acciones disponibles: open_terminals, close_terminals. Responde únicamente con JSON.';
-
-    const mock = new MockPlannerProvider([
-      { rawText: systemPromptLeak, latencyMs: 25, model: 'leaky-model' },
-      { rawText: systemPromptLeak, latencyMs: 25, model: 'leaky-model' },
-    ]);
-
-    const plan = await planTurnLLM('abrir dos terminales', mock);
-
-    expect(plan.strategy).toBe('heuristic-fallback');
-    // Reply must not contain the leaked system prompt
-    expect(plan.reply).not.toContain('Eres el Operador de Kite Code');
-    expect(plan.actions.length).toBeGreaterThan(0);
-  });
-
-  it('C5: Provider timeout falls back to heuristic with fallbackReason', async () => {
-    const mock = new MockPlannerProvider([new Error('timeout')]);
-
-    const plan = await planTurnLLM('cerrar terminal activa', mock);
-
-    expect(mock.calls.length).toBe(1);
-    expect(plan.strategy).toBe('heuristic-fallback');
-    expect(plan.fallbackReason).toBe('timeout');
-    expect(plan.actions[0].type).toBe('close_terminals');
-  });
-
-  it('C6: Out-of-schema actions rejected by Zod and triggers retry', async () => {
-    const unknownActionFirst = JSON.stringify({
-      reply: 'Teletransportando al usuario...',
-      actions: [{ type: 'teleport_user', destination: 'moon' }],
-    });
-
-    const validCorrection = JSON.stringify({
-      reply: 'Abriendo una terminal con Claude.',
-      actions: [{ type: 'open_terminals', count: 1, engine: 'claude' }],
-    });
-
-    const mock = new MockPlannerProvider([
-      { rawText: unknownActionFirst, latencyMs: 20, model: 'test-model' },
-      { rawText: validCorrection, latencyMs: 25, model: 'test-model' },
-    ]);
-
-    const plan = await planTurnLLM('abrir una terminal con claude', mock);
-
-    expect(mock.calls.length).toBe(2);
-    expect(plan.strategy).toBe('llm');
-    expect(plan.actions[0].type).toBe('open_terminals');
-  });
+vi.mock('../../ipc', async () => {
+  const actual = await vi.importActual<typeof import('../../ipc')>('../../ipc');
+  return {
+    ...actual,
+    invokeCommand: vi.fn().mockResolvedValue({ success: true, status: 200, body: '{}' }),
+    isTauriEnvironment: vi.fn(() => false),
+    listChatSummaries: vi.fn().mockResolvedValue([
+      {
+        id: 'chat-1',
+        title: 'Auth thread',
+        provider: 'claude',
+        status: 'completed',
+        updatedAtUnixMs: 1000,
+        workspaceId: 'ws-1',
+      },
+    ]),
+  };
 });
 
-describe('T7: bounded prior turns', () => {
-  const validReply = JSON.stringify({
-    reply: 'Continuando con el plan anterior.',
-    actions: [],
+describe('planTurnLLM — KV-Cache Split, Tool Pruning, History Compaction & Prewarm (S2/T2)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    runLedger.clearHistory();
+    resetSessionPrewarmForTests();
+    vi.clearAllMocks();
   });
 
-  it('T7: includes the previous user turn before the current user message', async () => {
-    const mock = new MockPlannerProvider([
-      { rawText: validReply, latencyMs: 12, model: 'mock-model-v1' },
-    ]);
-    const history: ProviderMessage[] = [
-      { role: 'user', content: 'abre una terminal con grok' },
-      { role: 'assistant', content: 'Abriendo una terminal con Grok.' },
-    ];
-
-    await planTurnLLM('ahora corre los tests', mock, undefined, 'turn-t7-history', history);
-
-    const messages = mock.calls[0];
-    expect(messages[0].role).toBe('system');
-
-    const previousUserIndex = messages.findIndex(
-      (message) => message.role === 'user' && message.content === 'abre una terminal con grok'
-    );
-    const currentUserIndex = messages.findIndex(
-      (message) => message.role === 'user' && message.content === 'ahora corre los tests'
-    );
-
-    expect(previousUserIndex).toBeGreaterThan(0);
-    expect(currentUserIndex).toBe(messages.length - 1);
-    expect(previousUserIndex).toBeLessThan(currentUserIndex);
-    expect(messages.some((message) => message.content === 'Abriendo una terminal con Grok.')).toBe(
-      true
-    );
+  afterEach(() => {
+    runLedger.clearHistory();
+    resetSessionPrewarmForTests();
   });
 
-  it('T7: sends only the system prompt and current user message when history is empty', async () => {
-    const mock = new MockPlannerProvider([
-      { rawText: validReply, latencyMs: 12, model: 'mock-model-v1' },
-    ]);
+  it('keeps messages[0] byte-identical across turns and places dynamicTail in a trailing context block', async () => {
+    const capturedCalls: Array<{ messages: ProviderMessage[]; tools?: unknown[] }> = [];
+    const mockProvider: PlannerProvider = {
+      id: 'opencode',
+      plan: vi.fn(async (messages, opts) => {
+        capturedCalls.push({ messages, tools: opts?.tools });
+        return {
+          rawText: JSON.stringify({
+            answer: 'Todo en orden por acá.',
+            reply: 'Todo en orden por acá.',
+            actions: [],
+          }),
+          latencyMs: 120,
+          model: 'deepseek-v4.1-flash',
+          tokenCounts: { prompt: 500, completion: 30, cache: 350 },
+        };
+      }),
+    };
 
-    await planTurnLLM('cerrar terminal activa', mock, undefined, 'turn-t7-empty', []);
+    await planTurnLLM(
+      'hola, ¿cómo va todo?',
+      mockProvider,
+      { workspaceId: 'ws-1', workspaceName: 'kite', gitBranch: 'feat/a', mode: 'thread' },
+      'turn-kv-1'
+    );
 
-    const messages = mock.calls[0];
-    expect(messages).toHaveLength(2);
-    expect(messages[0].role).toBe('system');
-    expect(messages[1]).toEqual({ role: 'user', content: 'cerrar terminal activa' });
+    await planTurnLLM(
+      'hola de nuevo',
+      mockProvider,
+      {
+        workspaceId: 'ws-1',
+        workspaceName: 'kite',
+        gitBranch: 'feat/b',
+        mode: 'code',
+        activeTerminals: [{ sessionId: 't1', engine: 'grok', who: 'Orion', state: 'running' }],
+      },
+      'turn-kv-2'
+    );
+
+    expect(capturedCalls).toHaveLength(2);
+    expect(capturedCalls[0].messages[0].role).toBe('system');
+    expect(capturedCalls[0].messages[0].content).toBe(capturedCalls[1].messages[0].content);
+
+    // Dynamic tail is separated from messages[0] and precedes the final user message
+    const m0 = capturedCalls[0].messages;
+    const m1 = capturedCalls[1].messages;
+    expect(m0[m0.length - 1]).toEqual({ role: 'user', content: 'hola, ¿cómo va todo?' });
+    expect(m1[m1.length - 2].content).toContain('Orion');
+    expect(m1[m1.length - 2].content).not.toBe(m0[m0.length - 2].content);
+
+    // Conversational turn pruned to <= 2 tools
+    expect((capturedCalls[0].tools ?? []).length).toBeLessThanOrEqual(2);
+
+    // Token breakdown recorded in runLedger with cacheHitRatio
+    const run = runLedger.getRun('turn-kv-1');
+    expect(run?.tokenBreakdown?.cachedTokens).toBe(350);
+    expect(run?.tokenBreakdown?.cacheHitRatio).toBeCloseTo(0.7, 2);
   });
 
-  it('T7: keeps the 14 most recent prior turns and drops the oldest', async () => {
-    const mock = new MockPlannerProvider([
-      { rawText: validReply, latencyMs: 12, model: 'mock-model-v1' },
-    ]);
-    const history: ProviderMessage[] = Array.from({ length: 16 }, (_, index) => ({
-      role: index % 2 === 0 ? 'user' : 'assistant',
-      content: `prior-turn-${index + 1}`,
-    }));
+  it('bounds history to last 4 verbatim turns + compressed <=120-token rolling summary', async () => {
+    let sentMessages: ProviderMessage[] = [];
+    const mockProvider: PlannerProvider = {
+      id: 'opencode',
+      plan: vi.fn(async (messages) => {
+        sentMessages = messages;
+        return {
+          rawText: JSON.stringify({ answer: 'Entendido.', reply: 'Entendido.', actions: [] }),
+          latencyMs: 80,
+          model: 'deepseek-v4.1-flash',
+        };
+      }),
+    };
 
-    await planTurnLLM('seguir con el plan', mock, undefined, 'turn-t7-cap', history);
+    const history: ProviderMessage[] = [];
+    for (let i = 1; i <= 10; i++) {
+      history.push({ role: 'user', content: `Pregunta número ${i} sobre el proyecto ${'detalle '.repeat(12)}` });
+      history.push({ role: 'assistant', content: `Respuesta número ${i} con explicación ${'contexto '.repeat(12)}` });
+    }
 
-    const messages = mock.calls[0];
-    const contents = messages.map((message) => message.content);
-    expect(messages).toHaveLength(16);
-    expect(contents).not.toContain('prior-turn-1');
-    expect(contents).not.toContain('prior-turn-2');
-    expect(contents).toContain('prior-turn-3');
-    expect(contents).toContain('prior-turn-16');
-    expect(contents[contents.length - 1]).toBe('seguir con el plan');
+    await planTurnLLM(
+      'seguimos con esto',
+      mockProvider,
+      { workspaceId: 'ws-1', workspaceName: 'kite', mode: 'thread' },
+      'turn-hist-1',
+      history
+    );
+
+    // System static + 1 summary + 8 verbatim messages (4 turns) + dynamic tail + user input = 12
+    expect(sentMessages.length).toBeLessThanOrEqual(12);
+    const verbatimContents = sentMessages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .map((m) => m.content)
+      .join('\n');
+    expect(verbatimContents).toContain('Pregunta número 10');
+    expect(verbatimContents).toContain('Pregunta número 7');
+    expect(verbatimContents).not.toContain('Pregunta número 2');
+    const summaryMsg = sentMessages.find((m) => m.content.includes('RESUMEN DE TURNOS PREVIOS'));
+    expect(summaryMsg).toBeDefined();
+    expect(summaryMsg!.content.length).toBeLessThanOrEqual(480);
+  });
+
+  it('retries once with full OPERATOR_NATIVE_TOOLS catalog when a pruned turn emits a missing tool', async () => {
+    const toolLengths: number[] = [];
+    const mockProvider: PlannerProvider = {
+      id: 'opencode',
+      plan: vi.fn(async (_messages, opts) => {
+        toolLengths.push((opts?.tools ?? []).length);
+        if (toolLengths.length === 1) {
+          // Simulates model emitting a tool outside the pruned conversational subset or missing tool
+          return {
+            rawText: '',
+            latencyMs: 60,
+            model: 'deepseek-v4.1-flash',
+            toolCalls: [{ name: 'open_terminals', arguments: { count: 1, engine: 'powershell' } }],
+          };
+        }
+        return {
+          rawText: 'Abriendo terminal.',
+          latencyMs: 70,
+          model: 'deepseek-v4.1-flash',
+          toolCalls: [{ name: 'open_terminals', arguments: { count: 1, engine: 'powershell' } }],
+        };
+      }),
+    };
+
+    const plan = await planTurnLLM(
+      'hola', // classified conversational first, then model unexpectedly tried open_terminals
+      mockProvider,
+      { workspaceId: 'ws-1', workspaceName: 'kite', mode: 'code' },
+      'turn-retry-catalog'
+    );
+
+    expect(toolLengths).toHaveLength(2);
+    expect(toolLengths[0]).toBeLessThanOrEqual(2);
+    expect(toolLengths[1]).toBe(OPERATOR_NATIVE_TOOLS.length);
+    expect(plan.actions).toHaveLength(1);
+    expect(plan.actions[0].type).toBe('open_terminals');
+  });
+
+  it('caches chat catalog with 30s TTL, invalidates on demand, and prewarms voice session', async () => {
+    const first = await getCachedLiveChatCatalog('ws-1');
+    const second = await getCachedLiveChatCatalog('ws-1');
+    expect(first.entries).toHaveLength(1);
+    expect(second.entries).toHaveLength(1);
+    expect(ipc.listChatSummaries).toHaveBeenCalledTimes(1);
+
+    invalidateChatCatalogCache('ws-1');
+    await getCachedLiveChatCatalog('ws-1');
+    expect(ipc.listChatSummaries).toHaveBeenCalledTimes(2);
+
+    await expect(prewarmVoiceSession({ workspaceId: 'ws-1' })).resolves.toBeUndefined();
   });
 });

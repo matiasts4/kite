@@ -330,6 +330,22 @@ CREATE TABLE IF NOT EXISTS agent_autonomy_config (
     data TEXT NOT NULL,
     updated_at_unix_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS routine_runs (
+    run_id TEXT PRIMARY KEY,
+    routine_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at_unix_ms INTEGER NOT NULL,
+    finished_at_unix_ms INTEGER,
+    thread_id TEXT,
+    summary TEXT,
+    changed_files_count INTEGER NOT NULL DEFAULT 0,
+    retry_attempt INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_routine_started
+    ON routine_runs (routine_id, started_at_unix_ms DESC);
 ";
 
 pub(crate) fn configure_sqlite_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {

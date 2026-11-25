@@ -555,6 +555,8 @@ fn main() {
             list_provider_mcp_servers,
             list_provider_agents,
             list_routines,
+            routines::list_routine_runs,
+            routines::dispatch_routine_event,
             list_terminal_profiles,
             load_agent_chat_thread,
             load_agent_mind,
@@ -814,6 +816,9 @@ fn main() {
             voice_realtime::voice_realtime_truncate,
             voice_realtime::voice_realtime_submit_tool_result,
             voice_realtime::voice_realtime_status,
+            voice_audio::call_receipts::voice_call_receipt_save,
+            voice_audio::call_receipts::voice_call_receipt_list,
+            voice_audio::call_receipts::voice_call_receipt_get,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {

@@ -1,9 +1,38 @@
-export type RoutineTriggerType = 'schedule' | 'webhook' | 'event' | 'manual';
+export type RoutineTriggerType = 'schedule' | 'cron' | 'webhook' | 'event' | 'manual';
 export type RoutinePermissionMode = 'readOnly' | 'auto' | 'fullAccess';
+export type RoutineEventKind =
+  | 'on_git_commit'
+  | 'on_branch_change'
+  | 'on_task_state_change'
+  | 'on_teammate_message'
+  | 'on_routine_complete';
+
+export type RoutineOutputAction =
+  | 'notify_desktop'
+  | 'announce_via_argos'
+  | 'create_kite_task_on_findings'
+  | 'notify_teammate';
 
 export type RoutineCadence =
   | { kind: 'interval'; seconds: number }
-  | { kind: 'clock'; hour: number; minute: number; weekdays: number[] | null };
+  | { kind: 'clock'; hour: number; minute: number; weekdays: number[] | null }
+  | { kind: 'cron'; expr: string }
+  | { kind: 'event'; eventKind: RoutineEventKind; debounceSecs?: number; sourceRoutineId?: string | null };
+
+export interface RoutineRunRecord {
+  runId: string;
+  routineId: string;
+  agentId: string;
+  triggerKind: string;
+  status: 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled' | string;
+  startedAtUnixMs: number;
+  finishedAtUnixMs: number | null;
+  threadId: string | null;
+  summary: string | null;
+  changedFilesCount: number;
+  retryAttempt: number;
+  error: string | null;
+}
 
 export interface RoutineItem {
   id: string;
@@ -21,6 +50,9 @@ export interface RoutineItem {
   lastError: string | null;
   permissionMode?: RoutinePermissionMode;
   triggerType?: RoutineTriggerType;
+  maxRetries?: number;
+  outputActions?: RoutineOutputAction[];
+  notifyTeammateId?: string | null;
 }
 
 export interface RoutineAgentRevision {
@@ -55,4 +87,7 @@ export interface RoutineDraft {
   cadence: RoutineCadence;
   workspaceId: string | null;
   permissionMode?: RoutinePermissionMode;
+  maxRetries?: number;
+  outputActions?: RoutineOutputAction[];
+  notifyTeammateId?: string | null;
 }

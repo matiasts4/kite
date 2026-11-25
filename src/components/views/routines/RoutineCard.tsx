@@ -26,6 +26,7 @@ export interface RoutineCardProps {
   onToggle: (routine: RoutineItem, e?: React.MouseEvent) => void;
   onEdit: (routine: RoutineItem) => void;
   onDelete: (routine: RoutineItem) => void;
+  onViewHistory?: (routine: RoutineItem) => void;
   onOpenThread?: (routine: RoutineItem, e?: React.MouseEvent) => void;
 }
 
@@ -60,6 +61,7 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
   onToggle,
   onEdit,
   onDelete,
+  onViewHistory,
   onOpenThread,
 }) => {
   const agentName = agent?.name || 'Antigravity Agent';
@@ -257,6 +259,27 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
 
         {/* Action buttons */}
         <div className="routine-row__actions" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          {onViewHistory && (
+            <button
+              type="button"
+              onClick={() => onViewHistory(routine)}
+              className="secondary-button"
+              style={{
+                padding: '0 8px',
+                height: 'var(--vl-control-sm, 26px)',
+                borderRadius: 'var(--control-radius, 8px)',
+                fontSize: '11px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                cursor: 'pointer',
+              }}
+              title="View routine run history"
+              aria-label={`History for ${routine.name}`}
+            >
+              <span>History</span>
+            </button>
+          )}
           {routine.lastRunThreadId && onOpenThread && (
             <button
               type="button"

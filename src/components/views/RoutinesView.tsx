@@ -6,7 +6,9 @@ import type {
   RoutineCadence,
   RoutineTriggerType,
   RoutinePermissionMode,
+  RoutineOutputAction,
 } from './routines/types';
+import { RoutineRunHistoryDrawer } from './routines/RoutineRunHistoryDrawer';
 import {
   Clock,
   CheckCircle,
@@ -60,6 +62,14 @@ export function formatCadence(routine: RoutineItem): string {
 
   if (cadence.kind === 'interval') {
     return formatCadenceInterval(cadence.seconds || 3600);
+  }
+
+  if (cadence.kind === 'cron') {
+    return `cron: ${cadence.expr}`;
+  }
+
+  if (cadence.kind === 'event') {
+    return cadence.eventKind;
   }
 
   if (cadence.kind === 'clock') {
@@ -135,6 +145,7 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
   const [isEditorOpen, setIsEditorOpen] = useState<boolean>(false);
   const [editingRoutine, setEditingRoutine] = useState<RoutineItem | null>(null);
   const [deleteConfirmRoutine, setDeleteConfirmRoutine] = useState<RoutineItem | null>(null);
+  const [historyRoutine, setHistoryRoutine] = useState<RoutineItem | null>(null);
 
   const requestVersionRef = useRef<number>(0);
 
@@ -297,6 +308,9 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
     cadence: RoutineCadence;
     triggerType: RoutineTriggerType;
     permissionMode?: RoutinePermissionMode;
+    maxRetries?: number;
+    outputActions?: RoutineOutputAction[];
+    notifyTeammateId?: string | null;
   }): Promise<boolean> => {
     if (readOnly) return false;
     setBusy(true);
@@ -326,8 +340,12 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             name: draft.name,
             prompt: draft.prompt,
             cadence: draft.cadence,
+            triggerType: draft.triggerType,
             workspaceId: editingRoutine.workspaceId ?? workspaceId ?? null,
             permissionMode: draft.permissionMode ?? editingRoutine.permissionMode ?? 'readOnly',
+            maxRetries: draft.maxRetries ?? 0,
+            outputActions: draft.outputActions ?? [],
+            notifyTeammateId: draft.notifyTeammateId ?? null,
           },
         });
         setCollection(updatedSnapshot);
@@ -343,8 +361,12 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
             name: draft.name,
             prompt: draft.prompt,
             cadence: draft.cadence,
+            triggerType: draft.triggerType,
             workspaceId: workspaceId ?? null,
             permissionMode: draft.permissionMode ?? 'readOnly',
+            maxRetries: draft.maxRetries ?? 0,
+            outputActions: draft.outputActions ?? [],
+            notifyTeammateId: draft.notifyTeammateId ?? null,
           },
         });
         setCollection(updatedSnapshot);
@@ -780,6 +802,7 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
                       setIsEditorOpen(true);
                     }}
                     onDelete={(r) => setDeleteConfirmRoutine(r)}
+                    onViewHistory={(r) => setHistoryRoutine(r)}
                     onOpenThread={handleOpenThreadAction}
                   />
                 );
@@ -788,6 +811,12 @@ export const RoutinesView: React.FC<RoutinesViewProps> = ({
           )}
         </div>
       </div>
+
+      <RoutineRunHistoryDrawer
+        routine={historyRoutine}
+        onClose={() => setHistoryRoutine(null)}
+        onOpenThread={onOpenThread || onOpenLastRun}
+      />
 
       {/* Routine Editor Drawer/Modal */}
       <RoutineEditorDrawer

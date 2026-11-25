@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import type { AgentProfile } from '../../../types';
-import type { RoutineItem, RoutineCadence, RoutineTriggerType, RoutinePermissionMode } from './types';
+import type {
+  RoutineItem,
+  RoutineCadence,
+  RoutineTriggerType,
+  RoutinePermissionMode,
+  RoutineEventKind,
+  RoutineOutputAction,
+} from './types';
 import {
   Clock,
   X,
@@ -22,12 +29,36 @@ export interface RoutineEditorDrawerProps {
     cadence: RoutineCadence;
     triggerType: RoutineTriggerType;
     permissionMode: RoutinePermissionMode;
+    maxRetries?: number;
+    outputActions?: RoutineOutputAction[];
+    notifyTeammateId?: string | null;
   }) => Promise<boolean>;
   editingRoutine: RoutineItem | null;
   agents: AgentProfile[];
   busy: boolean;
   error?: string | null;
 }
+
+export const CRON_PRESETS = [
+  { id: 'cron-15m', label: 'Every 15m (UTC)', expr: '*/15 * * * *' },
+  { id: 'cron-weekdays-9', label: 'Weekdays 09:00 UTC', expr: '0 9 * * 1-5' },
+  { id: 'cron-daily-midnight', label: 'Daily 00:00 UTC', expr: '0 0 * * *' },
+];
+
+export const ROUTINE_EVENT_OPTIONS: Array<{ value: RoutineEventKind; label: string }> = [
+  { value: 'on_git_commit', label: 'Git commit (on_git_commit)' },
+  { value: 'on_branch_change', label: 'Branch change (on_branch_change)' },
+  { value: 'on_task_state_change', label: 'Kite Task state change (on_task_state_change)' },
+  { value: 'on_teammate_message', label: 'Teammate inbox message (on_teammate_message)' },
+  { value: 'on_routine_complete', label: 'Chained routine completion (on_routine_complete)' },
+];
+
+export const OUTPUT_ACTION_OPTIONS: Array<{ id: RoutineOutputAction; label: string }> = [
+  { id: 'notify_desktop', label: 'Desktop notification' },
+  { id: 'announce_via_argos', label: 'Announce via Argos' },
+  { id: 'create_kite_task_on_findings', label: 'Create Kite Task on findings' },
+  { id: 'notify_teammate', label: 'Notify teammate' },
+];
 
 export const CANONICAL_CADENCE_PRESETS = [
   { id: 'every-hour', label: 'Every hour', cadence: { kind: 'interval' as const, seconds: 3600 } },
@@ -53,7 +84,13 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
   const [triggerType, setTriggerType] = useState<RoutineTriggerType>('schedule');
   const [permissionMode, setPermissionMode] = useState<RoutinePermissionMode>('readOnly');
   const [presetId, setPresetId] = useState('every-hour');
-  const [customCadenceKind, setCustomCadenceKind] = useState<'preset' | 'custom-interval' | 'custom-clock'>('preset');
+  const [customCadenceKind, setCustomCadenceKind] = useState<'preset' | 'custom-interval' | 'custom-clock' | 'custom-cron'>('preset');
+  const [cronExpr, setCronExpr] = useState('0 9 * * 1-5');
+  const [eventKind, setEventKind] = useState<RoutineEventKind>('on_git_commit');
+  const [debounceSecs, setDebounceSecs] = useState(30);
+  const [maxRetries, setMaxRetries] = useState(0);
+  const [outputActions, setOutputActions] = useState<RoutineOutputAction[]>(['notify_desktop']);
+  const [notifyTeammateId, setNotifyTeammateId] = useState('');
   const [customIntervalMinutes, setCustomIntervalMinutes] = useState(60);
   const [customHour, setCustomHour] = useState(9);
   const [customMinute, setCustomMinute] = useState(0);
@@ -66,8 +103,19 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
       setName(editingRoutine.name);
       setPrompt(editingRoutine.prompt || '');
       setAgentId(editingRoutine.agentId || agents[0]?.id || '');
-      setTriggerType(editingRoutine.triggerType || 'schedule');
+      setTriggerType(editingRoutine.triggerType || (editingRoutine.cadence?.kind === 'event' ? 'event' : editingRoutine.cadence?.kind === 'cron' ? 'cron' : 'schedule'));
       setPermissionMode(editingRoutine.permissionMode || 'readOnly');
+      setMaxRetries(editingRoutine.maxRetries ?? 0);
+      setOutputActions(editingRoutine.outputActions ?? ['notify_desktop']);
+      setNotifyTeammateId(editingRoutine.notifyTeammateId ?? '');
+
+      if (editingRoutine.cadence?.kind === 'cron') {
+        setCustomCadenceKind('custom-cron');
+        setCronExpr(editingRoutine.cadence.expr || '0 9 * * 1-5');
+      } else if (editingRoutine.cadence?.kind === 'event') {
+        setEventKind(editingRoutine.cadence.eventKind || 'on_git_commit');
+        setDebounceSecs(editingRoutine.cadence.debounceSecs ?? 30);
+      }
 
       // Detect cadence matching
       const found = CANONICAL_CADENCE_PRESETS.find((p) => {
@@ -105,6 +153,12 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
       setPermissionMode('readOnly');
       setPresetId('every-hour');
       setCustomCadenceKind('preset');
+      setCronExpr('0 9 * * 1-5');
+      setEventKind('on_git_commit');
+      setDebounceSecs(30);
+      setMaxRetries(0);
+      setOutputActions(['notify_desktop']);
+      setNotifyTeammateId('');
       setCustomIntervalMinutes(60);
       setCustomHour(9);
       setCustomMinute(0);
@@ -134,8 +188,18 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
     if (triggerType === 'manual') {
       return { kind: 'interval', seconds: 86400 * 365 }; // On-demand execution
     }
-    if (triggerType === 'webhook' || triggerType === 'event') {
-      return { kind: 'interval', seconds: 86400 * 30 }; // External triggers
+    if (triggerType === 'webhook') {
+      return { kind: 'interval', seconds: 86400 * 30 };
+    }
+    if (triggerType === 'event') {
+      return {
+        kind: 'event',
+        eventKind,
+        debounceSecs: Math.max(0, Math.min(86400, debounceSecs)),
+      };
+    }
+    if (triggerType === 'cron' || customCadenceKind === 'custom-cron') {
+      return { kind: 'cron', expr: cronExpr.trim() || '0 9 * * 1-5' };
     }
     if (customCadenceKind === 'custom-interval') {
       return { kind: 'interval', seconds: Math.max(900, customIntervalMinutes * 60) };
@@ -150,7 +214,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
     }
     const preset = CANONICAL_CADENCE_PRESETS.find((p) => p.id === presetId) || CANONICAL_CADENCE_PRESETS[0];
     return preset.cadence;
-  }, [triggerType, customCadenceKind, presetId, customIntervalMinutes, customHour, customMinute, customWeekdays]);
+  }, [triggerType, customCadenceKind, presetId, customIntervalMinutes, customHour, customMinute, customWeekdays, cronExpr, eventKind, debounceSecs]);
 
   const isFormValid =
     name.trim().length > 0 &&
@@ -173,6 +237,11 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
         cadence: resolvedCadence,
         triggerType,
         permissionMode,
+        maxRetries,
+        outputActions,
+        notifyTeammateId: outputActions.includes('notify_teammate') && notifyTeammateId.trim()
+          ? notifyTeammateId.trim()
+          : null,
       });
       if (ok) {
         onClose();
@@ -181,6 +250,12 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
       const msg = err instanceof Error ? err.message : String(err);
       setLocalError(msg);
     }
+  };
+
+  const toggleOutputAction = (act: RoutineOutputAction) => {
+    setOutputActions((prev) =>
+      prev.includes(act) ? prev.filter((item) => item !== act) : [...prev, act]
+    );
   };
 
   const toggleWeekday = (day: number) => {
@@ -581,7 +656,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                     style={{
                       flex: 1,
                       padding: '6px 10px',
-                      borderRadius: '5px',
+                      borderRadius: 'var(--vl-radius-sm, 6px)',
                       border: '0',
                       backgroundColor: customCadenceKind === 'custom-clock' ? 'rgba(92, 143, 255, 0.2)' : 'transparent',
                       color: customCadenceKind === 'custom-clock' ? 'var(--accent, #5c8fff)' : 'var(--text-secondary, #9da2b4)',
@@ -592,7 +667,53 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                   >
                     Specific Clock Time
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setCustomCadenceKind('custom-cron')}
+                    style={{
+                      flex: 1,
+                      padding: '6px 10px',
+                      borderRadius: 'var(--vl-radius-sm, 6px)',
+                      border: '0',
+                      backgroundColor: customCadenceKind === 'custom-cron' ? 'rgba(92, 143, 255, 0.2)' : 'transparent',
+                      color: customCadenceKind === 'custom-cron' ? 'var(--accent, #5c8fff)' : 'var(--text-secondary, #9da2b4)',
+                      fontSize: '12px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    5-Field Cron
+                  </button>
                 </div>
+
+                {customCadenceKind === 'custom-cron' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <label htmlFor="routine-cron-input" className="routine-form__label">
+                      UTC Cron Expression (min hour dom month dow)
+                    </label>
+                    <input
+                      id="routine-cron-input"
+                      type="text"
+                      value={cronExpr}
+                      disabled={busy}
+                      onChange={(e) => setCronExpr(e.currentTarget.value)}
+                      placeholder="0 9 * * 1-5"
+                      className="ui-field"
+                    />
+                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                      {CRON_PRESETS.map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          className="chrome-button"
+                          onClick={() => setCronExpr(p.expr)}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {customCadenceKind === 'preset' && (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
@@ -773,24 +894,128 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
               </div>
             )}
 
-            {/* Event trigger explanation */}
+            {/* Event trigger configuration */}
             {triggerType === 'event' && (
               <div
                 style={{
                   padding: '12px',
                   backgroundColor: 'rgba(234, 179, 8, 0.08)',
                   border: '1px solid rgba(234, 179, 8, 0.2)',
-                  borderRadius: '6px',
+                  borderRadius: 'var(--control-radius, 8px)',
                   fontSize: '12px',
                   color: 'var(--text-secondary, #9da2b4)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
                 }}
               >
-                <strong style={{ color: 'var(--text-primary, #fff)', display: 'block', marginBottom: '4px' }}>
-                  Repository Event Trigger
-                </strong>
-                Fires whenever Git events occur inside the active workspace (e.g., branch switch, pull request merge, git push, or build failure).
+                <div>
+                  <strong style={{ color: 'var(--text-primary, #fff)', display: 'block', marginBottom: '4px' }}>
+                    Event-Driven Routine Trigger
+                  </strong>
+                  Fires automatically when matching workspace, Kite Task, teammate, or chained routine events occur.
+                </div>
+                <label className="routine-form__field">
+                  <span className="routine-form__label">Event Kind</span>
+                  <select
+                    aria-label="Routine Event Kind"
+                    value={eventKind}
+                    disabled={busy}
+                    onChange={(e) => setEventKind(e.currentTarget.value as RoutineEventKind)}
+                    className="ui-field"
+                  >
+                    {ROUTINE_EVENT_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="routine-form__field">
+                  <span className="routine-form__label">Debounce / Cooldown (seconds)</span>
+                  <input
+                    aria-label="Event Debounce Seconds"
+                    type="number"
+                    min={0}
+                    max={86400}
+                    disabled={busy}
+                    value={debounceSecs}
+                    onChange={(e) => setDebounceSecs(Number(e.currentTarget.value) || 0)}
+                    className="ui-field"
+                  />
+                </label>
               </div>
             )}
+
+            {/* Retries & Output Actions */}
+            <div
+              style={{
+                padding: '12px',
+                borderRadius: 'var(--control-radius, 8px)',
+                border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '10px',
+              }}
+            >
+              <label className="routine-form__field">
+                <span className="routine-form__label">Max Retries (exponential backoff)</span>
+                <select
+                  aria-label="Max Retries"
+                  value={maxRetries}
+                  disabled={busy}
+                  onChange={(e) => setMaxRetries(Number(e.currentTarget.value))}
+                  className="ui-field"
+                >
+                  <option value={0}>0 (No retries)</option>
+                  <option value={1}>1 retry (15s)</option>
+                  <option value={2}>2 retries (15s, 60s)</option>
+                  <option value={3}>3 retries (15s, 60s, 240s)</option>
+                </select>
+              </label>
+
+              <div>
+                <span className="routine-form__label" style={{ display: 'block', marginBottom: '6px' }}>
+                  Post-Run Output Actions
+                </span>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '6px' }}>
+                  {OUTPUT_ACTION_OPTIONS.map((opt) => (
+                    <label
+                      key={opt.id}
+                      style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer' }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={outputActions.includes(opt.id)}
+                        disabled={busy}
+                        onChange={() => toggleOutputAction(opt.id)}
+                      />
+                      <span>{opt.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {outputActions.includes('notify_teammate') && agents.length > 0 && (
+                <label className="routine-form__field">
+                  <span className="routine-form__label">Notify Teammate Agent</span>
+                  <select
+                    aria-label="Notify Teammate Agent"
+                    value={notifyTeammateId}
+                    disabled={busy}
+                    onChange={(e) => setNotifyTeammateId(e.currentTarget.value)}
+                    className="ui-field"
+                  >
+                    <option value="">Select teammate...</option>
+                    {agents.map((ag) => (
+                      <option key={ag.id} value={ag.id}>
+                        {ag.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
 
             {/* Manual trigger explanation */}
             {triggerType === 'manual' && (

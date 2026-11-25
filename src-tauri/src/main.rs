@@ -21,6 +21,7 @@ pub mod terminal;
 pub mod vt_engine;
 pub mod agents;
 pub mod agent_mind;
+pub mod agent_playbooks;
 pub mod workspaces;
 pub mod chat;
 pub mod chat_attachments;
@@ -539,6 +540,12 @@ fn main() {
             list_agent_chat_summaries,
             list_agent_profiles,
             list_agent_rail_activity,
+            agent_playbooks::list_agent_playbooks,
+            agent_playbooks::save_agent_playbook,
+            agent_playbooks::delete_agent_playbook,
+            agent_playbooks::run_agent_playbook,
+            agent_playbooks::list_playbook_runs,
+            agent_playbooks::retry_playbook_stage,
             list_agent_starters,
             list_workspace_branches,
             switch_workspace_branch,

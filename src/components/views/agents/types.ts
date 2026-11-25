@@ -105,7 +105,52 @@ export interface FullAgentProfile extends AgentProfile {
   knowledgePacks?: KnowledgePackConfig[];
 }
 
-export type TabType = 'memory' | 'skills' | 'starters' | 'settings';
+export interface PlaybookStage {
+  stageId: string;
+  title: string;
+  agentProfileId: string;
+  promptTemplate: string;
+  dependsOn: string[];
+  workspaceMode: 'inherit' | 'share' | 'branch';
+  handoffKeys: string[];
+}
+
+export interface PlaybookDefinition {
+  id: string;
+  name: string;
+  description: string;
+  stages: PlaybookStage[];
+  createdAtUnixMs: number;
+  updatedAtUnixMs: number;
+}
+
+export interface PlaybookStageRun {
+  stageId: string;
+  title: string;
+  agentProfileId: string;
+  provider: string;
+  model: string | null;
+  status: string;
+  threadId: string | null;
+  startedAtUnixMs: number | null;
+  finishedAtUnixMs: number | null;
+  handoffKeys: string[];
+  summary: string | null;
+  error: string | null;
+}
+
+export interface PlaybookRunRecord {
+  runId: string;
+  playbookId: string;
+  playbookName: string;
+  status: string;
+  startedAtUnixMs: number;
+  finishedAtUnixMs: number | null;
+  workspaceId: string | null;
+  stages: PlaybookStageRun[];
+}
+
+export type TabType = 'memory' | 'skills' | 'starters' | 'playbooks' | 'settings';
 export type MemoryTarget = 'memory' | 'user';
 
 export const MEMORY_DELIMITER = '\n§\n';

@@ -873,3 +873,62 @@ html[data-surface-glass='true'] body.kite-app .agent-inbox__message {
   background: var(--surface-subtle, rgba(255, 255, 255, 0.04));
   font-size: var(--text-caption, 12px);
 }
+
+.agent-playbooks__form,
+.agent-playbooks__card,
+.agent-playbooks__run-card {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-playbooks__stages-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-playbooks__stage-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+}
+
+.agent-playbooks__list,
+.agent-playbooks__runs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.agent-playbooks__card-header,
+.agent-playbooks__run-header,
+.agent-playbooks__node-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-playbooks__graph {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.agent-playbooks__node {
+  padding: 10px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--block-stroke, rgba(255, 255, 255, 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-playbooks__node-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}

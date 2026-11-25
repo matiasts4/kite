@@ -20,6 +20,7 @@ import { AgentMemoryTab } from './agents/AgentMemoryTab';
 import { AgentSkillsTab } from './agents/AgentSkillsTab';
 import { AgentStartersTab } from './agents/AgentStartersTab';
 import { AgentSettingsTab } from './agents/AgentSettingsTab';
+import { AgentPlaybooksTab } from './agents/AgentPlaybooksTab';
 import { AgentTerminalPane } from './agents/AgentTerminalPane';
 import { AgentCreatePane } from './agents/AgentCreatePane';
 import {
@@ -866,6 +867,18 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
               <span className="ui-tab__label" data-label="Skills">Skills</span>
               {skillsCount > 0 && <span className="ui-tab__count" data-count="">{skillsCount}</span>}
             </button>
+
+            <button
+              type="button"
+              aria-label="Agent Playbooks"
+              className={viewMode === 'playbooks' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
+              onClick={() => handleSelectTab('playbooks')}
+              aria-current={viewMode === 'playbooks' ? 'page' : undefined}
+              title="Multi-agent specialist Playbooks & handoff pipelines"
+            >
+              <BotIcon size={12} />
+              <span className="ui-tab__label" data-label="Playbooks">Playbooks</span>
+            </button>
           </div>
         </nav>
       )}
@@ -937,6 +950,14 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           starters={starters}
           installingStarterId={installingStarterId}
           onInstallStarter={handleInstallStarter}
+        />
+      )}
+
+      {viewMode === 'playbooks' && (
+        <AgentPlaybooksTab
+          agentId={selectedAgent.id}
+          agents={agents}
+          workspaceId={workspaceId}
         />
       )}
 

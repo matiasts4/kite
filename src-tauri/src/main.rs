@@ -821,6 +821,8 @@ fn main() {
             audio_ducking::probe_microphone_privacy_status,
             voice_audio::voice_audio_list_devices,
             voice_audio::voice_audio_start_capture,
+            voice_audio::voice_audio_mark_speech_start,
+            voice_audio::voice_audio_set_muted,
             voice_audio::voice_audio_stop_capture,
             voice_audio::voice_audio_status,
             voice_realtime::voice_realtime_connect,

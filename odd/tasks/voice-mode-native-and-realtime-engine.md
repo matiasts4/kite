@@ -167,3 +167,8 @@ Auditing `src/lib/operator/`, `src-tauri/src/dictation.rs`, `src-tauri/src/audio
     - `npm run verify:desktop:e2e`: `5/5` passed (`DESKTOP-SMOKE-01`, `ORCH-E2E-01`, `THREAD-STREAM-01`, `UI-LAYOUT-01`, `VOICE-MODE-01` including `data-transport` + post-call receipt persistence).
     - `node .kite/sanitizer/audit-references.mjs --check`: `[AUDIT CLEAN]`.
     - `npx tsc --noEmit`: `0` errors across all Voice/Operator files (`6` pre-existing errors remain solely in parallel `AgentsView.tsx` & `AgentPlaybooksTab.test.tsx`).
+
+- **L3 (2026-11-25 — Native Rust Voice Listening Fix)**:
+  > "Okey, creo que tenemos problemas con respecto a la escucha. De, el asistente. Intenta entender qué está sucediendo."
+  - Root causes identified: `zedVoice.ts` enabled `nativeCaptureActive` on Tauri desktop builds (`isNativeRustAudioSupported()`), bypassing `AudioWorklet` `handlePcmFrame()` and `SpeechRecognition`, while `voice:audio-level` listeners ignored `rms` (never feeding `AdaptiveVadController`, `markNativeSpeechStart`, or `resetSilenceTimer()`), `armBargeInMonitor` rejected native streams without `activeMediaStream && activeAudioContext`, `stt_ws::stream_pcm_to_stt_ws` was never invoked, and `capture.rs` accumulated pre-speech silence / closed `cpal` every turn.
+  - Fixed end-to-end across `src-tauri/src/voice_audio/{capture.rs,stt_ws.rs,mod.rs}`, `src-tauri/src/main.rs`, `src/lib/operator/voice/{nativeAudioBridge.ts,zedVoice.ts,voiceStatus.ts}`, plus new `zedVoiceNative.test.ts` and `capture.rs` `SpeechTurnBuffer` tests (`voice_audio` 10/10, voice Vitest 13/13 files = 108/108 tests, `verify:ipc` PASS).

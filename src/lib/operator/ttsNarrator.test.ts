@@ -180,7 +180,6 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
       }
       (globalThis as any).MediaSource = MockMediaSource;
 
-      let mockAudioInstance: any = null;
       class MockStreamingAudio {
         src = '';
         volume = 1;
@@ -190,11 +189,13 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
         onerror: ((err: any) => void) | null = null;
         constructor(src: string) {
           this.src = src;
-          mockAudioInstance = this;
         }
         play() {
           this.paused = false;
           this.onplay?.();
+          setTimeout(() => {
+            this.onended?.();
+          }, 10);
           return Promise.resolve();
         }
         pause() {
@@ -225,18 +226,12 @@ describe('TTSNarrator — ElevenLabs Streaming & Browser Speech', () => {
       const onStart = vi.fn();
       const onEnd = vi.fn();
 
-      const speakPromise = ttsNarrator.speak('Texto para streaming en tiempo real.', {
+      await ttsNarrator.speak('Texto para streaming en tiempo real.', {
         engine: 'elevenlabs',
         elevenlabsApiKey: 'xi_test_stream_key',
         onStart,
         onEnd,
       });
-
-      setTimeout(() => {
-        mockAudioInstance?.onended?.();
-      }, 30);
-
-      await speakPromise;
 
       expect(mockReader.read).toHaveBeenCalled();
       expect(onStart).toHaveBeenCalled();

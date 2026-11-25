@@ -1,4 +1,5 @@
 import { loadOperatorConfig } from '../operatorConfig';
+import { isTauriEnvironment } from '../../ipc';
 
 export interface VoiceEngineStatus {
   available: boolean;
@@ -20,7 +21,7 @@ export function isVoiceRecognitionSupported(): boolean {
     navigator.mediaDevices &&
     typeof navigator.mediaDevices.getUserMedia === 'function'
   );
-  return hasMediaDevices || getSpeechRecognitionImpl() !== null;
+  return isTauriEnvironment() || hasMediaDevices || getSpeechRecognitionImpl() !== null;
 }
 
 export function getVoiceEngineStatus(): VoiceEngineStatus {

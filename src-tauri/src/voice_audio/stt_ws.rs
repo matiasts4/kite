@@ -98,6 +98,27 @@ pub async fn stream_pcm_to_stt_ws(
     base_url: &str,
     language: &str,
     sample_rate: u32,
+    rx: broadcast::Receiver<Vec<i16>>,
+    stop_signal: tokio::sync::watch::Receiver<bool>,
+) -> Result<String, String> {
+    stream_pcm_to_stt_ws_with_preroll(
+        api_key,
+        base_url,
+        language,
+        sample_rate,
+        Vec::new(),
+        rx,
+        stop_signal,
+    )
+    .await
+}
+
+pub async fn stream_pcm_to_stt_ws_with_preroll(
+    api_key: &str,
+    base_url: &str,
+    language: &str,
+    sample_rate: u32,
+    initial_pcm: Vec<i16>,
     mut rx: broadcast::Receiver<Vec<i16>>,
     stop_signal: tokio::sync::watch::Receiver<bool>,
 ) -> Result<String, String> {
@@ -118,19 +139,40 @@ pub async fn stream_pcm_to_stt_ws(
     .map_err(|e| format!("STT WebSocket handshake failed: {e}"))?;
 
     let (mut write, mut read) = ws_stream.split();
+    if !initial_pcm.is_empty() {
+        for chunk in initial_pcm.chunks(3200) {
+            let mut bytes = Vec::with_capacity(chunk.len() * 2);
+            for &s in chunk {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let msg = serde_json::json!({ "type": "audio", "audio": encoded }).to_string();
+            if write.send(Message::Text(msg)).await.is_err() {
+                return Err("STT WebSocket pre-roll send interrupted".to_string());
+            }
+        }
+    }
+
     let mut last_text = String::new();
     let mut stop_rx = stop_signal.clone();
+    let mut flushing = false;
+    let flush_sleep = tokio::time::sleep(Duration::from_secs(3600));
+    tokio::pin!(flush_sleep);
 
     loop {
         tokio::select! {
-            _ = stop_rx.changed() => {
+            _ = stop_rx.changed(), if !flushing => {
                 if *stop_rx.borrow() {
+                    flushing = true;
                     let _ = write.send(Message::Text(serde_json::json!({"type": "commit"}).to_string())).await;
-                    let _ = write.close().await;
-                    break;
+                    flush_sleep.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(900));
                 }
             }
-            frame = rx.recv() => {
+            _ = &mut flush_sleep, if flushing => {
+                let _ = write.close().await;
+                break;
+            }
+            frame = rx.recv(), if !flushing => {
                 match frame {
                     Ok(pcm) => {
                         let mut bytes = Vec::with_capacity(pcm.len() * 2);
@@ -155,9 +197,14 @@ pub async fn stream_pcm_to_stt_ws(
                     Some(Ok(Message::Text(txt))) => {
                         if let Some(ev) = parse_stt_ws_message(&txt) {
                             last_text = ev.text.clone();
+                            let is_final = ev.kind == "final";
                             if let Some(handle) = crate::get_app_handle() {
-                                let event_name = if ev.kind == "final" { "voice:stt-final" } else { "voice:stt-partial" };
+                                let event_name = if is_final { "voice:stt-final" } else { "voice:stt-partial" };
                                 let _ = handle.emit(event_name, &ev);
+                            }
+                            if flushing && is_final {
+                                let _ = write.close().await;
+                                break;
                             }
                         }
                     }

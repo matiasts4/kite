@@ -22,6 +22,7 @@ export interface NativeCaptureStopResult {
   ok: boolean;
   wavBytes: number;
   wavBase64?: string;
+  sttTranscript?: string | null;
   error?: string;
 }
 
@@ -66,6 +67,11 @@ export async function listNativeAudioInputDevices(): Promise<NativeAudioDeviceIn
 export async function startNativeAudioCapture(options?: {
   deviceId?: string | null;
   sampleRate?: 16000 | 24000;
+  keepExisting?: boolean;
+  fromBargeIn?: boolean;
+  sttApiKey?: string;
+  sttBaseUrl?: string;
+  sttLanguage?: string;
 }): Promise<NativeCaptureStartResult> {
   if (!isNativeRustAudioSupported()) {
     return { ok: false, error: 'Native audio unavailable outside Tauri runtime' };
@@ -74,6 +80,11 @@ export async function startNativeAudioCapture(options?: {
     const res = await invokeFlatCommand<NativeCaptureStartResult>('voice_audio_start_capture', {
       deviceId: options?.deviceId ?? null,
       sampleRate: options?.sampleRate ?? 16000,
+      keepExisting: options?.keepExisting ?? false,
+      fromBargeIn: options?.fromBargeIn ?? false,
+      sttApiKey: options?.sttApiKey ?? null,
+      sttBaseUrl: options?.sttBaseUrl ?? null,
+      sttLanguage: options?.sttLanguage ?? null,
     });
     return res ?? { ok: false, error: 'Empty response from voice_audio_start_capture' };
   } catch (err: any) {
@@ -81,16 +92,51 @@ export async function startNativeAudioCapture(options?: {
   }
 }
 
-export async function stopNativeAudioCapture(): Promise<NativeCaptureStopResult> {
+export async function markNativeSpeechStart(preRollMs: number = 400): Promise<boolean> {
+  if (!isNativeRustAudioSupported()) return false;
+  try {
+    const res = await invokeFlatCommand<{ ok?: boolean }>('voice_audio_mark_speech_start', {
+      preRollMs,
+    });
+    return Boolean(res?.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function setNativeAudioMuted(muted: boolean): Promise<boolean> {
+  if (!isNativeRustAudioSupported()) return false;
+  try {
+    const res = await invokeFlatCommand<{ ok?: boolean }>('voice_audio_set_muted', { muted });
+    if (muted) cachedNativeLevel = 0;
+    return Boolean(res?.ok);
+  } catch {
+    return false;
+  }
+}
+
+export async function stopNativeAudioCapture(options?: {
+  keepAlive?: boolean;
+  discard?: boolean;
+  trimTrailingMs?: number;
+}): Promise<NativeCaptureStopResult> {
   if (!isNativeRustAudioSupported()) {
     return { ok: false, wavBytes: 0 };
   }
   try {
-    const res = await invokeCommand<NativeCaptureStopResult>('voice_audio_stop_capture');
-    cachedNativeLevel = 0;
+    const res = await invokeFlatCommand<NativeCaptureStopResult>('voice_audio_stop_capture', {
+      keepAlive: options?.keepAlive ?? false,
+      discard: options?.discard ?? false,
+      trimTrailingMs: options?.trimTrailingMs ?? 0,
+    });
+    if (!options?.keepAlive) {
+      cachedNativeLevel = 0;
+    }
     return res ?? { ok: false, wavBytes: 0 };
   } catch (err: any) {
-    cachedNativeLevel = 0;
+    if (!options?.keepAlive) {
+      cachedNativeLevel = 0;
+    }
     return { ok: false, wavBytes: 0, error: err?.message || String(err) };
   }
 }
@@ -120,7 +166,7 @@ export function decodeWavBase64ToBlob(wavBase64: string): Blob | null {
 }
 
 export async function subscribeNativeAudioEvents(handlers: {
-  onAudioLevel?: (level: number, rms: number) => void;
+  onAudioLevel?: (level: number, rms: number, durationMs: number) => void;
   onSttPartial?: (text: string) => void;
   onSttFinal?: (text: string) => void;
   onDeviceLost?: (error: string) => void;
@@ -135,11 +181,15 @@ export async function subscribeNativeAudioEvents(handlers: {
 
     if (handlers.onAudioLevel) {
       unlisteners.push(
-        await eventMod.listen<{ level?: number; rms?: number }>('voice:audio-level', (ev) => {
-          const level = ev?.payload?.level ?? 0;
-          setCachedNativeAudioLevel(level);
-          handlers.onAudioLevel?.(level, ev?.payload?.rms ?? 0);
-        })
+        await eventMod.listen<{ level?: number; rms?: number; durationMs?: number }>(
+          'voice:audio-level',
+          (ev) => {
+            const level = ev?.payload?.level ?? 0;
+            const durationMs = ev?.payload?.durationMs ?? 33;
+            setCachedNativeAudioLevel(level);
+            handlers.onAudioLevel?.(level, ev?.payload?.rms ?? 0, durationMs);
+          }
+        )
       );
     }
     if (handlers.onSttPartial) {

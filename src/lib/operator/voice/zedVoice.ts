@@ -26,6 +26,9 @@ import {
   decodeWavBase64ToBlob,
   getCachedNativeAudioLevel,
   isNativeRustAudioSupported,
+  markNativeSpeechStart,
+  setCachedNativeAudioLevel,
+  setNativeAudioMuted,
   startNativeAudioCapture,
   stopNativeAudioCapture,
   subscribeNativeAudioEvents,
@@ -194,6 +197,9 @@ let sessionMuted = false;
 let recognitionEpoch = 0;
 let recognitionRestartTimer: ReturnType<typeof setTimeout> | null = null;
 let nativeCaptureActive = false;
+let nativeStreamWarm = false;
+let nativeDevicePref: string | null = null;
+let lastNativeLevelTs = 0;
 let nativeEventUnsub: (() => void) | null = null;
 
 const speculativePreCapture = new SpeculativePartialPreCapture<TurnContext>({
@@ -216,7 +222,7 @@ export function resetSpeculativeTurnContextForTests(): void {
 }
 
 export function getCurrentAudioLevel(): number {
-  if (nativeCaptureActive) {
+  if (nativeCaptureActive || nativeStreamWarm) {
     const nativeLevel = getCachedNativeAudioLevel();
     audioLevel = Math.max(nativeLevel, audioLevel * 0.85);
     return Math.min(1, audioLevel);
@@ -288,7 +294,7 @@ function armNoSpeechTimer(): void {
  * `onBargeIn` immediately upon sustained human speech onset.
  */
 export function armBargeInMonitor(onBargeIn: () => void): boolean {
-  if (!activeMediaStream || !activeAudioContext) {
+  if (!nativeStreamWarm && (!activeMediaStream || !activeAudioContext)) {
     return false;
   }
   bargeInCallback = onBargeIn;
@@ -467,6 +473,10 @@ export function setOperatorMicMuted(muted: boolean): void {
   const next = Boolean(muted);
   if (next === sessionMuted) return;
   sessionMuted = next;
+  if (nativeCaptureActive || nativeStreamWarm) {
+    setCachedNativeAudioLevel(0);
+    void setNativeAudioMuted(next);
+  }
   if (next) {
     flushSilenceOnMute(500);
   } else {
@@ -476,6 +486,78 @@ export function setOperatorMicMuted(muted: boolean): void {
 
 export function isOperatorMicMuted(): boolean {
   return sessionMuted;
+}
+
+function handleNativeAudioLevel(level: number, rms: number, durationMs?: number): void {
+  if (sessionMuted) {
+    audioLevel = 0;
+    return;
+  }
+  const now = Date.now();
+  const frameDurationMs =
+    typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs > 0
+      ? Math.min(200, Math.max(10, durationMs))
+      : Math.min(200, Math.max(10, lastNativeLevelTs > 0 ? now - lastNativeLevelTs : 33));
+  lastNativeLevelTs = now;
+
+  audioLevel = Math.max(level, audioLevel * 0.85);
+  currentOptions.onAudioLevel?.(level);
+
+  if (isBargeInMonitoring && !isSessionActive) {
+    if (bargeInGate.evaluateFrame(rms, frameDurationMs, adaptiveVad.getNoiseFloorRms(), now)) {
+      isBargeInMonitoring = false;
+      const cb = bargeInCallback;
+      bargeInCallback = null;
+      voiceTurnArbitrator.transition('barge_in');
+      try {
+        cb?.();
+      } catch (err) {
+        console.warn('[ArgosVoice] Barge-in callback error:', err);
+      }
+    }
+    return;
+  }
+
+  if (!isSessionActive) return;
+
+  const decision = adaptiveVad.processFrame(rms, frameDurationMs);
+  if (decision.speechStartedNow) {
+    hasDetectedSpeech = true;
+    hasVadVoicedFrame = true;
+    if (!speechStartTimestamp) {
+      speechStartTimestamp = now;
+    }
+    if (!isSpeechCaptureOpen) {
+      isSpeechCaptureOpen = true;
+      void markNativeSpeechStart(400);
+    }
+    trailingSilenceSamples = 0;
+    voiceTurnArbitrator.transition('user_speaking');
+    try {
+      emitTrace({
+        turnId: currentTurnTraceId,
+        ev: 'vad.speech_start',
+        noiseFloorRms: Number(decision.noiseFloorRms.toFixed(4)),
+        bargeIn: Boolean(currentOptions.fromBargeIn),
+      });
+    } catch {}
+  }
+
+  if (decision.isVoiced) {
+    hasDetectedSpeech = true;
+    hasVadVoicedFrame = true;
+    if (!speechStartTimestamp) {
+      speechStartTimestamp = now;
+    }
+    if (!isSpeechCaptureOpen) {
+      isSpeechCaptureOpen = true;
+      void markNativeSpeechStart(400);
+    }
+    trailingSilenceSamples = 0;
+    resetSilenceTimer();
+  } else if (isSpeechCaptureOpen) {
+    trailingSilenceSamples += Math.round((16000 * frameDurationMs) / 1000);
+  }
 }
 
 function handlePcmFrame(samples: Float32Array): void {
@@ -886,7 +968,9 @@ export async function startOperatorListening(
   }
 
   disarmBargeInMonitor();
-  const reuseGraph = Boolean(options.continuous && activeMediaStream && activeAudioContext);
+  const reuseGraph = Boolean(
+    options.continuous && (nativeStreamWarm || (activeMediaStream && activeAudioContext))
+  );
 
   // Drop any stale capture promise without tearing down a warm persistent session graph.
   await stopOperatorListening({ discard: true, keepAudioGraph: reuseGraph });
@@ -923,11 +1007,14 @@ export async function startOperatorListening(
   adaptiveVad.resetTurn(true);
   clearVadTimers();
   isSessionActive = true;
+  lastNativeLevelTs = 0;
   const turnRecognitionEpoch = ++recognitionEpoch;
   recordingStartTime = Date.now();
   voiceTurnArbitrator.transition(options.fromBargeIn ? 'user_speaking' : 'listening');
   if (options.fromBargeIn) {
-    startStreamingSttIfConfigured(rawPcmChunks);
+    if (!isNativeRustAudioSupported()) {
+      startStreamingSttIfConfigured(rawPcmChunks);
+    }
     resetSilenceTimer();
   } else {
     armNoSpeechTimer();
@@ -936,32 +1023,97 @@ export async function startOperatorListening(
   startingPromise = (async () => {
     // 0. Prefer native Rust cpal WASAPI capture when running inside Tauri desktop builds
     if (isNativeRustAudioSupported()) {
-      const nativeStart = await startNativeAudioCapture({
-        deviceId: options.deviceId ?? null,
-        sampleRate: 16000,
-      });
-      if (nativeStart.ok && isSessionActive) {
-        nativeCaptureActive = true;
+      let preferredDeviceId = options.deviceId ?? null;
+      if (!preferredDeviceId && typeof localStorage !== 'undefined') {
+        try {
+          preferredDeviceId = localStorage.getItem('kite_selected_mic_device_id') || null;
+        } catch {}
+      }
+      const subscribedThisStart = !nativeEventUnsub;
+      if (!nativeEventUnsub) {
         nativeEventUnsub = await subscribeNativeAudioEvents({
-          onAudioLevel: (lvl) => options.onAudioLevel?.(lvl),
+          onAudioLevel: (lvl, rms, durationMs) => handleNativeAudioLevel(lvl, rms, durationMs),
           onSttPartial: (txt) => {
             if (!isSessionActive) return;
-            streamingSttTranscript = txt;
+            const clean = txt.trim();
+            if (!clean) return;
+            streamingSttTranscript = clean;
             hasDetectedSpeech = true;
             if (!speechStartTimestamp) speechStartTimestamp = Date.now();
             resetSilenceTimer();
-            speculativePreCapture.update(txt);
-            options.onInterim?.(txt);
+            speculativePreCapture.update(clean);
+            currentOptions.onInterim?.(clean);
           },
           onSttFinal: (txt) => {
             if (!isSessionActive) return;
-            streamingSttTranscript = txt;
-            lastRecognizedText = txt;
+            const clean = txt.trim();
+            if (!clean) return;
+            streamingSttTranscript = clean;
+            lastRecognizedText = clean;
             resetSilenceTimer();
-            speculativePreCapture.update(txt);
-            options.onInterim?.(txt);
+            speculativePreCapture.update(clean);
+            currentOptions.onInterim?.(clean);
+          },
+          onDeviceLost: (err) => {
+            console.warn('[ArgosVoice] Native audio device warning:', err);
           },
         });
+      }
+
+      const { grokKey, grokBaseUrl } = resolveGrokSttConfigSync();
+      const keepExistingNative = Boolean(
+        options.continuous &&
+          nativeStreamWarm &&
+          (preferredDeviceId ?? null) === nativeDevicePref
+      );
+      const nativeStart = await startNativeAudioCapture({
+        deviceId: preferredDeviceId,
+        sampleRate: 16000,
+        keepExisting: keepExistingNative,
+        fromBargeIn: Boolean(options.fromBargeIn),
+        sttApiKey: grokKey.trim() || undefined,
+        sttBaseUrl: grokKey.trim() ? grokBaseUrl : undefined,
+        sttLanguage: options.language || 'es-ES',
+      });
+
+      if (nativeStart.ok && isSessionActive) {
+        nativeCaptureActive = true;
+        nativeStreamWarm = true;
+        nativeDevicePref = preferredDeviceId ?? null;
+        audioSampleRate = 16000;
+        await startAudioDucking({ suppressCue: reuseGraph });
+        if (options.fromBargeIn) {
+          isSpeechCaptureOpen = true;
+          void markNativeSpeechStart(400);
+        }
+      } else {
+        if (!nativeStart.ok) {
+          console.warn(
+            '[ArgosVoice] Native WASAPI capture unavailable, falling back to AudioWorklet:',
+            nativeStart.error
+          );
+          nativeStreamWarm = false;
+          nativeDevicePref = null;
+          if (subscribedThisStart && nativeEventUnsub) {
+            try {
+              nativeEventUnsub();
+            } catch {}
+            nativeEventUnsub = null;
+          }
+        } else if (!isSessionActive) {
+          if (!isPersistentGraphActive) {
+            nativeStreamWarm = false;
+            nativeDevicePref = null;
+            void stopNativeAudioCapture({ keepAlive: false, discard: true });
+            if (subscribedThisStart && nativeEventUnsub) {
+              try {
+                nativeEventUnsub();
+              } catch {}
+              nativeEventUnsub = null;
+            }
+          }
+          return;
+        }
       }
     }
 
@@ -1080,17 +1232,22 @@ export async function stopOperatorListening(options?: {
   currentSessionPromise = null;
 
   const wasNativeCapture = nativeCaptureActive;
+  const keepNativeWarm = Boolean(keepGraph && wasNativeCapture);
   nativeCaptureActive = false;
-  if (nativeEventUnsub) {
-    try {
-      nativeEventUnsub();
-    } catch {}
-    nativeEventUnsub = null;
+  if (!keepNativeWarm) {
+    nativeStreamWarm = false;
+    nativeDevicePref = null;
+    if (nativeEventUnsub) {
+      try {
+        nativeEventUnsub();
+      } catch {}
+      nativeEventUnsub = null;
+    }
   }
 
   if (discard) {
     if (wasNativeCapture) {
-      void stopNativeAudioCapture();
+      void stopNativeAudioCapture({ keepAlive: keepNativeWarm, discard: true });
     }
     currentOptions = {};
     activeWsHandshakeBuffer?.clear();
@@ -1131,25 +1288,40 @@ export async function stopOperatorListening(options?: {
   teardownActiveRecognition('stop');
 
   const localTranscript = joinSpeechPartial(currentSpeechTranscript, lastInterimTranscript).trim();
-  const hasSpeechPayload =
+  let hasSpeechPayload =
     speechWasDetected || Boolean(localTranscript) || Boolean(cachedStreamingTranscript);
 
   // 2. Prioritize already-captured PCM WAV, trimming dead trailing endpointing silence
   //    while retaining a ~250ms acoustic decay pad so closing consonants are never clipped.
   let audioBlob: Blob | null = null;
+  let nativeSttTranscript = '';
   const trailingPadSamples = Math.round((audioSampleRate * TRAILING_SILENCE_PAD_MS) / 1000);
   const samplesToTrim =
     wasVadVoiced && trailingSilenceToInspect > trailingPadSamples
       ? trailingSilenceToInspect - trailingPadSamples
       : 0;
+  const trimTrailingMs = Math.max(
+    0,
+    Math.round((samplesToTrim / Math.max(8000, audioSampleRate)) * 1000)
+  );
   const effectivePcmChunks =
     samplesToTrim > 0 ? trimTrailingPcmSamples(rawPcmChunks, samplesToTrim) : rawPcmChunks;
   const totalPcmSamples = effectivePcmChunks.reduce((sum, chunk) => sum + chunk.length, 0);
   if (wasNativeCapture) {
     try {
-      const nativeStop = await stopNativeAudioCapture();
+      const nativeStop = await stopNativeAudioCapture({
+        keepAlive: keepNativeWarm,
+        discard: false,
+        trimTrailingMs,
+      });
+      nativeSttTranscript = (nativeStop.sttTranscript || '').trim();
       if (nativeStop.ok && nativeStop.wavBase64) {
         audioBlob = decodeWavBase64ToBlob(nativeStop.wavBase64);
+      }
+      if (nativeSttTranscript) {
+        hasSpeechPayload = true;
+      } else if (!currentContinuousMode && audioBlob && audioBlob.size > 1200) {
+        hasSpeechPayload = true;
       }
     } catch (e) {
       console.warn('[ZedVoice] stopNativeAudioCapture error:', e);
@@ -1230,7 +1402,10 @@ export async function stopOperatorListening(options?: {
   let sttBackend = 'local';
 
   if (hasSpeechPayload) {
-    if (streamingSession && streamingSession.isOpen() && !streamingSession.hasFailed()) {
+    if (nativeSttTranscript) {
+      sttBackend = 'rust-ws';
+      finalText = nativeSttTranscript;
+    } else if (streamingSession && streamingSession.isOpen() && !streamingSession.hasFailed()) {
       sttBackend = 'grok-ws';
       try {
         emitTrace({
@@ -1403,9 +1578,11 @@ function stopAudioAnalysis(): void {
  */
 export async function releaseOperatorCapture(): Promise<void> {
   speculativePreCapture.reset();
-  if (nativeCaptureActive) {
+  if (nativeCaptureActive || nativeStreamWarm) {
     nativeCaptureActive = false;
-    void stopNativeAudioCapture();
+    nativeStreamWarm = false;
+    nativeDevicePref = null;
+    void stopNativeAudioCapture({ keepAlive: false, discard: true });
   }
   if (nativeEventUnsub) {
     try {

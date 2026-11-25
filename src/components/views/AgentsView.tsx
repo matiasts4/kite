@@ -109,7 +109,7 @@ export interface AgentsViewProps {
   onAgentDeleted?: (agentId: string) => void;
   initialMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit';
   viewMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit';
-  onViewModeChange?: (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => void;
+  onViewModeChange?: (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters') => void;
   onOpenRoutines?: () => void;
   runningCount?: number;
 }
@@ -134,20 +134,34 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   const [internalAgents, setInternalAgents] = useState<AgentProfile[]>([]);
   const agents = agentsProp ?? internalAgents;
 
-  const [internalViewMode, setInternalViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit'>(initialMode);
-  const viewMode = controlledViewMode ?? internalViewMode;
+  const [internalViewMode, setInternalViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit'>(controlledViewMode ?? initialMode);
+  useEffect(() => {
+    if (controlledViewMode !== undefined) {
+      setInternalViewMode((prev) => {
+        if (controlledViewMode === 'settings' && (prev === 'playbooks' || prev === 'audit')) {
+          return prev;
+        }
+        return controlledViewMode;
+      });
+    }
+  }, [controlledViewMode]);
+  const viewMode = internalViewMode;
   const [isEvalOpen, setIsEvalOpen] = useState(false);
   const [isBundleOpen, setIsBundleOpen] = useState(false);
 
   const setViewMode = useCallback(
     (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => {
       setInternalViewMode(mode);
-      onViewModeChange?.(mode);
+      if (mode === 'playbooks' || mode === 'audit') {
+        onViewModeChange?.('settings');
+      } else {
+        onViewModeChange?.(mode);
+      }
     },
     [onViewModeChange]
   );
 
-  const [lastSettingsTab, setLastSettingsTab] = useState<'settings' | 'memory' | 'skills'>('settings');
+  const [lastSettingsTab, setLastSettingsTab] = useState<'settings' | 'memory' | 'skills' | 'playbooks' | 'audit'>('settings');
   const [surfacePreference, setSurfacePreference] = useState<'chat' | 'terminal'>('chat');
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -660,7 +674,7 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
     setSettingsDirty(false);
   };
 
-  const handleSelectTab = (tab: 'settings' | 'memory' | 'skills' | 'starters') => {
+  const handleSelectTab = (tab: 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => {
     setViewMode(tab);
     if (tab !== 'starters') {
       setLastSettingsTab(tab);

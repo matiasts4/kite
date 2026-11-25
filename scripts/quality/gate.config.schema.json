@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Kite Quality Gate Configuration",
+  "description": "Declarative configuration for Kite Code's reusable IPC contract verifier, diff-scoped design linter, and unified quality gate orchestrator.",
+  "type": "object",
+  "required": ["version", "ipc", "design", "gate"],
+  "properties": {
+    "version": { "type": "integer", "minimum": 1 },
+    "ipc": {
+      "type": "object",
+      "required": ["rustMainPath", "rustSrcDir", "tsSrcDir"],
+      "properties": {
+        "rustMainPath": { "type": "string" },
+        "rustSrcDir": { "type": "string" },
+        "tsSrcDir": { "type": "string" },
+        "invokeCallers": { "type": "array", "items": { "type": "string" } },
+        "ignorePrefixes": { "type": "array", "items": { "type": "string" } },
+        "ignoreCommands": { "type": "array", "items": { "type": "string" } },
+        "payloadCheckSeverity": { "type": "string", "enum": ["warn", "error"] },
+        "legacyBaseline": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "command"],
+            "properties": {
+              "file": { "type": "string" },
+              "command": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "design": {
+      "type": "object",
+      "required": ["rules"],
+      "properties": {
+        "defaultScope": { "type": "string", "enum": ["diff", "all"] },
+        "inlineEscapeMarker": { "type": "string" },
+        "excludePaths": { "type": "array", "items": { "type": "string" } },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "enabled", "severity", "message"],
+            "properties": {
+              "id": { "type": "string" },
+              "enabled": { "type": "boolean" },
+              "severity": { "type": "string", "enum": ["error", "warn"] },
+              "onlyAddedFiles": { "type": "boolean" },
+              "include": { "type": "array", "items": { "type": "string" } },
+              "exclude": { "type": "array", "items": { "type": "string" } },
+              "forbiddenPx": { "type": "array", "items": { "type": "number" } },
+              "selectorKeywords": { "type": "array", "items": { "type": "string" } },
+              "forbiddenProps": { "type": "array", "items": { "type": "string" } },
+              "warnLines": { "type": "integer", "minimum": 1 },
+              "errorLines": { "type": "integer", "minimum": 1 },
+              "message": { "type": "string" },
+              "fixHint": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["artifactsRoot", "profiles", "areaMapping"],
+      "properties": {
+        "artifactsRoot": { "type": "string" },
+        "e2eArtifactsRoot": { "type": "string" },
+        "rustRebuildCommand": { "type": "string" },
+        "sanitizerCommand": { "type": "string" },
+        "profiles": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["stages"],
+            "properties": {
+              "description": { "type": "string" },
+              "stages": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "areaMapping": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "patterns"],
+            "properties": {
+              "id": { "type": "string" },
+              "patterns": { "type": "array", "items": { "type": "string" } },
+              "vitestPaths": { "type": "array", "items": { "type": "string" } },
+              "cargoFilters": { "type": "array", "items": { "type": "string" } },
+              "e2eSpecs": { "type": "array", "items": { "type": "string" } },
+              "visualReview": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

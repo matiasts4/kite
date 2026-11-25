@@ -1,0 +1,254 @@
+{
+  "$schema": "./gate.config.schema.json",
+  "version": 1,
+  "ipc": {
+    "rustMainPath": "src-tauri/src/main.rs",
+    "rustSrcDir": "src-tauri/src",
+    "tsSrcDir": "src",
+    "invokeCallers": ["invokeCommand", "invoke", "tauriInvoke"],
+    "ignorePrefixes": ["plugin:"],
+    "ignoreCommands": [],
+    "payloadCheckSeverity": "warn",
+    "legacyBaseline": [
+      { "file": "src/components/sidebar/AgentRoster.tsx", "command": "request_agent_install", "reason": "Pre-existing mismatch; real Rust command is start_agent_install (tracked for Phase 2 fix)." },
+      { "file": "src/components/sidebar/WorkspaceRoster.tsx", "command": "remove_workspace", "reason": "Pre-existing mismatch; real Rust command is remove_workspace_from_list." },
+      { "file": "src/components/views/WorkspacesView.tsx", "command": "list_manual_worktrees", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
+      { "file": "src/components/views/WorkspacesView.tsx", "command": "create_manual_worktree", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
+      { "file": "src/components/views/WorkspacesView.tsx", "command": "recover_manual_worktree", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
+      { "file": "src/components/views/WorkspacesView.tsx", "command": "remove_manual_worktree", "reason": "Pre-existing unimplemented worktree IPC calls in WorkspacesView." },
+      { "file": "src/components/views/settings/NotificationsTab.tsx", "command": "notifications_get_snapshot", "reason": "Pre-existing mismatch; real Rust command is notifications_snapshot." },
+      { "file": "src/lib/headroomMonitor.ts", "command": "fetch_headroom_monitor", "reason": "Pre-existing deprecated headroom monitor command unregistered from main.rs." },
+      { "file": "src/lib/operator/appOperatorController.ts", "command": "open_browser", "reason": "Pre-existing mismatch; browser surface uses create_browser_surface/open_external_link." },
+      { "file": "src/lib/operator/executor/actions/switchWorkspace.ts", "command": "list_workspaces", "reason": "Pre-existing mismatch; workspace list comes from bootstrap/state." }
+    ]
+  },
+  "design": {
+    "defaultScope": "diff",
+    "inlineEscapeMarker": "kite-design-ok:",
+    "excludePaths": [
+      "src/motion/animate/**",
+      "src/visual-language.css",
+      "src/index.css",
+      "src/chunks.css",
+      "src/bundle.css",
+      "src/lib/themeCustomizations.ts",
+      "src/lib/themes/**",
+      "src/components/orbRenderer.ts",
+      "**/*.test.ts",
+      "**/*.test.tsx",
+      "**/*.spec.ts",
+      "**/*.spec.tsx"
+    ],
+    "rules": [
+      {
+        "id": "no-arbitrary-css-radius",
+        "enabled": true,
+        "severity": "error",
+        "include": ["src/**/*.css"],
+        "exclude": [],
+        "forbiddenPx": [2, 3, 5, 7, 9, 10, 11, 13, 15, 16, 18, 20],
+        "message": "Arbitrary pixel border-radius violates AGENTS.md §1 4-tier radius contract.",
+        "fixHint": "Use var(--vl-radius-xs|sm), var(--control-radius), var(--card-radius), var(--dialog-radius), var(--pill-radius), or calc(var(--control-radius) - 1px) for optical nesting."
+      },
+      {
+        "id": "no-tailwind-arbitrary-radius",
+        "enabled": true,
+        "severity": "error",
+        "include": ["src/**/*.tsx"],
+        "exclude": [],
+        "message": "Arbitrary Tailwind rounded-[Npx] violates AGENTS.md §1 radius contract.",
+        "fixHint": "Use rounded-xs, rounded-sm, rounded-control/rounded-md, rounded-card/rounded-lg, rounded-dialog/rounded-xl, or rounded-full."
+      },
+      {
+        "id": "no-arbitrary-control-height",
+        "enabled": true,
+        "severity": "warn",
+        "include": ["src/**/*.css"],
+        "exclude": [],
+        "forbiddenPx": [20, 22, 24, 30, 34],
+        "selectorKeywords": ["button", "btn", "input", "field", "select", "trigger", "control"],
+        "message": "Ad-hoc control height diverges from AGENTS.md §2 3-tier control height standard (26/28px, 32px, 38px).",
+        "fixHint": "Use var(--vl-control-sm) (26px), var(--control-row) (28px), var(--vl-control-md) (32px), or var(--vl-control-lg) (38px)."
+      },
+      {
+        "id": "no-hardcoded-hex-colors",
+        "enabled": true,
+        "severity": "warn",
+        "include": ["src/**/*.css"],
+        "exclude": ["src/styles/themes/**"],
+        "message": "Hardcoded hex color bypasses Kite theme and visual-language surface tokens.",
+        "fixHint": "Use semantic CSS custom properties (--vl-surface-*, --vl-stroke*, --accent, --text-*, etc.)."
+      },
+      {
+        "id": "no-raw-html-select",
+        "enabled": true,
+        "severity": "error",
+        "include": ["src/components/views/**/*.tsx"],
+        "exclude": [],
+        "message": "Raw HTML <select> breaks visual consistency and modal layering across Kite views.",
+        "fixHint": "Use SelectMenu from src/components/ui/SelectMenu.tsx (or annotate with /* kite-design-ok: <reason> */ if a native picker is strictly required)."
+      },
+      {
+        "id": "no-silent-ipc-catch",
+        "enabled": true,
+        "severity": "error",
+        "include": ["src/components/**/*.tsx"],
+        "exclude": [],
+        "message": "Empty catch block around an IPC call silently swallows backend failures and causes invisible UI bugs.",
+        "fixHint": "Surface an explicit error state/toast or log a structured console.warn with context before falling back."
+      },
+      {
+        "id": "no-static-inline-style",
+        "enabled": true,
+        "severity": "warn",
+        "include": ["src/components/**/*.tsx"],
+        "exclude": [],
+        "forbiddenProps": ["borderRadius", "backgroundColor", "background", "color", "fontSize", "padding", "border"],
+        "message": "Static hardcoded visual properties in inline style={{}} bypass Kite CSS tokens.",
+        "fixHint": "Move static styles to a stylesheet using design tokens; reserve inline style={{}} for dynamic computed values or CSS variables ('--*')."
+      },
+      {
+        "id": "max-new-file-lines",
+        "enabled": true,
+        "severity": "warn",
+        "onlyAddedFiles": true,
+        "include": ["src/**/*.{ts,tsx,css}"],
+        "exclude": [],
+        "warnLines": 600,
+        "errorLines": 1000,
+        "message": "Newly created file exceeds maintainable module size threshold.",
+        "fixHint": "Decompose into cohesive sub-modules, hooks, or domain stylesheets before growing a monolith."
+      }
+    ]
+  },
+  "gate": {
+    "artifactsRoot": "test-results/quality-gate",
+    "e2eArtifactsRoot": "test-results/e2e",
+    "rustRebuildCommand": "cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin kite-code",
+    "sanitizerCommand": "node .kite/sanitizer/audit-references.mjs --check",
+    "profiles": {
+      "fast": {
+        "description": "Tight Builder inner loop: IPC contracts, diff design lint, sanitizer, TypeScript, and affected Vitest suites.",
+        "stages": ["ipc", "design", "sanitizer", "quality-tests", "tsc", "vitest"]
+      },
+      "standard": {
+        "description": "Mandatory pre-closeout gate: all fast checks + affected Cargo tests + affected Desktop CDP E2E + Verifier Handoff report.",
+        "stages": ["ipc", "design", "sanitizer", "quality-tests", "tsc", "vitest", "cargo", "e2e"]
+      },
+      "full": {
+        "description": "Release-grade full verification: full Vitest suite, full Cargo workspace, full Desktop CDP E2E suite.",
+        "stages": ["ipc", "design", "sanitizer", "quality-tests", "tsc", "vitest-all", "cargo-all", "e2e-all"]
+      }
+    },
+    "areaMapping": [
+      {
+        "id": "chat-and-thread",
+        "patterns": [
+          "src/components/views/chat/**",
+          "src/lib/ipc/chat.ts",
+          "src-tauri/src/chat/**",
+          "src-tauri/src/chat_commands/**"
+        ],
+        "vitestPaths": ["src/components/views/chat"],
+        "cargoFilters": ["chat::"],
+        "e2eSpecs": ["desktop-smoke", "thread-streaming", "ui-layout"],
+        "visualReview": true
+      },
+      {
+        "id": "orchestration-and-subagents",
+        "patterns": [
+          "src/components/views/subagents/**",
+          "src/components/RightDock.tsx",
+          "src-tauri/src/dispatch/**",
+          "src-tauri/src/dispatch_wire/**"
+        ],
+        "vitestPaths": ["src/components/views/subagents", "src/components/RightDock.test.tsx"],
+        "cargoFilters": ["dispatch::", "dispatch_wire::"],
+        "e2eSpecs": ["orchestration", "ui-layout"],
+        "visualReview": true
+      },
+      {
+        "id": "voice-and-argos",
+        "patterns": [
+          "src/lib/operator/**",
+          "src/components/Argos*.tsx",
+          "src/components/Zed*.tsx",
+          "src/components/views/settings/argos/**",
+          "src/components/views/settings/zed/**",
+          "src-tauri/src/voice_audio/**",
+          "src-tauri/src/voice_realtime.rs",
+          "src-tauri/src/dictation.rs",
+          "src-tauri/src/audio_ducking.rs",
+          "src-tauri/src/operator_runtime.rs"
+        ],
+        "vitestPaths": ["src/lib/operator", "src/components/views/settings/argos", "src/components/views/chat/ThreadVoiceMode.test.tsx"],
+        "cargoFilters": ["voice_audio", "voice_realtime", "dictation"],
+        "e2eSpecs": ["voice-mode"],
+        "visualReview": true
+      },
+      {
+        "id": "agents-and-routines",
+        "patterns": [
+          "src/components/views/agents/**",
+          "src/components/views/AgentsView.tsx",
+          "src/components/views/routines/**",
+          "src/components/views/RoutinesView.tsx",
+          "src/components/sidebar/AgentRoster.tsx",
+          "src-tauri/src/agents.rs",
+          "src-tauri/src/agent_mind/**",
+          "src-tauri/src/agent_playbooks.rs",
+          "src-tauri/src/routines.rs",
+          "src-tauri/src/local_autopilot.rs"
+        ],
+        "vitestPaths": ["src/components/views/agents", "src/components/views/routines", "src/components/sidebar/AgentRoster.test.tsx"],
+        "cargoFilters": ["agents", "agent_mind", "agent_playbooks", "routines", "local_autopilot"],
+        "e2eSpecs": ["desktop-smoke", "ui-layout"],
+        "visualReview": true
+      },
+      {
+        "id": "shell-and-ui",
+        "patterns": [
+          "src/App.tsx",
+          "src/components/TitleBar.tsx",
+          "src/components/Sidebar.tsx",
+          "src/components/ui/**",
+          "src/components/views/**/*.css",
+          "src/visual-language.css"
+        ],
+        "vitestPaths": ["src/components/TitleBar.test.tsx", "src/components/Sidebar.test.tsx", "src/components/ui"],
+        "cargoFilters": [],
+        "e2eSpecs": ["desktop-smoke", "ui-layout"],
+        "visualReview": true
+      },
+      {
+        "id": "settings-tasks-and-files",
+        "patterns": [
+          "src/components/views/settings/**",
+          "src/components/views/tickets/**",
+          "src/components/views/files/**",
+          "src/components/views/diffs/**",
+          "src/components/code/**",
+          "src-tauri/src/local_tasks.rs",
+          "src-tauri/src/tickets.rs"
+        ],
+        "vitestPaths": ["src/components/views/settings", "src/components/views/tickets", "src/components/views/diffs"],
+        "cargoFilters": ["local_tasks"],
+        "e2eSpecs": ["desktop-smoke", "ui-layout"],
+        "visualReview": true
+      },
+      {
+        "id": "quality-infrastructure",
+        "patterns": [
+          "scripts/quality/**",
+          "scripts/e2e/**",
+          ".agents/skills/**",
+          "AGENTS.md"
+        ],
+        "vitestPaths": [],
+        "cargoFilters": [],
+        "e2eSpecs": [],
+        "visualReview": false
+      }
+    ]
+  }
+}

@@ -3,7 +3,11 @@ import {
   OPENCODE_GO_CHAT_BASE_URL,
   normalizeOpenCodeBaseUrl,
 } from './modelCatalogs';
-import { DEFAULT_ZED_PERSONA, sanitizeZedFigure } from './persona';
+import {
+  DEFAULT_ARGOS_PERSONA,
+  migrateLegacyPersonaName,
+  sanitizeArgosFigure,
+} from './persona';
 import { invokeCommand } from '../../ipc';
 
 export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
@@ -29,6 +33,10 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
   grokTranscriptionApiKey: '',
   grokTranscriptionBaseUrl: 'https://api.x.ai/v1',
   grokTranscriptionModel: 'grok-voice-transcribe-2.0',
+  offlineSttEngine: 'auto',
+  offlineSttModelPath: '',
+  voiceTransportMode: 'cascaded',
+  realtimeEndpoint: 'wss://api.x.ai/v1/realtime',
   ttsEnabled: true,
   ttsLanguage: 'es-ES',
   ttsRate: 1.05,
@@ -38,7 +46,7 @@ export const DEFAULT_OPERATOR_CONFIG: OperatorProviderConfig = {
   elevenlabsVoiceId: '21m00Tcm4TlvDq8ikWAM',
   elevenlabsStability: 0.5,
   elevenlabsSimilarity: 0.8,
-  persona: DEFAULT_ZED_PERSONA,
+  persona: DEFAULT_ARGOS_PERSONA,
 };
 
 export const OPERATOR_CONFIG_STORAGE_KEY = 'kite.operator.providerConfig.v2';
@@ -66,7 +74,7 @@ export function loadOperatorConfig(): OperatorProviderConfig {
       return {
         ...DEFAULT_OPERATOR_CONFIG,
         grokTranscriptionApiKey: legacyGrokTrans || DEFAULT_OPERATOR_CONFIG.grokTranscriptionApiKey,
-        persona: { ...DEFAULT_ZED_PERSONA },
+        persona: { ...DEFAULT_ARGOS_PERSONA },
       };
     }
     const parsed = JSON.parse(raw) as Partial<OperatorProviderConfig>;
@@ -135,13 +143,14 @@ export function loadOperatorConfig(): OperatorProviderConfig {
       cloudflareModel: cfModel,
       grokTranscriptionApiKey: grokTransKey,
       persona: {
-        ...DEFAULT_ZED_PERSONA,
+        ...DEFAULT_ARGOS_PERSONA,
         ...(parsed.persona ?? {}),
-        figure: sanitizeZedFigure(parsed.persona?.figure),
+        name: migrateLegacyPersonaName(parsed.persona?.name),
+        figure: sanitizeArgosFigure(parsed.persona?.figure),
       },
     };
   } catch {
-    return { ...DEFAULT_OPERATOR_CONFIG, persona: { ...DEFAULT_ZED_PERSONA } };
+    return { ...DEFAULT_OPERATOR_CONFIG, persona: { ...DEFAULT_ARGOS_PERSONA } };
   }
 }
 
@@ -191,7 +200,7 @@ export function applyOperatorConfigPatch(
     persona: {
       ...base.persona,
       ...(patch.persona ?? {}),
-      figure: sanitizeZedFigure(patch.persona?.figure ?? base.persona?.figure),
+      figure: sanitizeArgosFigure(patch.persona?.figure ?? base.persona?.figure),
     },
   };
 }
@@ -261,6 +270,10 @@ export function saveOperatorConfig(
         grokUseCliSubscription: merged.grokUseCliSubscription,
         grokTranscriptionBaseUrl: merged.grokTranscriptionBaseUrl,
         grokTranscriptionModel: merged.grokTranscriptionModel,
+        offlineSttEngine: merged.offlineSttEngine,
+        offlineSttModelPath: merged.offlineSttModelPath,
+        voiceTransportMode: merged.voiceTransportMode,
+        realtimeEndpoint: merged.realtimeEndpoint,
         ttsEnabled: merged.ttsEnabled,
         ttsLanguage: merged.ttsLanguage,
         ttsRate: merged.ttsRate,
@@ -448,6 +461,7 @@ export async function syncNativeCredentialsWithVault(): Promise<OperatorProvider
         persona: {
           ...latest.persona,
           ...(hydratedPatch.persona ?? {}),
+          name: migrateLegacyPersonaName(hydratedPatch.persona?.name ?? latest.persona?.name),
         },
       };
       localStorage.setItem(SEED_VERSION_KEY, '1');

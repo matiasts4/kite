@@ -12,16 +12,16 @@ export type OperatorTaskType =
   | 'chat_response'
   | 'healthcheck';
 
-export type ZedTone = 'calm' | 'crisp' | 'warm' | 'direct' | 'chill';
-export type ZedBrevity = 'one-breath' | 'normal' | 'thorough' | 'tight' | 'detailed';
-export type ZedAfterCallMode =
+export type ArgosTone = 'calm' | 'crisp' | 'warm' | 'direct' | 'chill';
+export type ArgosBrevity = 'one-breath' | 'normal' | 'thorough' | 'tight' | 'detailed';
+export type ArgosAfterCallMode =
   | 'summary+decisions'
   | 'decisions'
   | 'transcript'
   | 'summary'
   | 'nothing';
 
-export type ZedFigureId =
+export type ArgosFigureId =
   | 'plasma-orb'
   | 'ferrofluid'
   | 'frosted-sphere'
@@ -31,14 +31,21 @@ export type ZedFigureId =
   | 'orbital-gyro'
   | 'chromatic-pearl';
 
-export interface ZedFigureDescriptor {
-  id: ZedFigureId;
+export interface ArgosFigureDescriptor {
+  id: ArgosFigureId;
   label: string;
   blurb: string;
   shaderMode: number;
   resourceTier: 'optimized' | 'balanced';
   resourceLabel: string;
 }
+
+// Backward-compatible Zed* type aliases
+export type ZedTone = ArgosTone;
+export type ZedBrevity = ArgosBrevity;
+export type ZedAfterCallMode = ArgosAfterCallMode;
+export type ZedFigureId = ArgosFigureId;
+export type ZedFigureDescriptor = ArgosFigureDescriptor;
 
 export interface OpenCodeModelOption {
   id: string;
@@ -48,18 +55,20 @@ export interface OpenCodeModelOption {
   description: string;
 }
 
-export interface ZedPersonaConfig {
+export interface ArgosPersonaConfig {
   name: string;
   voice: string;
-  tone: ZedTone;
-  brevity: ZedBrevity;
+  tone: ArgosTone;
+  brevity: ArgosBrevity;
   language: string;
   builderCallMe: string;
   standingInstructions: string;
   rememberBetweenCalls: boolean;
-  afterCallMode: ZedAfterCallMode;
-  figure?: ZedFigureId;
+  afterCallMode: ArgosAfterCallMode;
+  figure?: ArgosFigureId;
 }
+
+export type ZedPersonaConfig = ArgosPersonaConfig;
 
 export interface OperatorProviderConfig {
   activeProvider: OperatorProviderId;
@@ -91,6 +100,11 @@ export interface OperatorProviderConfig {
   grokTranscriptionApiKey?: string;
   grokTranscriptionBaseUrl?: string;
   grokTranscriptionModel?: string;
+  // Offline STT & Realtime Transport
+  offlineSttEngine?: 'auto' | 'whisper' | 'parakeet' | 'disabled';
+  offlineSttModelPath?: string;
+  voiceTransportMode?: 'cascaded' | 'realtime';
+  realtimeEndpoint?: string;
   // Voice & TTS preferences
   ttsEnabled: boolean;
   ttsLanguage: string;
@@ -107,12 +121,14 @@ export interface OperatorProviderConfig {
 
 export type OperatorConfig = OperatorProviderConfig;
 
-export interface ZedMemoryNote {
+export interface ArgosMemoryNote {
   id: string;
   content: string;
   createdAt: string;
   workspace?: string;
 }
+
+export type ZedMemoryNote = ArgosMemoryNote;
 
 export interface LatencyRecord {
   id: string;

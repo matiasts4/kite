@@ -294,9 +294,13 @@ export async function planTurnLLM(
     nativeToolsEnabled,
   });
   const systemPrompt = promptParts.fullPrompt;
+  const pending = planOptions?.pendingDisambiguation;
+  const pendingPromptSuffix = pending
+    ? `\n\nDESAMBIGUACIÓN PENDIENTE DEL TURNO ANTERIOR:\n- Orden original: "${pending.originalInput}"\n- Pregunta ya formulada: "${pending.question}"\n- Dato faltante: ${pending.missingSlot}${pending.candidates?.length ? `\n- Candidatos ofrecidos: ${pending.candidates.join(', ')}` : ''}\n- Instrucción: Usa la respuesta actual del usuario para resolver este dato y ejecutar la acción (o cancela si pide dejarlo). NO hagas otra pregunta de aclaración consecutiva.`
+    : '';
 
   const { messages, historyMessages } = buildPlannerMessages(
-    promptParts.staticPrefix,
+    `${promptParts.staticPrefix}${pendingPromptSuffix}`,
     promptParts.dynamicTail,
     input,
     history

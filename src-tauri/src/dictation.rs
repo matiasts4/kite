@@ -26,8 +26,13 @@ fn default_settings() -> Value {
         "schemaVersion": 1,
         "mode": "local",
         "localEngine": Value::Null,
+        "whisperModelPath": Value::Null,
+        "parakeetModelPath": Value::Null,
+        "offlineSttEngine": "auto",
         "language": "auto",
         "deviceId": Value::Null,
+        "outputDeviceId": Value::Null,
+        "voiceTransportMode": "cascaded",
         "cuesEnabled": true,
         "shortcut": { "kind": "standard" }
     })
@@ -65,6 +70,44 @@ fn normalize_settings(incoming: &Value, previous: &Value) -> Value {
         Some(_) => Value::Null,
         None => previous.get("deviceId").cloned().unwrap_or(Value::Null),
     };
+    let output_device_id = match incoming.get("outputDeviceId") {
+        Some(Value::String(value)) if !value.is_empty() && value != "automatic" => json!(value),
+        Some(Value::Null) => Value::Null,
+        Some(_) => Value::Null,
+        None => previous.get("outputDeviceId").cloned().unwrap_or(Value::Null),
+    };
+    let whisper_model_path = match incoming.get("whisperModelPath") {
+        Some(Value::String(value)) if !value.trim().is_empty() => json!(value.trim()),
+        Some(Value::Null) => Value::Null,
+        Some(_) => Value::Null,
+        None => previous.get("whisperModelPath").cloned().unwrap_or(Value::Null),
+    };
+    let parakeet_model_path = match incoming.get("parakeetModelPath") {
+        Some(Value::String(value)) if !value.trim().is_empty() => json!(value.trim()),
+        Some(Value::Null) => Value::Null,
+        Some(_) => Value::Null,
+        None => previous.get("parakeetModelPath").cloned().unwrap_or(Value::Null),
+    };
+    let offline_stt_engine = incoming
+        .get("offlineSttEngine")
+        .and_then(|value| value.as_str())
+        .filter(|value| matches!(*value, "auto" | "whisper" | "parakeet" | "disabled"))
+        .unwrap_or_else(|| {
+            previous
+                .get("offlineSttEngine")
+                .and_then(|value| value.as_str())
+                .unwrap_or("auto")
+        });
+    let voice_transport_mode = incoming
+        .get("voiceTransportMode")
+        .and_then(|value| value.as_str())
+        .filter(|value| *value == "cascaded" || *value == "realtime")
+        .unwrap_or_else(|| {
+            previous
+                .get("voiceTransportMode")
+                .and_then(|value| value.as_str())
+                .unwrap_or("cascaded")
+        });
     let cues_enabled = incoming
         .get("cuesEnabled")
         .and_then(|value| value.as_bool())
@@ -80,8 +123,13 @@ fn normalize_settings(incoming: &Value, previous: &Value) -> Value {
         "schemaVersion": 1,
         "mode": mode,
         "localEngine": local_engine,
+        "whisperModelPath": whisper_model_path,
+        "parakeetModelPath": parakeet_model_path,
+        "offlineSttEngine": offline_stt_engine,
         "language": language,
         "deviceId": device_id,
+        "outputDeviceId": output_device_id,
+        "voiceTransportMode": voice_transport_mode,
         "cuesEnabled": cues_enabled,
         "shortcut": shortcut
     })
@@ -186,8 +234,63 @@ fn current_settings() -> Value {
     settings_slot().lock().unwrap().clone()
 }
 
+fn probe_dictation_availability_value() -> Value {
+    let settings = current_settings();
+    let whisper_override = settings.get("whisperModelPath").and_then(|v| v.as_str());
+    let parakeet_override = settings.get("parakeetModelPath").and_then(|v| v.as_str());
+    let local_engines =
+        crate::voice_audio::offline_stt::probe_local_engines(whisper_override, parakeet_override);
+    let any_local = local_engines.iter().any(|e| e.available);
+    let has_cloud = crate::credentials::get_vault_credential("grok_transcription")
+        .or_else(|| crate::credentials::get_vault_credential("grok"))
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false)
+        || crate::credentials::get_vault_credential("cloudflare")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false);
+
+    let privacy = crate::audio_ducking::probe_microphone_privacy_status();
+    let devices = crate::voice_audio::capture::list_input_devices();
+    let has_mic = !devices.is_empty() && privacy.available;
+    let can_start = has_mic && (any_local || has_cloud);
+
+    let state = if privacy.access_denied {
+        "permissionRequired"
+    } else if !privacy.available || devices.is_empty() {
+        "unavailable"
+    } else if any_local || has_cloud {
+        "ready"
+    } else {
+        "needsSetup"
+    };
+
+    let guidance = if privacy.access_denied {
+        privacy.message_es.clone()
+    } else if devices.is_empty() {
+        "No se detectó ningún micrófono conectado en Windows.".to_string()
+    } else if any_local {
+        "Motor local offline y captura nativa WASAPI listos.".to_string()
+    } else if has_cloud {
+        "Captura nativa WASAPI lista con transcripción Cloud.".to_string()
+    } else {
+        "Configura una API Key de transcripción o selecciona un modelo local Whisper/Parakeet."
+            .to_string()
+    };
+
+    json!({
+        "schemaVersion": 1,
+        "state": state,
+        "canRequestPermission": privacy.access_denied || !privacy.available,
+        "canStart": can_start,
+        "hasCloudStt": has_cloud,
+        "hasLocalStt": any_local,
+        "guidance": guidance,
+        "localEngines": local_engines
+    })
+}
+
 pub fn read_dictation_availability_direct(_request: Option<Value>) -> Value {
-    unavailable_dictation()
+    probe_dictation_availability_value()
 }
 
 #[tauri::command]
@@ -256,8 +359,22 @@ pub async fn list_dictation_input_devices(request: Option<Value>) -> Value {
         .unwrap_or_else(|_| json!({ "schemaVersion": 1, "devices": [], "selectedId": Value::Null }))
 }
 
-pub fn select_dictation_whisper_model_direct(_request: Option<Value>) -> Value {
-    unavailable_dictation()
+pub fn select_dictation_whisper_model_direct(request: Option<Value>) -> Value {
+    let model_path = request_body(&request)
+        .and_then(|v| v.get("modelPath").or_else(|| v.get("path")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let mut patch = json!({
+        "whisperModelPath": model_path
+    });
+    if model_path.is_some() {
+        patch["localEngine"] = json!("whisper");
+    }
+    let _ = update_dictation_settings_direct(Some(json!({ "settings": patch })));
+    probe_dictation_availability_value()
 }
 
 #[tauri::command]
@@ -268,7 +385,7 @@ pub async fn select_dictation_whisper_model(request: Option<Value>) -> Value {
 }
 
 pub fn request_dictation_permission_direct(_request: Option<Value>) -> Value {
-    unavailable_dictation()
+    probe_dictation_availability_value()
 }
 
 #[tauri::command]
@@ -354,21 +471,58 @@ pub fn stop_dictation_direct(request: Option<Value>) -> Value {
     let mut err_obj = Value::Null;
 
     if let Some(wav_bytes) = wav {
-        let grok_key = crate::credentials::get_vault_credential("grok_transcription")
-            .or_else(|| crate::credentials::get_vault_credential("grok"));
-        if let Some(api_key) = grok_key.filter(|k| !k.trim().is_empty()) {
-            let res = tauri::async_runtime::block_on(
-                crate::voice_audio::stt_ws::transcribe_wav_http_fallback(
-                    wav_bytes,
-                    &api_key,
-                    "https://api.x.ai/v1",
-                    "grok-voice-transcribe-2.0",
-                    &language,
-                ),
-            );
-            match res {
-                Ok(text) => transcript = text,
-                Err(err) => err_obj = json!({ "code": "sttFailed", "message": err }),
+        let offline_pref = settings.get("offlineSttEngine").and_then(|v| v.as_str());
+        let whisper_path = settings.get("whisperModelPath").and_then(|v| v.as_str());
+        let parakeet_path = settings.get("parakeetModelPath").and_then(|v| v.as_str());
+        let prefer_local = settings.get("mode").and_then(|v| v.as_str()) == Some("local");
+
+        if prefer_local && offline_pref != Some("disabled") {
+            match crate::voice_audio::offline_stt::transcribe_wav_offline(
+                &wav_bytes,
+                offline_pref,
+                whisper_path,
+                parakeet_path,
+                &language,
+            ) {
+                Ok(text) if !text.is_empty() => transcript = text,
+                Ok(_) => {}
+                Err(err) => err_obj = json!({ "code": "offlineSttUnavailable", "message": err }),
+            }
+        }
+
+        if transcript.is_empty() {
+            let grok_key = crate::credentials::get_vault_credential("grok_transcription")
+                .or_else(|| crate::credentials::get_vault_credential("grok"));
+            if let Some(api_key) = grok_key.filter(|k| !k.trim().is_empty()) {
+                err_obj = Value::Null;
+                let res = tauri::async_runtime::block_on(
+                    crate::voice_audio::stt_ws::transcribe_wav_http_fallback(
+                        wav_bytes.clone(),
+                        &api_key,
+                        "https://api.x.ai/v1",
+                        "grok-voice-transcribe-2.0",
+                        &language,
+                    ),
+                );
+                match res {
+                    Ok(text) => transcript = text,
+                    Err(err) => err_obj = json!({ "code": "sttFailed", "message": err }),
+                }
+            }
+        }
+
+        if transcript.is_empty() && !prefer_local && offline_pref != Some("disabled") {
+            if let Ok(text) = crate::voice_audio::offline_stt::transcribe_wav_offline(
+                &wav_bytes,
+                offline_pref,
+                whisper_path,
+                parakeet_path,
+                &language,
+            ) {
+                if !text.is_empty() {
+                    transcript = text;
+                    err_obj = Value::Null;
+                }
             }
         }
     }
@@ -408,7 +562,14 @@ pub async fn cancel_dictation(request: Option<Value>) -> Value {
 }
 
 pub fn read_agent_voice_input_availability_direct(_request: Option<Value>) -> Value {
-    unavailable_voice_input()
+    let avail = probe_dictation_availability_value();
+    json!({
+        "schemaVersion": 1,
+        "state": avail["state"],
+        "canRequestPermission": avail["canRequestPermission"],
+        "canStart": avail["canStart"],
+        "guidance": avail["guidance"]
+    })
 }
 
 #[tauri::command]
@@ -421,7 +582,7 @@ pub async fn read_agent_voice_input_availability(request: Option<Value>) -> Valu
 }
 
 pub fn request_agent_voice_input_permission_direct(_request: Option<Value>) -> Value {
-    unavailable_voice_input()
+    read_agent_voice_input_availability_direct(None)
 }
 
 #[tauri::command]
@@ -435,12 +596,15 @@ pub async fn request_agent_voice_input_permission(request: Option<Value>) -> Val
 
 pub fn read_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
-    voice_takes()
-        .lock()
-        .unwrap()
-        .get(&id)
-        .cloned()
-        .unwrap_or_else(|| voice_error(&id))
+    let status = crate::voice_audio::capture::get_capture_status();
+    let mut takes = voice_takes().lock().unwrap();
+    if let Some(entry) = takes.get_mut(&id) {
+        if entry.get("phase").and_then(|v| v.as_str()) == Some("listening") && status.active {
+            entry["level"] = json!(status.level);
+        }
+        return entry.clone();
+    }
+    voice_error(&id)
 }
 
 #[tauri::command]
@@ -452,7 +616,31 @@ pub async fn read_agent_voice_create(request: Option<Value>) -> Value {
 
 pub fn start_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
-    let result = voice_error(&id);
+    let settings = current_settings();
+    let device_id = settings
+        .get("deviceId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let result = match crate::voice_audio::capture::start_capture(device_id, 16000) {
+        Ok(_) => json!({
+            "schemaVersion": 1,
+            "requestId": id,
+            "phase": "listening",
+            "level": 0.0,
+            "transcript": "",
+            "error": Value::Null,
+            "draft": Value::Null
+        }),
+        Err(err) => json!({
+            "schemaVersion": 1,
+            "requestId": id,
+            "phase": "error",
+            "level": 0.0,
+            "transcript": "",
+            "error": { "code": "captureFailed", "message": err },
+            "draft": Value::Null
+        }),
+    };
     voice_takes().lock().unwrap().insert(id, result.clone());
     result
 }
@@ -466,8 +654,23 @@ pub async fn start_agent_voice_create(request: Option<Value>) -> Value {
 
 pub fn stop_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
-    voice_takes().lock().unwrap().remove(&id);
-    Value::Null
+    let stop_val = stop_dictation_direct(Some(json!({ "requestId": id })));
+    let transcript = stop_val
+        .get("transcript")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let result = json!({
+        "schemaVersion": 1,
+        "requestId": id,
+        "phase": stop_val["phase"],
+        "level": 0.0,
+        "transcript": transcript,
+        "error": stop_val["error"],
+        "draft": if transcript.is_empty() { Value::Null } else { json!({ "brief": transcript }) }
+    });
+    voice_takes().lock().unwrap().insert(id, result.clone());
+    result
 }
 
 #[tauri::command]
@@ -479,6 +682,7 @@ pub async fn stop_agent_voice_create(request: Option<Value>) -> Value {
 
 pub fn cancel_agent_voice_create_direct(request: Option<Value>) -> Value {
     let id = request_id(&request);
+    crate::voice_audio::capture::stop_capture();
     voice_takes().lock().unwrap().remove(&id);
     Value::Null
 }
@@ -593,7 +797,11 @@ fn live_unavailable() -> Value {
 }
 
 pub fn voice_live_close_direct(_request: Option<Value>) -> Value {
-    live_unavailable()
+    crate::voice_realtime::disconnect_realtime();
+    json!({
+        "status": "closed",
+        "connected": false
+    })
 }
 
 #[tauri::command]
@@ -604,7 +812,12 @@ pub async fn voice_live_close(request: Option<Value>) -> Value {
 }
 
 pub fn voice_live_connect_direct(_request: Option<Value>) -> Value {
-    live_unavailable()
+    let status = crate::voice_realtime::get_realtime_status();
+    json!({
+        "status": if status.connected { "connected" } else { "ready" },
+        "connected": status.connected,
+        "sampleRate": status.sample_rate
+    })
 }
 
 #[tauri::command]
@@ -615,7 +828,11 @@ pub async fn voice_live_connect(request: Option<Value>) -> Value {
 }
 
 pub fn voice_live_send_direct(_request: Option<Value>) -> Value {
-    live_unavailable()
+    let status = crate::voice_realtime::get_realtime_status();
+    json!({
+        "status": if status.connected { "connected" } else { "idle" },
+        "connected": status.connected
+    })
 }
 
 #[tauri::command]
@@ -626,7 +843,13 @@ pub async fn voice_live_send(request: Option<Value>) -> Value {
 }
 
 pub fn voice_live_session_direct(_request: Option<Value>) -> Value {
-    live_unavailable()
+    let status = crate::voice_realtime::get_realtime_status();
+    json!({
+        "status": if status.connected { "active" } else { "idle" },
+        "connected": status.connected,
+        "sampleRate": status.sample_rate,
+        "trackedItems": status.tracked_items
+    })
 }
 
 #[tauri::command]
@@ -690,5 +913,21 @@ mod tests {
         }))));
         assert_eq!(resolved["operation_id"], "op-1");
         assert_eq!(resolved["snapshot_id"], "snap-1");
+    }
+
+    #[test]
+    fn test_dictation_availability_and_model_selection() {
+        let avail = read_dictation_availability_direct(None);
+        assert_eq!(avail["schemaVersion"], 1);
+        assert!(avail["localEngines"].is_array());
+        assert_eq!(avail["localEngines"].as_array().unwrap().len(), 2);
+
+        let updated = select_dictation_whisper_model_direct(Some(json!({
+            "modelPath": "C:\\models\\ggml-base.bin"
+        })));
+        assert_eq!(updated["schemaVersion"], 1);
+        let settings = read_dictation_settings_direct(None);
+        assert_eq!(settings["whisperModelPath"], "C:\\models\\ggml-base.bin");
+        assert_eq!(settings["localEngine"], "whisper");
     }
 }

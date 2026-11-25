@@ -1003,8 +1003,11 @@ class TTSNarrator {
       }
       return out;
     }
-    if (typeof Buffer !== 'undefined') {
-      return new Uint8Array(Buffer.from(clean, 'base64'));
+    const nodeBuffer = (
+      globalThis as unknown as { Buffer?: { from: (s: string, enc: string) => Uint8Array } }
+    ).Buffer;
+    if (nodeBuffer) {
+      return new Uint8Array(nodeBuffer.from(clean, 'base64'));
     }
     return new Uint8Array(0);
   }

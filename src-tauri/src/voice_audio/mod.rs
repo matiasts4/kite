@@ -12,6 +12,7 @@ use capture::{
 };
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
+use tauri::Emitter;
 use tokio::sync::watch;
 
 #[derive(Clone)]
@@ -68,7 +69,7 @@ fn spawn_stt_stream_if_configured(initial_pcm: Vec<i16>) {
     };
     let (stop_tx, stop_rx) = watch::channel(false);
     let task = tauri::async_runtime::spawn(async move {
-        stt_ws::stream_pcm_to_stt_ws_with_preroll(
+        let res = stt_ws::stream_pcm_to_stt_ws_with_preroll(
             &cfg.api_key,
             &cfg.base_url,
             &cfg.language,
@@ -77,7 +78,17 @@ fn spawn_stt_stream_if_configured(initial_pcm: Vec<i16>) {
             rx,
             stop_rx,
         )
-        .await
+        .await;
+        if let Err(ref err) = res {
+            eprintln!("[voice_audio] streaming STT error: {err}");
+            if let Some(handle) = crate::get_app_handle() {
+                let _ = handle.emit(
+                    "voice:stt-error",
+                    json!({ "error": err, "backend": "rust-ws" }),
+                );
+            }
+        }
+        res
     });
     let mut guard = stt_stream_slot().lock().unwrap();
     *guard = Some(ActiveSttStream { stop_tx, task });
@@ -107,13 +118,17 @@ pub async fn voice_audio_start_capture(
 
     {
         let mut cfg_guard = stt_cfg_slot().lock().unwrap();
-        if let Some(key) = stt_api_key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+        let resolved_base_url = stt_base_url
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "https://api.x.ai/v1".to_string());
+        if let Some(key) = stt_api_key
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && stt_ws::is_xai_streaming_stt_base_url(&resolved_base_url))
+        {
             *cfg_guard = Some(SttSessionConfig {
                 api_key: key,
-                base_url: stt_base_url
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "https://api.x.ai/v1".to_string()),
+                base_url: resolved_base_url,
                 language: stt_language
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
@@ -185,7 +200,7 @@ pub async fn voice_audio_stop_capture(
             stream.task.abort();
         } else {
             let task_res = tokio::time::timeout(
-                std::time::Duration::from_millis(1200),
+                std::time::Duration::from_millis(1500),
                 stream.task,
             )
             .await;

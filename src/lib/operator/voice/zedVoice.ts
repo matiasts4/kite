@@ -1054,13 +1054,31 @@ export async function startOperatorListening(
             speculativePreCapture.update(clean);
             currentOptions.onInterim?.(clean);
           },
+          onSttError: (err) => {
+            console.warn('[ArgosVoice] Native Rust streaming STT error:', err);
+          },
           onDeviceLost: (err) => {
             console.warn('[ArgosVoice] Native audio device warning:', err);
           },
         });
       }
 
-      const { grokKey, grokBaseUrl } = resolveGrokSttConfigSync();
+      let { grokKey, grokBaseUrl } = resolveGrokSttConfigSync();
+      if (!grokKey.trim() && isTauriEnvironment()) {
+        try {
+          await syncNativeCredentialsWithVault();
+        } catch {}
+        if (!isSessionActive) {
+          if (!isPersistentGraphActive && subscribedThisStart && nativeEventUnsub) {
+            try {
+              nativeEventUnsub();
+            } catch {}
+            nativeEventUnsub = null;
+          }
+          return;
+        }
+        ({ grokKey, grokBaseUrl } = resolveGrokSttConfigSync());
+      }
       const keepExistingNative = Boolean(
         options.continuous &&
           nativeStreamWarm &&
@@ -1486,22 +1504,26 @@ export async function stopOperatorListening(options?: {
             ? `Fallo al transcribir: ${lastError}`
             : 'No se detectaron palabras legibles en el audio';
 
-    try {
-      const voiceTurnId = currentTurnTraceId || `voice-${Date.now()}`;
-      emitTrace({
-        turnId: voiceTurnId,
-        ev: 'turn.start',
-        input: `[captura de voz descartada: ${discardReason}]`,
-        source: 'voz',
-      });
-      emitTrace({
-        turnId: voiceTurnId,
-        ev: 'turn.end',
-        overallSuccess: false,
-        error: discardReason,
-        durationMs: Math.round(durationSecs * 1000),
-      });
-    } catch {}
+    if (speechWasDetected || Boolean(lastError)) {
+      try {
+        const voiceTurnId = currentTurnTraceId || `voice-${Date.now()}`;
+        emitTrace({
+          turnId: voiceTurnId,
+          ev: 'turn.start',
+          input: `[captura de voz descartada: ${discardReason}]`,
+          source: 'voz',
+        });
+        emitTrace({
+          turnId: voiceTurnId,
+          ev: 'turn.end',
+          overallSuccess: false,
+          error: lastError ? discardReason : undefined,
+          durationMs: Math.round(durationSecs * 1000),
+        });
+      } catch (err) {
+        console.warn('[zedVoice] emitTrace on discarded capture failed:', err);
+      }
+    }
 
     // Only surface an error when real speech was attempted and no STT backend succeeded.
     // Pure silence / empty captures settle quietly without spamming error toasts.

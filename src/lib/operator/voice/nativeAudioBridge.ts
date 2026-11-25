@@ -169,6 +169,7 @@ export async function subscribeNativeAudioEvents(handlers: {
   onAudioLevel?: (level: number, rms: number, durationMs: number) => void;
   onSttPartial?: (text: string) => void;
   onSttFinal?: (text: string) => void;
+  onSttError?: (error: string) => void;
   onDeviceLost?: (error: string) => void;
 }): Promise<() => void> {
   if (!isNativeRustAudioSupported()) {
@@ -203,6 +204,13 @@ export async function subscribeNativeAudioEvents(handlers: {
       unlisteners.push(
         await eventMod.listen<{ text?: string }>('voice:stt-final', (ev) => {
           if (ev?.payload?.text) handlers.onSttFinal?.(ev.payload.text);
+        })
+      );
+    }
+    if (handlers.onSttError) {
+      unlisteners.push(
+        await eventMod.listen<{ error?: string }>('voice:stt-error', (ev) => {
+          handlers.onSttError?.(ev?.payload?.error || 'Streaming STT error');
         })
       );
     }

@@ -72,6 +72,8 @@ describe('zedVoice — Native Rust WASAPI Capture, Adaptive VAD, Barge-In & Stre
   afterEach(async () => {
     disarmBargeInMonitor();
     await releaseOperatorCapture();
+    delete (window as any).__TAURI_INTERNALS__;
+    vi.restoreAllMocks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -230,5 +232,97 @@ describe('zedVoice — Native Rust WASAPI Capture, Adaptive VAD, Barge-In & Stre
     const aborted = await stopOperatorListening({ discard: true });
     expect(aborted).toBe('');
     await expect(listenPromise).resolves.toBe('');
+  });
+
+  it('hydrates Grok STT key from native SQLite Vault when missing in localStorage', async () => {
+    vi.useFakeTimers();
+    localStorage.clear();
+    (window as any).__TAURI_INTERNALS__ = {};
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'get_active_provider_key' && args?.provider === 'grok_transcription') {
+        return { success: true, key: 'xai-vault-stt-key' };
+      }
+      if (cmd === 'get_active_provider_key') {
+        return { success: true, key: null };
+      }
+      return {};
+    });
+
+    vi.mocked(ipc.invokeFlatCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'voice_audio_start_capture') return { ok: true, sampleRate: 16000 };
+      if (cmd === 'voice_audio_stop_capture') return { ok: true, wavBytes: 0, sttTranscript: null };
+      return { ok: true };
+    });
+
+    const listenPromise = startOperatorListening({ continuous: true, language: 'es-ES' });
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(ipc.invokeCommand).toHaveBeenCalledWith('get_active_provider_key', {
+      provider: 'grok_transcription',
+    });
+    expect(ipc.invokeFlatCommand).toHaveBeenCalledWith(
+      'voice_audio_start_capture',
+      expect.objectContaining({
+        sampleRate: 16000,
+        sttApiKey: 'xai-vault-stt-key',
+        sttBaseUrl: 'https://api.x.ai/v1',
+        sttLanguage: 'es-ES',
+      })
+    );
+
+    const aborted = await stopOperatorListening({ discard: true });
+    expect(aborted).toBe('');
+    await expect(listenPromise).resolves.toBe('');
+  });
+
+  it('logs voice:stt-error without aborting the session and completes via HTTP WAV fallback', async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    vi.mocked(ipc.invokeFlatCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'voice_audio_start_capture') return { ok: true, sampleRate: 16000 };
+      if (cmd === 'voice_audio_mark_speech_start') return { ok: true, preRollSamples: 6400 };
+      if (cmd === 'voice_audio_stop_capture') {
+        const fakeWav = new Uint8Array(600).fill(1);
+        fakeWav.set([0x52, 0x49, 0x46, 0x46], 0);
+        let binary = '';
+        for (let i = 0; i < fakeWav.length; i++) binary += String.fromCharCode(fakeWav[i]);
+        return {
+          ok: true,
+          wavBytes: fakeWav.length,
+          wavBase64: btoa(binary),
+          sttTranscript: null,
+        };
+      }
+      return { ok: true };
+    });
+
+    const listenPromise = startOperatorListening({ continuous: true, language: 'es-ES' });
+    await vi.advanceTimersByTimeAsync(20);
+
+    emitNativeEvent('voice:stt-error', {
+      error: 'STT WebSocket handshake failed',
+      backend: 'rust-ws',
+    });
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[ArgosVoice] Native Rust streaming STT error:',
+      'STT WebSocket handshake failed'
+    );
+
+    for (let i = 0; i < 5; i++) {
+      emitNativeEvent('voice:audio-level', { level: 0.5, rms: 0.14, durationMs: 40 });
+      await vi.advanceTimersByTimeAsync(40);
+    }
+    for (let i = 0; i < 4; i++) {
+      emitNativeEvent('voice:audio-level', { level: 0.01, rms: 0.003, durationMs: 40 });
+    }
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.runAllTimersAsync();
+
+    await expect(listenPromise).resolves.toBe('abre dos terminales');
+    expect(ipc.proxyOperatorHttp).toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'POST' })
+    );
   });
 });

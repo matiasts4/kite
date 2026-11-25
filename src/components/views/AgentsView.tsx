@@ -182,6 +182,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
     defaultProviderOptions?: unknown[];
     placeDisplayNames?: string[];
     disabledPluginIds?: string[];
+    toolPolicies?: Record<string, 'allow' | 'ask' | 'deny'>;
+    maxTurnsPerRun?: number | null;
+    maxDurationSecs?: number | null;
+    failoverEngines?: string[];
     avatar?: any;
   }>({
     name: '',
@@ -197,6 +201,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
     defaultProviderOptions: [],
     placeDisplayNames: [],
     disabledPluginIds: [],
+    toolPolicies: {},
+    maxTurnsPerRun: null,
+    maxDurationSecs: null,
+    failoverEngines: [],
     avatar: null,
   });
   const [settingsDirty, setSettingsDirty] = useState<boolean>(false);
@@ -282,6 +290,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           defaultProviderOptions: fullProf.defaultProviderOptions ?? [],
           placeDisplayNames: fullProf.placeDisplayNames ?? [],
           disabledPluginIds: fullProf.disabledPluginIds ?? [],
+          toolPolicies: fullProf.toolPolicies ?? {},
+          maxTurnsPerRun: fullProf.maxTurnsPerRun ?? null,
+          maxDurationSecs: fullProf.maxDurationSecs ?? null,
+          failoverEngines: fullProf.failoverEngines ?? [],
           avatar: fullProf.avatar || null,
         });
         setSettingsDirty(false);
@@ -596,6 +608,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
         defaultProviderOptions: settingsDraft.defaultProviderOptions ?? [],
         placeDisplayNames: settingsDraft.placeDisplayNames ?? [],
         disabledPluginIds: settingsDraft.disabledPluginIds ?? [],
+        toolPolicies: settingsDraft.toolPolicies ?? {},
+        maxTurnsPerRun: settingsDraft.maxTurnsPerRun ?? null,
+        maxDurationSecs: settingsDraft.maxDurationSecs ?? null,
+        failoverEngines: settingsDraft.failoverEngines ?? [],
       });
       if (onAgentUpdated && updatedProfile) {
         onAgentUpdated(updatedProfile);
@@ -629,6 +645,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
       defaultProviderOptions: profile.defaultProviderOptions ?? [],
       placeDisplayNames: profile.placeDisplayNames ?? [],
       disabledPluginIds: profile.disabledPluginIds ?? [],
+      toolPolicies: profile.toolPolicies ?? {},
+      maxTurnsPerRun: profile.maxTurnsPerRun ?? null,
+      maxDurationSecs: profile.maxDurationSecs ?? null,
+      failoverEngines: profile.failoverEngines ?? [],
       avatar: profile.avatar || null,
     });
     setSettingsDirty(false);

@@ -283,4 +283,45 @@ describe('AgentSettingsTab - Plugin & MCP Integration', () => {
       );
     });
   });
+
+  describe('Tool Policies, Guardrails & Failover Engines (S2)', () => {
+    it('renders per-tool Allow/Ask/Deny matrix and updates toolPolicies, limits, and failoverEngines', async () => {
+      const user = userEvent.setup();
+      let currentDraft: AgentSettingsDraft = {
+        ...defaultDraft,
+        toolPolicies: { tasks: 'allow', shell: 'ask' },
+        maxTurnsPerRun: 15,
+        maxDurationSecs: 600,
+        failoverEngines: ['codex'],
+      };
+      const setSettingsDraft = vi.fn((updater) => {
+        currentDraft = typeof updater === 'function' ? updater(currentDraft) : updater;
+      });
+      const setSettingsDirty = vi.fn();
+
+      render(
+        <AgentSettingsTab
+          agentId="agent-1"
+          settingsDraft={currentDraft}
+          setSettingsDraft={setSettingsDraft}
+          settingsDirty={false}
+          setSettingsDirty={setSettingsDirty}
+          onSaveSettings={vi.fn()}
+          onRevertSettings={vi.fn()}
+        />
+      );
+
+      const tasksGroup = screen.getByRole('group', { name: /Policy for tasks/i });
+      expect(tasksGroup).toBeInTheDocument();
+
+      const denyBtn = tasksGroup.querySelector('button:nth-child(3)') as HTMLButtonElement;
+      await user.click(denyBtn);
+      expect(setSettingsDirty).toHaveBeenCalledWith(true);
+      expect(currentDraft.toolPolicies?.tasks).toBe('deny');
+
+      const addFailoverSelect = screen.getByRole('combobox', { name: /Add failover engine/i });
+      await user.selectOptions(addFailoverSelect, 'grok');
+      expect(currentDraft.failoverEngines).toEqual(['codex', 'grok']);
+    });
+  });
 });

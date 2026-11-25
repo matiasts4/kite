@@ -615,6 +615,8 @@ pub fn is_plugin_disabled(disabled_plugin_ids: &[String], plugin_id: &str) -> bo
         match target.as_str() {
             "kite-dispatch" | "dispatch" => norm == "kite-dispatch" || norm == "dispatch",
             "kite-ctx" | "ctx" => norm == "kite-ctx" || norm == "ctx",
+            "kite-tasks" | "tasks" => norm == "kite-tasks" || norm == "tasks",
+            "kite-diff" | "diff" => norm == "kite-diff" || norm == "diff",
             _ => false,
         }
     })

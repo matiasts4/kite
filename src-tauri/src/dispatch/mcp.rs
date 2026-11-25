@@ -464,6 +464,81 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["action"]
             }
         }),
+        json!({
+            "name": "kite_tasks",
+            "description": "List, inspect, create, update, or transition Kite Tasks issues.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "get", "create", "update", "move_state"]
+                    },
+                    "id": { "type": "string", "description": "Task identifier or key." },
+                    "title": { "type": "string", "description": "Task title." },
+                    "description": { "type": "string", "description": "Task markdown body." },
+                    "state": { "type": "string", "description": "Workflow state name (e.g. Backlog, Todo, In Progress, Done)." },
+                    "priority": { "type": "string", "description": "Priority value (urgent, high, medium, low, none)." },
+                    "labels": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Labels attached to the task."
+                    },
+                    "label": { "type": "string", "description": "Filter label for list." },
+                    "limit": { "type": "integer", "description": "Maximum results for list." },
+                    "odd_path": { "type": "string", "description": "Linked ODD specification path." },
+                    "source_agent": { "type": "string", "description": "Originating agent id or name." },
+                    "source_thread_id": { "type": "string", "description": "Originating thread identifier." },
+                    "approved": { "type": "boolean", "description": "Explicit user approval when tool policy is 'ask'." }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "kite_ctx",
+            "description": "Compact context reader, workspace/knowledge search, shared context handoffs, and CCR retrieval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["read_compact", "search", "share_put", "share_get", "ccr_retrieve"]
+                    },
+                    "path": { "type": "string", "description": "File or directory path inside authorized agent Places." },
+                    "mode": { "type": "string", "description": "Compact read mode (signatures, map, lines:N-M, full)." },
+                    "query": { "type": "string", "description": "Search query across workspace and knowledge packs." },
+                    "limit": { "type": "integer", "description": "Maximum search matches." },
+                    "key": { "type": "string", "description": "Shared context entry key." },
+                    "content": { "type": "string", "description": "Shared context content payload." },
+                    "scope": { "type": "string", "description": "Shared context scope (workspace, thread, global)." },
+                    "scope_id": { "type": "string", "description": "Shared context scope identifier." },
+                    "full": { "type": "boolean", "description": "Return full content for share_get." },
+                    "hash": { "type": "string", "description": "CCR artifact hash for ccr_retrieve." },
+                    "lines": { "type": "string", "description": "Line range N-M for ccr_retrieve." },
+                    "search": { "type": "string", "description": "Filter term for ccr_retrieve." },
+                    "approved": { "type": "boolean", "description": "Explicit user approval when tool policy is 'ask'." }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "kite_diff",
+            "description": "Read-only Git working tree status and per-file unified diff inside authorized agent Places.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "file_diff"]
+                    },
+                    "path": { "type": "string", "description": "Target file path for file_diff." },
+                    "workspace_id": { "type": "string", "description": "Optional workspace identifier." },
+                    "staged": { "type": "boolean", "description": "Inspect staged index diff instead of working tree." },
+                    "approved": { "type": "boolean", "description": "Explicit user approval when tool policy is 'ask'." }
+                },
+                "required": ["action"]
+            }
+        }),
     ]
 }
 
@@ -474,6 +549,9 @@ pub struct ToolPermissions {
     pub allow_scheduling: bool,
     pub allow_messaging: bool,
     pub disabled_plugins: Vec<String>,
+    pub tool_policies: std::collections::HashMap<String, String>,
+    pub approved_tools: Vec<String>,
+    pub authorized_roots: Vec<std::path::PathBuf>,
 }
 
 impl Default for ToolPermissions {
@@ -483,6 +561,9 @@ impl Default for ToolPermissions {
             allow_scheduling: true,
             allow_messaging: true,
             disabled_plugins: Vec::new(),
+            tool_policies: std::collections::HashMap::new(),
+            approved_tools: Vec::new(),
+            authorized_roots: Vec::new(),
         }
     }
 }
@@ -493,6 +574,83 @@ fn parse_bool_env(raw: &str) -> Option<bool> {
         "false" | "0" | "no" => Some(false),
         _ => None,
     }
+}
+
+fn normalize_policy_mode(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "allow" => Some("allow"),
+        "ask" => Some("ask"),
+        "deny" => Some("deny"),
+        _ => None,
+    }
+}
+
+fn parse_tool_policies_env(raw: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return map;
+    }
+    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+        for (k, v) in obj {
+            if let Some(mode) = v.as_str().and_then(normalize_policy_mode) {
+                map.insert(k.trim().to_ascii_lowercase(), mode.to_string());
+            }
+        }
+        return map;
+    }
+    for pair in trimmed.split(',') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        if let Some(mode) = normalize_policy_mode(v) {
+            let key = k.trim().to_ascii_lowercase();
+            if !key.is_empty() {
+                map.insert(key, mode.to_string());
+            }
+        }
+    }
+    map
+}
+
+fn lexical_normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(std::path::Component::Normal(_))) {
+                    out.pop();
+                } else {
+                    out.push(comp);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn canonicalize_or_lexical(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    let mut probe = path.to_path_buf();
+    let mut tail = Vec::new();
+    while !probe.exists() {
+        let Some(name) = probe.file_name().map(|n| n.to_os_string()) else {
+            return lexical_normalize_path(path);
+        };
+        tail.push(name);
+        if !probe.pop() {
+            return lexical_normalize_path(path);
+        }
+    }
+    let mut base = std::fs::canonicalize(&probe).unwrap_or_else(|_| lexical_normalize_path(&probe));
+    for seg in tail.into_iter().rev() {
+        base.push(seg);
+    }
+    lexical_normalize_path(&base)
 }
 
 impl ToolPermissions {
@@ -518,12 +676,65 @@ impl ToolPermissions {
                     .collect()
             })
             .unwrap_or_default();
+        let tool_policies = std::env::var("KITE_TOOL_POLICIES")
+            .ok()
+            .map(|raw| parse_tool_policies_env(&raw))
+            .unwrap_or_default();
+        let approved_tools = std::env::var("KITE_APPROVED_TOOLS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let authorized_roots = std::env::var_os("KITE_AUTHORIZED_ROOTS")
+            .map(|raw| {
+                std::env::split_paths(&raw)
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             agent_id,
             allow_scheduling,
             allow_messaging,
             disabled_plugins,
+            tool_policies,
+            approved_tools,
+            authorized_roots,
         }
+    }
+
+    pub fn tool_family_for_name(tool_name: &str) -> &'static str {
+        match tool_name {
+            "kite_tasks" => "tasks",
+            "kite_ctx" => "ctx",
+            "kite_diff" => "diff",
+            "kite_memory" => "memory",
+            "kite_thread" => "threads",
+            "kite_routine" => "routines",
+            "kite_teammate" => "teammates",
+            "kite_subagent_run"
+            | "kite_subagent_send"
+            | "kite_subagent_wait"
+            | "kite_subagent_read"
+            | "kite_swarm" => "subagents",
+            _ => "custom",
+        }
+    }
+
+    pub fn policy_for_tool(&self, tool_name: &str) -> &str {
+        let lower = tool_name.trim().to_ascii_lowercase();
+        if let Some(mode) = self.tool_policies.get(&lower) {
+            return mode.as_str();
+        }
+        let family = Self::tool_family_for_name(tool_name);
+        self.tool_policies
+            .get(family)
+            .map(String::as_str)
+            .unwrap_or("allow")
     }
 
     pub fn is_plugin_disabled(&self, plugin: &str) -> bool {
@@ -570,6 +781,11 @@ impl ToolPermissions {
                     || self.is_plugin_disabled("teammates")
                     || self.is_plugin_disabled("kite-teammate")
             }
+            "kite_tasks" => {
+                self.is_plugin_disabled("tasks") || self.is_plugin_disabled("kite-tasks")
+            }
+            "kite_ctx" => self.is_plugin_disabled("ctx") || self.is_plugin_disabled("kite-ctx"),
+            "kite_diff" => self.is_plugin_disabled("diff") || self.is_plugin_disabled("kite-diff"),
             _ => false,
         };
         if pack_disabled {
@@ -586,6 +802,72 @@ impl ToolPermissions {
             return Err(
                 "Permission denied: allowAgentMessaging is disabled for this agent.".to_string(),
             );
+        }
+        if self.policy_for_tool(tool_name).eq_ignore_ascii_case("deny") {
+            return Err(format!(
+                "Permission denied: tool policy for '{tool_name}' (family '{}') is set to 'deny'.",
+                Self::tool_family_for_name(tool_name)
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_path_against_places(&self, raw_path: &str) -> Result<(), String> {
+        if self.authorized_roots.is_empty() {
+            return Ok(());
+        }
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let req_path = std::path::Path::new(trimmed);
+        let candidates: Vec<std::path::PathBuf> = if req_path.is_absolute() {
+            vec![canonicalize_or_lexical(req_path)]
+        } else {
+            self.authorized_roots
+                .iter()
+                .map(|root| canonicalize_or_lexical(&root.join(req_path)))
+                .collect()
+        };
+        let norm_roots: Vec<std::path::PathBuf> = self
+            .authorized_roots
+            .iter()
+            .map(|r| canonicalize_or_lexical(r))
+            .collect();
+        let allowed = candidates
+            .iter()
+            .any(|cand| norm_roots.iter().any(|root| cand.starts_with(root)));
+        if allowed {
+            Ok(())
+        } else {
+            Err(format!(
+                "Path rejected: '{trimmed}' is outside the authorized agent Places."
+            ))
+        }
+    }
+
+    pub fn check_call_permissions(&self, tool_name: &str, args: &Value) -> Result<(), String> {
+        self.is_tool_allowed(tool_name)?;
+        if self.policy_for_tool(tool_name).eq_ignore_ascii_case("ask") {
+            let arg_approved = args
+                .get("approved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let family = Self::tool_family_for_name(tool_name);
+            let preapproved = self
+                .approved_tools
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(tool_name) || t.eq_ignore_ascii_case(family));
+            if !arg_approved && !preapproved {
+                return Err(format!(
+                    "Approval required: tool '{tool_name}' (family '{family}') has policy 'ask'. Re-run with approved=true after user confirmation."
+                ));
+            }
+        }
+        if matches!(tool_name, "kite_ctx" | "kite_diff") {
+            if let Some(path) = args.get("path").and_then(Value::as_str) {
+                self.validate_path_against_places(path)?;
+            }
         }
         Ok(())
     }
@@ -881,7 +1163,7 @@ pub fn call_tool_with_permissions<'a>(
     perms: &ToolPermissions,
     runner: &'a dyn Fn(&[String]) -> (i32, String),
 ) -> Value {
-    if let Err(reason) = perms.is_tool_allowed(name) {
+    if let Err(reason) = perms.check_call_permissions(name, args) {
         return tool_result(reason, true);
     }
     match name {
@@ -1680,6 +1962,297 @@ pub fn call_tool_with_permissions<'a>(
                 ),
             }
         }
+        "kite_tasks" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            let approved = args.get("approved").and_then(Value::as_bool) == Some(true);
+            let mut argv = vec![
+                "kite".to_string(),
+                "dispatch".to_string(),
+                "agent".to_string(),
+                "tasks".to_string(),
+            ];
+            match action {
+                "list" => {
+                    argv.push("list".to_string());
+                    if let Some(state) = args.get("state").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--state".to_string());
+                        argv.push(state.to_string());
+                    }
+                    if let Some(label) = args.get("label").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--label".to_string());
+                        argv.push(label.to_string());
+                    }
+                    if let Some(limit) = args.get("limit").and_then(Value::as_u64) {
+                        argv.push("--limit".to_string());
+                        argv.push(limit.to_string());
+                    }
+                }
+                "get" => {
+                    let Some(id) = args.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_tasks get requires non-empty 'id'.", true);
+                    };
+                    argv.push("get".to_string());
+                    argv.push("--id".to_string());
+                    argv.push(id.to_string());
+                }
+                "create" => {
+                    let Some(title) = args.get("title").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_tasks create requires non-empty 'title'.", true);
+                    };
+                    argv.push("create".to_string());
+                    argv.push("--title".to_string());
+                    argv.push(title.to_string());
+                    if let Some(desc) = args.get("description").and_then(Value::as_str) {
+                        argv.push("--description".to_string());
+                        argv.push(desc.to_string());
+                    }
+                    if let Some(state) = args.get("state").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--state".to_string());
+                        argv.push(state.to_string());
+                    }
+                    if let Some(priority) = args.get("priority").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--priority".to_string());
+                        argv.push(priority.to_string());
+                    }
+                    if let Some(labels) = args.get("labels").and_then(Value::as_array) {
+                        let csv: Vec<&str> = labels.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect();
+                        if !csv.is_empty() {
+                            argv.push("--labels".to_string());
+                            argv.push(csv.join(","));
+                        }
+                    }
+                    if let Some(odd_path) = args.get("odd_path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--odd-path".to_string());
+                        argv.push(odd_path.to_string());
+                    }
+                    if let Some(source_agent) = args.get("source_agent").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--source-agent".to_string());
+                        argv.push(source_agent.to_string());
+                    }
+                    if let Some(source_thread_id) = args.get("source_thread_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--source-thread-id".to_string());
+                        argv.push(source_thread_id.to_string());
+                    }
+                }
+                "update" => {
+                    let Some(id) = args.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_tasks update requires non-empty 'id'.", true);
+                    };
+                    argv.push("update".to_string());
+                    argv.push("--id".to_string());
+                    argv.push(id.to_string());
+                    if let Some(title) = args.get("title").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--title".to_string());
+                        argv.push(title.to_string());
+                    }
+                    if let Some(desc) = args.get("description").and_then(Value::as_str) {
+                        argv.push("--description".to_string());
+                        argv.push(desc.to_string());
+                    }
+                    if let Some(state) = args.get("state").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--state".to_string());
+                        argv.push(state.to_string());
+                    }
+                    if let Some(priority) = args.get("priority").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--priority".to_string());
+                        argv.push(priority.to_string());
+                    }
+                    if let Some(labels) = args.get("labels").and_then(Value::as_array) {
+                        let csv: Vec<&str> = labels.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect();
+                        argv.push("--labels".to_string());
+                        argv.push(csv.join(","));
+                    }
+                }
+                "move_state" => {
+                    let Some(id) = args.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_tasks move_state requires non-empty 'id'.", true);
+                    };
+                    let Some(state) = args.get("state").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_tasks move_state requires non-empty 'state'.", true);
+                    };
+                    argv.push("move_state".to_string());
+                    argv.push("--id".to_string());
+                    argv.push(id.to_string());
+                    argv.push("--state".to_string());
+                    argv.push(state.to_string());
+                }
+                other => {
+                    return tool_result(
+                        format!("Unknown kite_tasks action '{other}'. Expected: list, get, create, update, move_state."),
+                        true,
+                    );
+                }
+            }
+            if approved {
+                argv.push("--approved".to_string());
+            }
+            let (code, output) = runner(&argv);
+            tool_result(extract_text_from_cli_output(&output), code != 0)
+        }
+        "kite_ctx" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            let approved = args.get("approved").and_then(Value::as_bool) == Some(true);
+            let mut argv = vec![
+                "kite".to_string(),
+                "dispatch".to_string(),
+                "agent".to_string(),
+                "ctx".to_string(),
+            ];
+            match action {
+                "read_compact" => {
+                    let Some(path) = args.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_ctx read_compact requires non-empty 'path'.", true);
+                    };
+                    argv.push("read_compact".to_string());
+                    argv.push("--path".to_string());
+                    argv.push(path.to_string());
+                    if let Some(mode) = args.get("mode").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--mode".to_string());
+                        argv.push(mode.to_string());
+                    }
+                }
+                "search" => {
+                    let Some(query) = args.get("query").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_ctx search requires non-empty 'query'.", true);
+                    };
+                    argv.push("search".to_string());
+                    argv.push("--query".to_string());
+                    argv.push(query.to_string());
+                    if let Some(path) = args.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--path".to_string());
+                        argv.push(path.to_string());
+                    }
+                    if let Some(limit) = args.get("limit").and_then(Value::as_u64) {
+                        argv.push("--limit".to_string());
+                        argv.push(limit.to_string());
+                    }
+                }
+                "share_put" => {
+                    let Some(key) = args.get("key").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_ctx share_put requires non-empty 'key'.", true);
+                    };
+                    let Some(content) = args.get("content").and_then(Value::as_str) else {
+                        return tool_result("kite_ctx share_put requires 'content'.", true);
+                    };
+                    argv.push("share_put".to_string());
+                    argv.push("--key".to_string());
+                    argv.push(key.to_string());
+                    argv.push("--content".to_string());
+                    argv.push(content.to_string());
+                    if let Some(scope) = args.get("scope").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--scope".to_string());
+                        argv.push(scope.to_string());
+                    }
+                    if let Some(scope_id) = args.get("scope_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--scope-id".to_string());
+                        argv.push(scope_id.to_string());
+                    }
+                }
+                "share_get" => {
+                    let Some(key) = args.get("key").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_ctx share_get requires non-empty 'key'.", true);
+                    };
+                    argv.push("share_get".to_string());
+                    argv.push("--key".to_string());
+                    argv.push(key.to_string());
+                    if let Some(scope) = args.get("scope").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--scope".to_string());
+                        argv.push(scope.to_string());
+                    }
+                    if let Some(scope_id) = args.get("scope_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--scope-id".to_string());
+                        argv.push(scope_id.to_string());
+                    }
+                    if args.get("full").and_then(Value::as_bool) == Some(true) {
+                        argv.push("--full".to_string());
+                    }
+                }
+                "ccr_retrieve" => {
+                    let Some(hash) = args.get("hash").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_ctx ccr_retrieve requires non-empty 'hash'.", true);
+                    };
+                    argv.push("ccr_retrieve".to_string());
+                    argv.push("--hash".to_string());
+                    argv.push(hash.to_string());
+                    if let Some(lines) = args.get("lines").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--lines".to_string());
+                        argv.push(lines.to_string());
+                    }
+                    if let Some(search) = args.get("search").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--search".to_string());
+                        argv.push(search.to_string());
+                    }
+                }
+                other => {
+                    return tool_result(
+                        format!("Unknown kite_ctx action '{other}'. Expected: read_compact, search, share_put, share_get, ccr_retrieve."),
+                        true,
+                    );
+                }
+            }
+            if approved {
+                argv.push("--approved".to_string());
+            }
+            let (code, output) = runner(&argv);
+            tool_result(extract_text_from_cli_output(&output), code != 0)
+        }
+        "kite_diff" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            let approved = args.get("approved").and_then(Value::as_bool) == Some(true);
+            let mut argv = vec![
+                "kite".to_string(),
+                "dispatch".to_string(),
+                "agent".to_string(),
+                "diff".to_string(),
+            ];
+            match action {
+                "status" => {
+                    argv.push("status".to_string());
+                    if let Some(ws) = args.get("workspace_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--workspace-id".to_string());
+                        argv.push(ws.to_string());
+                    }
+                }
+                "file_diff" => {
+                    let Some(path) = args.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                        return tool_result("kite_diff file_diff requires non-empty 'path'.", true);
+                    };
+                    argv.push("file_diff".to_string());
+                    argv.push("--path".to_string());
+                    argv.push(path.to_string());
+                    if let Some(ws) = args.get("workspace_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--workspace-id".to_string());
+                        argv.push(ws.to_string());
+                    }
+                    if args.get("staged").and_then(Value::as_bool) == Some(true) {
+                        argv.push("--staged".to_string());
+                    }
+                }
+                other => {
+                    return tool_result(
+                        format!("Unknown kite_diff action '{other}'. Expected: status, file_diff."),
+                        true,
+                    );
+                }
+            }
+            if approved {
+                argv.push("--approved".to_string());
+            }
+            let (code, output) = runner(&argv);
+            tool_result(extract_text_from_cli_output(&output), code != 0)
+        }
         other => tool_result(format!("Unknown tool '{other}'."), true),
     }
 }
@@ -1879,7 +2452,7 @@ mod tests {
         });
         let resp = handle_jsonrpc_message(&req, &|_| (0, String::new())).expect("response");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|t| t.get("name").and_then(Value::as_str))
@@ -1896,6 +2469,9 @@ mod tests {
                 "kite_memory",
                 "kite_routine",
                 "kite_teammate",
+                "kite_tasks",
+                "kite_ctx",
+                "kite_diff",
             ]
         );
         for tool in tools {
@@ -2249,6 +2825,7 @@ mod tests {
             allow_scheduling: false,
             allow_messaging: true,
             disabled_plugins: vec![],
+            ..ToolPermissions::default()
         };
         let list_resp = handle_jsonrpc_message_with_permissions(
             &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
@@ -2291,6 +2868,7 @@ mod tests {
             allow_scheduling: true,
             allow_messaging: false,
             disabled_plugins: vec![],
+            ..ToolPermissions::default()
         };
         let list_resp2 = handle_jsonrpc_message_with_permissions(
             &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
@@ -2331,6 +2909,7 @@ mod tests {
             allow_scheduling: true,
             allow_messaging: true,
             disabled_plugins: vec!["kite-dispatch".to_string(), "kite-memory".to_string()],
+            ..ToolPermissions::default()
         };
         let list_resp3 = handle_jsonrpc_message_with_permissions(
             &json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/list" }),
@@ -2373,5 +2952,129 @@ mod tests {
                 "5", "--limit", "10"
             ]
         );
+    }
+
+    #[test]
+    fn tasks_ctx_diff_tools_enforce_tool_policies_and_places_sandbox() {
+        let called: std::cell::RefCell<Vec<Vec<String>>> = std::cell::RefCell::new(Vec::new());
+        let runner = |argv: &[String]| {
+            called.borrow_mut().push(argv.to_vec());
+            (0, r#"{"ok":true,"textOut":"done"}"#.to_string())
+        };
+
+        let mut policies = std::collections::HashMap::new();
+        policies.insert("diff".to_string(), "deny".to_string());
+        policies.insert("tasks".to_string(), "ask".to_string());
+        policies.insert("ctx".to_string(), "allow".to_string());
+
+        let authorized = std::env::temp_dir().join("kite_mcp_sandbox_ok");
+        let _ = std::fs::create_dir_all(&authorized);
+
+        let perms = ToolPermissions {
+            tool_policies: policies,
+            authorized_roots: vec![authorized.clone()],
+            ..ToolPermissions::default()
+        };
+
+        // `deny` omits `kite_diff` from tools/list and blocks direct call
+        let list_resp = handle_jsonrpc_message_with_permissions(
+            &json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/list" }),
+            &perms,
+            &runner,
+        )
+        .unwrap();
+        let names: Vec<&str> = list_resp["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(!names.contains(&"kite_diff"));
+        assert!(names.contains(&"kite_tasks"));
+        assert!(names.contains(&"kite_ctx"));
+
+        let diff_denied = call_tool_with_permissions(
+            "kite_diff",
+            &json!({ "action": "status" }),
+            &perms,
+            &runner,
+        );
+        assert_eq!(diff_denied["isError"], true);
+        assert!(diff_denied["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("deny"));
+
+        // `ask` rejects until approved=true
+        let task_unapproved = call_tool_with_permissions(
+            "kite_tasks",
+            &json!({ "action": "list", "state": "Todo" }),
+            &perms,
+            &runner,
+        );
+        assert_eq!(task_unapproved["isError"], true);
+        assert!(task_unapproved["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Approval required"));
+        assert!(called.borrow().is_empty());
+
+        let task_approved = call_tool_with_permissions(
+            "kite_tasks",
+            &json!({ "action": "create", "title": "QA follow-up", "approved": true }),
+            &perms,
+            &runner,
+        );
+        assert_eq!(task_approved["isError"], false);
+        assert_eq!(
+            called.borrow()[0],
+            vec![
+                "kite",
+                "dispatch",
+                "agent",
+                "tasks",
+                "create",
+                "--title",
+                "QA follow-up",
+                "--approved"
+            ]
+        );
+
+        // `Places` sandbox rejects outside path or traversal, accepts inside path
+        let outside = call_tool_with_permissions(
+            "kite_ctx",
+            &json!({ "action": "read_compact", "path": "../outside_secret.txt" }),
+            &perms,
+            &runner,
+        );
+        assert_eq!(outside["isError"], true);
+        assert!(outside["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("outside"));
+
+        let inside = call_tool_with_permissions(
+            "kite_ctx",
+            &json!({ "action": "read_compact", "path": "src/lib.rs", "mode": "signatures" }),
+            &perms,
+            &runner,
+        );
+        assert_eq!(inside["isError"], false);
+        assert_eq!(
+            called.borrow()[1],
+            vec![
+                "kite",
+                "dispatch",
+                "agent",
+                "ctx",
+                "read_compact",
+                "--path",
+                "src/lib.rs",
+                "--mode",
+                "signatures"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&authorized);
     }
 }

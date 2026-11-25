@@ -14,6 +14,7 @@ static STORES_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 const WAL_CHECKPOINT_CADENCE: u64 = 32;
 const WAL_TRUNCATE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
+pub const PERSIST_ASYNC_COALESCE_MS: u64 = 750;
 
 #[cfg(test)]
 pub fn persist_calls_count() -> u64 {
@@ -323,6 +324,11 @@ CREATE TABLE IF NOT EXISTS notifications (
     data TEXT NOT NULL,
     read INTEGER NOT NULL DEFAULT 0,
     created_at_unix_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_autonomy_config (
+    agent_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL
 );
 ";
 
@@ -1447,7 +1453,7 @@ pub fn persist_async() {
                         dirty = cv.wait(dirty).unwrap();
                     }
                     drop(dirty);
-                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    std::thread::sleep(std::time::Duration::from_millis(PERSIST_ASYNC_COALESCE_MS));
                     {
                         let mut d = lock.lock().unwrap();
                         *d = false;

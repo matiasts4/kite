@@ -12,6 +12,7 @@ import {
 import { CheckIcon, ClockIcon, CloseIcon, TrashIcon } from './agentIcons';
 import { AgentMcpSection } from './sections/AgentMcpSection';
 import { AgentModelDefaultsSection } from './sections/AgentModelDefaultsSection';
+import { AgentToolPolicySection, type ToolPolicyDecision } from './sections/AgentToolPolicySection';
 
 // Official Engine Catalog (kept exported for compatibility)
 export interface EngineMetaItem {
@@ -46,6 +47,10 @@ export interface AgentSettingsDraft {
   defaultPlan?: boolean;
   defaultModel?: string | null;
   placeDisplayNames?: string[];
+  toolPolicies?: Record<string, ToolPolicyDecision>;
+  maxTurnsPerRun?: number | null;
+  maxDurationSecs?: number | null;
+  failoverEngines?: string[];
   avatar?: AvatarChoice | string | null;
   [key: string]: any;
 }
@@ -191,6 +196,10 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
           defaultProviderOptions: settingsDraft.defaultProviderOptions ?? [],
           placeDisplayNames: settingsDraft.placeDisplayNames ?? [],
           disabledPluginIds: settingsDraft.disabledPluginIds ?? [],
+          toolPolicies: settingsDraft.toolPolicies ?? {},
+          maxTurnsPerRun: settingsDraft.maxTurnsPerRun ?? null,
+          maxDurationSecs: settingsDraft.maxDurationSecs ?? null,
+          failoverEngines: settingsDraft.failoverEngines ?? [],
         });
       }
       setInitialEngine(settingsDraft.engine);
@@ -411,6 +420,36 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
             readOnly={readOnly}
             saving={saving}
             onToggleServer={toggleMcpServerForAgent}
+          />
+
+          {/* Granular Tool Policies & Guardrails */}
+          <AgentToolPolicySection
+            primaryEngine={settingsDraft.engine}
+            toolPolicies={settingsDraft.toolPolicies ?? {}}
+            maxTurnsPerRun={settingsDraft.maxTurnsPerRun ?? null}
+            maxDurationSecs={settingsDraft.maxDurationSecs ?? null}
+            failoverEngines={settingsDraft.failoverEngines ?? []}
+            readOnly={readOnly}
+            saving={saving}
+            onChangePolicy={(family, decision) => {
+              setSettingsDraft((prev: any) => ({
+                ...prev,
+                toolPolicies: { ...(prev.toolPolicies ?? {}), [family]: decision },
+              }));
+              setSettingsDirty(true);
+            }}
+            onChangeMaxTurns={(val) => {
+              setSettingsDraft((prev: any) => ({ ...prev, maxTurnsPerRun: val }));
+              setSettingsDirty(true);
+            }}
+            onChangeMaxDuration={(val) => {
+              setSettingsDraft((prev: any) => ({ ...prev, maxDurationSecs: val }));
+              setSettingsDirty(true);
+            }}
+            onChangeFailoverEngines={(engines) => {
+              setSettingsDraft((prev: any) => ({ ...prev, failoverEngines: engines }));
+              setSettingsDirty(true);
+            }}
           />
 
           {/* New chats start with */}

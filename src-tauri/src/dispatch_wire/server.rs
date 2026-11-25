@@ -1082,6 +1082,18 @@ fn execute_agent_command(
                 );
             }
         }
+        cli::AgentCommand::Tool(tool_cmd) => {
+            let family = cli::tool_family_for_command(tool_cmd);
+            if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, family)
+                || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, &format!("kite-{family}"))
+                || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, &format!("kite_{family}"))
+            {
+                return agent_error_envelope(
+                    id,
+                    format!("Permission denied: {family} tool pack is disabled for this agent."),
+                );
+            }
+        }
     }
 
     match cmd {
@@ -1453,6 +1465,31 @@ fn execute_agent_command(
             let receipt = execute_command(request, &command, id);
             let exit = crate::dispatch::types::exit_code(&receipt);
             json!({ "exit": exit, "receipt": receipt })
+        }
+        cli::AgentCommand::Tool(tool_cmd) => {
+            let caller_from = request
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let ws_path = resolve_request_workspace_path(request);
+            let approved = request
+                .get("approved")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || request
+                    .get("argv")
+                    .and_then(Value::as_array)
+                    .is_some_and(|arr| arr.iter().any(|a| a.as_str() == Some("--approved")));
+            match cli::execute_agent_tool(
+                tool_cmd,
+                perms.agent_id.as_deref(),
+                caller_from,
+                ws_path.as_deref(),
+                approved,
+            ) {
+                Ok(val) => agent_ok_envelope(val),
+                Err(msg) => agent_error_envelope(id, msg),
+            }
         }
     }
 }

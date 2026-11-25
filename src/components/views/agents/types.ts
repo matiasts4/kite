@@ -35,6 +35,14 @@ export interface StarterSummary {
   summary: string;
 }
 
+export interface KnowledgePackConfig {
+  id: string;
+  name: string;
+  rootPath: string;
+  globs: string[];
+  enabled: boolean;
+}
+
 export interface FullAgentProfile extends AgentProfile {
   brief?: string;
   defaultMode?: string | null;
@@ -45,6 +53,11 @@ export interface FullAgentProfile extends AgentProfile {
   allowAgentScheduling?: boolean;
   allowAgentMessaging?: boolean;
   placeDisplayNames?: string[];
+  toolPolicies?: Record<string, 'allow' | 'ask' | 'deny'>;
+  maxTurnsPerRun?: number | null;
+  maxDurationSecs?: number | null;
+  failoverEngines?: string[];
+  knowledgePacks?: KnowledgePackConfig[];
 }
 
 export type TabType = 'memory' | 'skills' | 'starters' | 'settings';

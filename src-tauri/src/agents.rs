@@ -1,9 +1,308 @@
 use crate::chat::live_turns;
-use crate::persist::{agents, persist, threads, AgentProfile};
+use crate::persist::{agents, db_connection, persist, threads, AgentProfile};
 use crate::terminal::engine_installed;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
+
+pub const CANONICAL_TOOL_FAMILIES: &[&str] = &[
+    "thread",
+    "memory",
+    "routine",
+    "teammate",
+    "tasks",
+    "ctx",
+    "diff",
+    "filesystem_write",
+    "shell",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgePackConfig {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+    #[serde(default)]
+    pub globs: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAutonomyConfig {
+    #[serde(default)]
+    pub tool_policies: BTreeMap<String, String>,
+    #[serde(default)]
+    pub max_turns_per_run: Option<u32>,
+    #[serde(default)]
+    pub max_duration_secs: Option<u64>,
+    #[serde(default)]
+    pub failover_engines: Vec<String>,
+    #[serde(default)]
+    pub knowledge_packs: Vec<KnowledgePackConfig>,
+}
+
+pub fn normalize_tool_policy_value(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "allow" => Some("allow"),
+        "ask" => Some("ask"),
+        "deny" => Some("deny"),
+        _ => None,
+    }
+}
+
+pub fn default_policy_for_family(family: &str) -> &'static str {
+    match family {
+        "filesystem_write" | "shell" => "ask",
+        _ => "allow",
+    }
+}
+
+pub(crate) fn load_agent_autonomy_config_from_conn(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+) -> AgentAutonomyConfig {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT data FROM agent_autonomy_config WHERE agent_id = ?1 LIMIT 1",
+            rusqlite::params![agent_id],
+            |row| row.get(0),
+        )
+        .ok();
+    raw.and_then(|text| serde_json::from_str::<AgentAutonomyConfig>(&text).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_agent_autonomy_config_to_conn(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    cfg: &AgentAutonomyConfig,
+) -> Result<(), String> {
+    let _ = conn.execute(
+        "CREATE TABLE IF NOT EXISTS agent_autonomy_config (
+            agent_id TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            updated_at_unix_ms INTEGER NOT NULL
+        )",
+        [],
+    );
+    let data = serde_json::to_string(cfg).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO agent_autonomy_config (agent_id, data, updated_at_unix_ms)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(agent_id) DO UPDATE SET
+             data = excluded.data,
+             updated_at_unix_ms = excluded.updated_at_unix_ms",
+        rusqlite::params![agent_id, data, now_ms()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn load_agent_autonomy_config(agent_id: &str) -> AgentAutonomyConfig {
+    if agent_id.trim().is_empty() {
+        return AgentAutonomyConfig::default();
+    }
+    let Ok(conn) = db_connection().lock() else {
+        return AgentAutonomyConfig::default();
+    };
+    load_agent_autonomy_config_from_conn(&conn, agent_id)
+}
+
+pub fn save_agent_autonomy_config(agent_id: &str, cfg: &AgentAutonomyConfig) -> Result<(), String> {
+    if agent_id.trim().is_empty() {
+        return Err("agent_id is required".to_string());
+    }
+    let conn = db_connection().lock().map_err(|e| e.to_string())?;
+    save_agent_autonomy_config_to_conn(&conn, agent_id, cfg)
+}
+
+fn sanitize_autonomy_config_patch(req: &Value, cfg: &mut AgentAutonomyConfig) {
+    if let Some(policies_obj) = req.get("toolPolicies").and_then(Value::as_object) {
+        let mut next = BTreeMap::new();
+        for (k, v) in policies_obj {
+            let fam = k.trim().to_ascii_lowercase();
+            if CANONICAL_TOOL_FAMILIES.contains(&fam.as_str()) {
+                if let Some(decision) = v.as_str().and_then(normalize_tool_policy_value) {
+                    next.insert(fam, decision.to_string());
+                }
+            }
+        }
+        cfg.tool_policies = next;
+    }
+    if let Some(turns_val) = req.get("maxTurnsPerRun") {
+        cfg.max_turns_per_run = turns_val.as_u64().map(|n| n.clamp(1, 100) as u32);
+    }
+    if let Some(dur_val) = req.get("maxDurationSecs") {
+        cfg.max_duration_secs = dur_val.as_u64().map(|n| n.clamp(30, 7200));
+    }
+    if let Some(failovers) = req.get("failoverEngines").and_then(Value::as_array) {
+        let mut list = Vec::new();
+        for item in failovers {
+            if let Some(raw) = item.as_str() {
+                let norm = teammate_engine(Some(raw));
+                if !list.contains(&norm) {
+                    list.push(norm);
+                }
+            }
+        }
+        cfg.failover_engines = list;
+    }
+    if let Some(packs) = req.get("knowledgePacks").and_then(Value::as_array) {
+        let mut parsed_packs = Vec::new();
+        for item in packs {
+            if let Ok(p) = serde_json::from_value::<KnowledgePackConfig>(item.clone()) {
+                parsed_packs.push(p);
+            }
+        }
+        cfg.knowledge_packs = parsed_packs;
+    }
+}
+
+fn merge_autonomy_into_json(mut val: Value, agent_id: &str) -> Value {
+    let cfg = load_agent_autonomy_config(agent_id);
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("toolPolicies".to_string(), json!(cfg.tool_policies));
+        obj.insert("maxTurnsPerRun".to_string(), json!(cfg.max_turns_per_run));
+        obj.insert("maxDurationSecs".to_string(), json!(cfg.max_duration_secs));
+        obj.insert("failoverEngines".to_string(), json!(cfg.failover_engines));
+        obj.insert("knowledgePacks".to_string(), json!(cfg.knowledge_packs));
+    }
+    val
+}
+
+pub fn normalize_lexical_path(path: &Path) -> PathBuf {
+    let mut stack: Vec<Component<'_>> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(stack.last(), Some(Component::Normal(_))) {
+                    stack.pop();
+                } else {
+                    stack.push(comp);
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    stack.iter().collect()
+}
+
+pub fn resolve_agent_authorized_roots(
+    agent_id: Option<&str>,
+    bound_workspace: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut push_root = |p: PathBuf| {
+        let norm = normalize_lexical_path(&p.canonicalize().unwrap_or(p));
+        if !roots.iter().any(|existing| existing == &norm) {
+            roots.push(norm);
+        }
+    };
+
+    if let Some(ws) = bound_workspace {
+        if ws.is_dir() {
+            push_root(ws.to_path_buf());
+        }
+    }
+
+    if let Some(aid) = agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let home = crate::agent_mind::get_agent_home_dir(aid);
+        push_root(home);
+        let place_names = agents()
+            .lock()
+            .ok()
+            .and_then(|list| list.iter().find(|a| a.id == aid).map(|a| a.place_display_names.clone()))
+            .unwrap_or_default();
+        if !place_names.is_empty() {
+            let workspaces = crate::persist::workspaces()
+                .lock()
+                .map(|w| w.clone())
+                .unwrap_or_default();
+            for raw in place_names {
+                let place = raw.trim();
+                if place.is_empty() {
+                    continue;
+                }
+                if let Some(ws) = workspaces
+                    .iter()
+                    .find(|w| w.display_name.eq_ignore_ascii_case(place) || w.id == place)
+                {
+                    if let Some(path) = crate::persist::workspace_path(&ws.id) {
+                        push_root(PathBuf::from(path));
+                    }
+                } else {
+                    let direct = PathBuf::from(place);
+                    if direct.is_dir() {
+                        push_root(direct);
+                    }
+                }
+            }
+        }
+    }
+
+    roots
+}
+
+pub fn validate_path_within_authorized_roots(
+    target: &Path,
+    roots: &[PathBuf],
+) -> Result<PathBuf, String> {
+    if roots.is_empty() {
+        return Err("No authorized workspace or Places roots are configured for path access.".to_string());
+    }
+    let candidate = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        roots[0].join(target)
+    };
+    let normalized_candidate = if candidate.exists() {
+        candidate.canonicalize().map_err(|e| format!("Invalid target path: {e}"))?
+    } else if let Some(parent) = candidate.parent() {
+        if parent.exists() {
+            let canon_parent = parent.canonicalize().map_err(|e| format!("Invalid parent path: {e}"))?;
+            match candidate.file_name() {
+                Some(name) => canon_parent.join(name),
+                None => canon_parent,
+            }
+        } else {
+            normalize_lexical_path(&candidate)
+        }
+    } else {
+        normalize_lexical_path(&candidate)
+    };
+
+    for root in roots {
+        let norm_root = normalize_lexical_path(&root.canonicalize().unwrap_or_else(|_| root.clone()));
+        if normalized_candidate == norm_root || normalized_candidate.starts_with(&norm_root) {
+            return Ok(normalized_candidate);
+        }
+        #[cfg(windows)]
+        {
+            let cand_lower = normalized_candidate.to_string_lossy().to_ascii_lowercase();
+            let root_lower = norm_root.to_string_lossy().to_ascii_lowercase();
+            if cand_lower == root_lower
+                || cand_lower.starts_with(&format!("{}\\", root_lower.trim_end_matches('\\')))
+            {
+                return Ok(normalized_candidate);
+            }
+        }
+    }
+
+    Err(format!(
+        "Path '{}' is outside the agent's bound workspace and authorized Places roots.",
+        target.display()
+    ))
+}
 
 const TEAMMATE_ENGINES: &[&str] = &[
     "claude-code",
@@ -24,9 +323,12 @@ const TEAMMATE_ENGINES: &[&str] = &[
 ];
 
 pub fn agent_profile_json(agent_id: &str) -> Value {
-    let items = agents().lock().unwrap();
-    if let Some(agent) = items.iter().find(|a| a.id == agent_id) {
-        return serde_json::to_value(agent).unwrap_or_else(|_| json!({
+    let found = {
+        let items = agents().lock().unwrap();
+        items.iter().find(|a| a.id == agent_id).cloned()
+    };
+    if let Some(agent) = found {
+        let base = serde_json::to_value(&agent).unwrap_or_else(|_| json!({
             "id": agent.id,
             "name": agent.name,
             "engine": agent.engine,
@@ -47,8 +349,9 @@ pub fn agent_profile_json(agent_id: &str) -> Value {
             "placeDisplayNames": agent.place_display_names,
             "disabledPluginIds": agent.disabled_plugin_ids,
         }));
+        return merge_autonomy_into_json(base, agent_id);
     }
-    json!({
+    merge_autonomy_into_json(json!({
         "id": agent_id,
         "name": "Orion",
         "engine": "antigravity",
@@ -68,7 +371,7 @@ pub fn agent_profile_json(agent_id: &str) -> Value {
         "defaultProviderOptions": [],
         "placeDisplayNames": [],
         "disabledPluginIds": []
-    })
+    }), agent_id)
 }
 
 pub fn update_agent(agent_id: &str, name: &str, brief: &str, engine: Option<&str>) -> Value {
@@ -453,9 +756,15 @@ pub fn update_agent_profile(request: Option<Value>) -> Value {
 
         let cloned = agent.clone();
         drop(items);
+        if let Some(req_val) = req {
+            let mut cfg = load_agent_autonomy_config(agent_id);
+            sanitize_autonomy_config_patch(req_val, &mut cfg);
+            let _ = save_agent_autonomy_config(agent_id, &cfg);
+        }
         persist();
         let _ = crate::agent_mind::sync_agent_instructions(&crate::agent_mind::agents_root(), agent_id);
-        return serde_json::to_value(&cloned).unwrap_or_else(|_| agent_profile_json(agent_id));
+        let base = serde_json::to_value(&cloned).unwrap_or_else(|_| agent_profile_json(agent_id));
+        return merge_autonomy_into_json(base, agent_id);
     }
     drop(items);
     agent_profile_json(agent_id)
@@ -1262,5 +1571,36 @@ mod tests {
         let err = run_provider_draft_prompt("grok", "Security auditor")
             .expect_err("unit tests must never spawn live external provider CLIs");
         assert!(err.contains("disabled in unit tests"), "got: {err}");
+    }
+
+    #[test]
+    fn autonomy_config_roundtrips_and_places_sandbox_rejects_outside_paths() {
+        let agent_id = format!("test-autonomy-{}", Uuid::new_v4());
+        let mut cfg = AgentAutonomyConfig::default();
+        cfg.tool_policies.insert("tasks".into(), "deny".into());
+        cfg.tool_policies.insert("shell".into(), "ask".into());
+        cfg.max_turns_per_run = Some(15);
+        cfg.max_duration_secs = Some(600);
+        cfg.failover_engines = vec!["codex".into(), "grok".into()];
+        save_agent_autonomy_config(&agent_id, &cfg).expect("save autonomy config");
+
+        let loaded = load_agent_autonomy_config(&agent_id);
+        assert_eq!(loaded, cfg);
+
+        let temp_root = std::env::temp_dir().join(format!("kite_places_root_{}", Uuid::new_v4()));
+        let outside_root = std::env::temp_dir().join(format!("kite_places_out_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        std::fs::create_dir_all(&outside_root).unwrap();
+        let inside_file = temp_root.join("notes.md");
+        let outside_file = outside_root.join("secret.txt");
+        std::fs::write(&inside_file, "ok").unwrap();
+        std::fs::write(&outside_file, "secret").unwrap();
+
+        let roots = vec![temp_root.clone()];
+        assert!(validate_path_within_authorized_roots(&inside_file, &roots).is_ok());
+        assert!(validate_path_within_authorized_roots(&outside_file, &roots).is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let _ = std::fs::remove_dir_all(&outside_root);
     }
 }

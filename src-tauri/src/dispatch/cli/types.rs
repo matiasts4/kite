@@ -208,6 +208,75 @@ pub enum AgentCommand {
         wait: bool,
         timeout_ms: Option<u64>,
     },
+    Tool(AgentToolCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentToolCommand {
+    TasksList {
+        state: Option<String>,
+        label: Option<String>,
+        limit: usize,
+    },
+    TasksGet {
+        id: String,
+    },
+    TasksCreate {
+        title: String,
+        description: String,
+        state: Option<String>,
+        priority: Option<String>,
+        labels: Vec<String>,
+        odd_path: Option<String>,
+        source_agent: Option<String>,
+        source_thread_id: Option<String>,
+    },
+    TasksUpdate {
+        id: String,
+        title: Option<String>,
+        description: Option<String>,
+        state: Option<String>,
+        priority: Option<String>,
+        labels: Option<Vec<String>>,
+    },
+    TasksMoveState {
+        id: String,
+        state: String,
+    },
+    CtxReadCompact {
+        path: String,
+        mode: String,
+    },
+    CtxSearch {
+        query: String,
+        path: Option<String>,
+        limit: usize,
+    },
+    CtxSharePut {
+        key: String,
+        content: String,
+        scope: Option<String>,
+        scope_id: Option<String>,
+    },
+    CtxShareGet {
+        key: String,
+        scope: Option<String>,
+        scope_id: Option<String>,
+        full: bool,
+    },
+    CtxCcrRetrieve {
+        hash: String,
+        lines: Option<String>,
+        search: Option<String>,
+    },
+    DiffStatus {
+        workspace_id: Option<String>,
+    },
+    DiffFile {
+        path: String,
+        workspace_id: Option<String>,
+        staged: bool,
+    },
 }
 
 

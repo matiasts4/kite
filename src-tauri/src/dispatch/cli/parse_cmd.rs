@@ -636,7 +636,7 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentCommand, (DispatchError,
     }
     let domain = items
         .next()
-        .ok_or_else(|| agent_bad_args("Missing `agent` domain. Expected: thread, memory, routine, teammate."))?;
+        .ok_or_else(|| agent_bad_args("Missing `agent` domain. Expected: thread, memory, routine, teammate, tasks, ctx, diff."))?;
     let action = items
         .next()
         .ok_or_else(|| agent_bad_args(format!("Missing action for `agent {domain}`.")))?;
@@ -1044,6 +1044,265 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentCommand, (DispatchError,
                 wait,
                 timeout_ms,
             })
+        }
+        ("tasks", "list") => {
+            let mut state = None;
+            let mut label = None;
+            let mut limit = 50usize;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--state" => state = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--label" => label = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--limit" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        limit = raw.parse().map_err(|_| agent_bad_args("Invalid `--limit` integer."))?;
+                    }
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent tasks list`."))),
+                }
+            }
+            Ok(AgentCommand::Tool(AgentToolCommand::TasksList { state, label, limit }))
+        }
+        ("tasks", "get") => {
+            let mut id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--id" => id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--approved" => {}
+                    _ if next.starts_with('-') => return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent tasks get`."))),
+                    other if id.is_none() => id = Some(other.to_string()),
+                    other => return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent tasks get`."))),
+                }
+            }
+            let id = id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent tasks get` requires `--id`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::TasksGet { id }))
+        }
+        ("tasks", "create") => {
+            let mut title = None;
+            let mut description = String::new();
+            let mut state = None;
+            let mut priority = None;
+            let mut labels = Vec::new();
+            let mut odd_path = None;
+            let mut source_agent = None;
+            let mut source_thread_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--title" => title = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--description" => description = need_agent_flag(&mut items, flag, inline_val)?,
+                    "--state" => state = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--priority" => priority = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--labels" => {
+                        let csv = need_agent_flag(&mut items, flag, inline_val)?;
+                        labels = csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    }
+                    "--odd-path" => odd_path = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--source-agent" => source_agent = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--source-thread-id" => source_thread_id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent tasks create`."))),
+                }
+            }
+            let title = title.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent tasks create` requires `--title`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::TasksCreate {
+                title,
+                description,
+                state,
+                priority,
+                labels,
+                odd_path,
+                source_agent,
+                source_thread_id,
+            }))
+        }
+        ("tasks", "update") => {
+            let mut id = None;
+            let mut title = None;
+            let mut description = None;
+            let mut state = None;
+            let mut priority = None;
+            let mut labels = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--id" => id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--title" => title = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--description" => description = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--state" => state = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--priority" => priority = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--labels" => {
+                        let csv = need_agent_flag(&mut items, flag, inline_val)?;
+                        labels = Some(csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+                    }
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent tasks update`."))),
+                }
+            }
+            let id = id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent tasks update` requires `--id`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::TasksUpdate {
+                id,
+                title,
+                description,
+                state,
+                priority,
+                labels,
+            }))
+        }
+        ("tasks", "move_state" | "move-state") => {
+            let mut id = None;
+            let mut state = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--id" => id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--state" => state = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent tasks move_state`."))),
+                }
+            }
+            let id = id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent tasks move_state` requires `--id`."))?;
+            let state = state.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent tasks move_state` requires `--state`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::TasksMoveState { id, state }))
+        }
+        ("ctx", "read_compact" | "read-compact") => {
+            let mut path = None;
+            let mut mode = "signatures".to_string();
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--path" => path = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--mode" => mode = need_agent_flag(&mut items, flag, inline_val)?,
+                    "--approved" => {}
+                    _ if next.starts_with('-') => return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent ctx read_compact`."))),
+                    other if path.is_none() => path = Some(other.to_string()),
+                    other => return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent ctx read_compact`."))),
+                }
+            }
+            let path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent ctx read_compact` requires `--path`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::CtxReadCompact { path, mode }))
+        }
+        ("ctx", "search") => {
+            let mut query = None;
+            let mut path = None;
+            let mut limit = 20usize;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--query" | "-q" => query = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--path" => path = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--limit" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        limit = raw.parse().map_err(|_| agent_bad_args("Invalid `--limit` integer."))?;
+                    }
+                    "--approved" => {}
+                    _ if next.starts_with('-') => return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent ctx search`."))),
+                    other if query.is_none() => query = Some(other.to_string()),
+                    other => return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent ctx search`."))),
+                }
+            }
+            let query = query.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent ctx search` requires `--query`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::CtxSearch { query, path, limit }))
+        }
+        ("ctx", "share_put" | "share-put") => {
+            let mut key = None;
+            let mut content = None;
+            let mut scope = None;
+            let mut scope_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--key" => key = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--content" => content = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--scope" => scope = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--scope-id" => scope_id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent ctx share_put`."))),
+                }
+            }
+            let key = key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent ctx share_put` requires `--key`."))?;
+            let content = content.ok_or_else(|| agent_bad_args("`agent ctx share_put` requires `--content`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::CtxSharePut { key, content, scope, scope_id }))
+        }
+        ("ctx", "share_get" | "share-get") => {
+            let mut key = None;
+            let mut scope = None;
+            let mut scope_id = None;
+            let mut full = false;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--key" => key = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--scope" => scope = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--scope-id" => scope_id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--full" => full = true,
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent ctx share_get`."))),
+                }
+            }
+            let key = key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent ctx share_get` requires `--key`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::CtxShareGet { key, scope, scope_id, full }))
+        }
+        ("ctx", "ccr_retrieve" | "ccr-retrieve") => {
+            let mut hash = None;
+            let mut lines = None;
+            let mut search = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--hash" => hash = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--lines" => lines = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--search" => search = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent ctx ccr_retrieve`."))),
+                }
+            }
+            let hash = hash.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent ctx ccr_retrieve` requires `--hash`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::CtxCcrRetrieve { hash, lines, search }))
+        }
+        ("diff", "status") => {
+            let mut workspace_id = None;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--workspace-id" | "--workspace" => workspace_id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--approved" => {}
+                    other => return Err(agent_bad_args(format!("Unknown argument `{other}` for `agent diff status`."))),
+                }
+            }
+            Ok(AgentCommand::Tool(AgentToolCommand::DiffStatus { workspace_id }))
+        }
+        ("diff", "file_diff" | "file-diff") => {
+            let mut path = None;
+            let mut workspace_id = None;
+            let mut staged = false;
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--path" => path = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--workspace-id" | "--workspace" => workspace_id = Some(need_agent_flag(&mut items, flag, inline_val)?),
+                    "--staged" => staged = true,
+                    "--approved" => {}
+                    _ if next.starts_with('-') => return Err(agent_bad_args(format!("Unknown flag `{next}` for `agent diff file_diff`."))),
+                    other if path.is_none() => path = Some(other.to_string()),
+                    other => return Err(agent_bad_args(format!("Unexpected argument `{other}` for `agent diff file_diff`."))),
+                }
+            }
+            let path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent diff file_diff` requires `--path`."))?;
+            Ok(AgentCommand::Tool(AgentToolCommand::DiffFile { path, workspace_id, staged }))
         }
         _ => Err(agent_bad_args(format!(
             "Unknown agent command `agent {domain} {action}`."

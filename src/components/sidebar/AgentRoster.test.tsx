@@ -63,4 +63,28 @@ describe('AgentRoster live activity indicators', () => {
 
     expect(screen.getByText('2')).toBeInTheDocument();
   });
+
+  it('renders minimal AgentStatusIndicator without clobbering avatar state when autonomous sources run', () => {
+    const agents = [makeAgent({ id: 'agent-auto', name: 'AutoPilot Specialist' })];
+
+    render(
+      <AgentRoster
+        agents={agents}
+        selectedAgentId={null}
+        onSelectAgent={vi.fn()}
+        onNewAgent={vi.fn()}
+        agentActivity={{
+          'agent-auto': {
+            runningCount: 1,
+            needsYou: false,
+            atUnixMs: 4000,
+            runningSources: ['autopilot', 'playbook'],
+          },
+        }}
+      />
+    );
+
+    expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-status', 'running');
+    expect(screen.getByText('1')).toBeInTheDocument();
+  });
 });

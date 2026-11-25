@@ -1,5 +1,6 @@
 import React from 'react';
 import { AgentAvatar } from '../AgentAvatar';
+import { AgentStatusIndicator } from '../ui/AgentStatusIndicator';
 import { invokeCommand } from '../../lib/ipc';
 import type { AgentProfile } from '../../types';
 import type { MenuItem, ContextMenuState, SidebarProps } from './types';
@@ -31,7 +32,7 @@ export interface AgentRosterProps {
   onMoveAgent?: (id: string, toIndex: number) => void;
   onDeleteAgent?: (id: string) => void;
   onInstallAgent?: (engine: string) => void;
-  agentActivity?: Record<string, { runningCount?: number; needsYou?: boolean; atUnixMs?: number; line?: string }>;
+  agentActivity?: Record<string, { runningCount?: number; needsYou?: boolean; atUnixMs?: number; line?: string; runningSources?: string[] }>;
   railActivity?: NonNullable<SidebarProps['agentActivity']>;
   availability?: { hasProbed?: boolean } & Record<string, boolean>;
   probedAvailability?: SidebarProps['availability'];
@@ -271,7 +272,18 @@ export const AgentRoster: React.FC<AgentRosterProps> = ({
                       <span className="entity-row__line">
                         <strong>{agent.name}</strong>
                         {runningCount > 0 ? (
-                          <span className="entity-row__count">{runningCount}</span>
+                          <span
+                            className="entity-row__count"
+                            style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                            title={
+                              (act as { runningSources?: string[] } | undefined)?.runningSources?.length
+                                ? `Active: ${(act as { runningSources?: string[] }).runningSources!.join(', ')}`
+                                : 'Agent working'
+                            }
+                          >
+                            <AgentStatusIndicator status="running" size={10} />
+                            <span>{runningCount}</span>
+                          </span>
                         ) : needsYou ? (
                           <span className="entity-row__needs-you">
                             <i aria-hidden="true" />
@@ -353,7 +365,18 @@ export const AgentRoster: React.FC<AgentRosterProps> = ({
                     <span className="entity-row__line">
                       <strong>{agent.name}</strong>
                       {runningCount > 0 ? (
-                        <span className="entity-row__count">{runningCount}</span>
+                        <span
+                          className="entity-row__count"
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                          title={
+                            (act as { runningSources?: string[] } | undefined)?.runningSources?.length
+                              ? `Active: ${(act as { runningSources?: string[] }).runningSources!.join(', ')}`
+                              : 'Agent working'
+                          }
+                        >
+                          <AgentStatusIndicator status="running" size={10} />
+                          <span>{runningCount}</span>
+                        </span>
                       ) : needsYou ? (
                         <span className="entity-row__needs-you">
                           <i aria-hidden="true" />

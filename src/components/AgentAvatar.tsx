@@ -171,6 +171,7 @@ export const AgentAvatar: React.FC<AgentAvatarProps> = ({
       aria-hidden={label === undefined}
       aria-label={label}
       className="agent-avatar"
+      data-state={state}
       height={size}
       role={label === undefined ? 'presentation' : 'img'}
       viewBox="0 0 100 100"

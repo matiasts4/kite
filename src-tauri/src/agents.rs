@@ -1207,6 +1207,9 @@ pub fn list_agent_rail_activity_sync(_request: Option<Value>) -> Vec<Value> {
         }
         rows
     };
+    let active_autopilot = crate::local_autopilot::active_autopilot_agent_ids();
+    let active_routines = crate::routines::active_routine_agent_ids();
+    let active_playbooks = crate::agent_playbooks::active_playbook_agent_ids();
 
     agent_rows
         .into_iter()
@@ -1219,10 +1222,14 @@ pub fn list_agent_rail_activity_sync(_request: Option<Value>) -> Vec<Value> {
             let mut line = None;
             let mut at_unix_ms = None;
             let mut needs_you = false;
+            let mut running_sources: Vec<&'static str> = Vec::new();
             for thread in &mine {
                 let thread_id = thread.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some((_, run_line, started)) = running.iter().find(|(id, _, _)| id == thread_id) {
                     running_count += 1;
+                    if !running_sources.contains(&"chat") {
+                        running_sources.push("chat");
+                    }
                     if line.is_none() {
                         line = run_line.clone();
                     }
@@ -1235,15 +1242,82 @@ pub fn list_agent_rail_activity_sync(_request: Option<Value>) -> Vec<Value> {
                     at_unix_ms = Some(at_unix_ms.map(|current: i64| current.max(updated)).unwrap_or(updated));
                 }
             }
+            if active_autopilot.contains(&agent.id) {
+                running_sources.push("autopilot");
+                running_count = running_count.max(1);
+                if line.is_none() {
+                    line = Some("AutoPilot loop running".to_string());
+                }
+            }
+            if active_routines.contains(&agent.id) {
+                running_sources.push("routine");
+                running_count = running_count.max(1);
+                if line.is_none() {
+                    line = Some("Routine active".to_string());
+                }
+            }
+            if active_playbooks.contains(&agent.id) {
+                running_sources.push("playbook");
+                running_count = running_count.max(1);
+                if line.is_none() {
+                    line = Some("Playbook stage running".to_string());
+                }
+            }
             json!({
                 "agentId": agent.id,
                 "line": line,
                 "atUnixMs": at_unix_ms,
                 "needsYou": needs_you,
-                "runningCount": running_count
+                "runningCount": running_count,
+                "runningSources": running_sources
             })
         })
         .collect()
+}
+
+#[tauri::command]
+pub fn get_agent_autonomy_summary(request: Option<Value>) -> Value {
+    let req = request_body(&request);
+    let agent_id = req
+        .and_then(|r| r.get("agentId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let (recent_routine_runs, audit_entries) = db_connection()
+        .lock()
+        .ok()
+        .map(|conn| {
+            let runs = crate::routines::list_routine_runs_in_conn(&conn, None, agent_id, 10)
+                .unwrap_or_default();
+            let audits = list_agent_audit_log_in_conn(&conn, agent_id, None, None, 50)
+                .unwrap_or_default();
+            (runs, audits)
+        })
+        .unwrap_or_default();
+
+    let allowed_count = audit_entries.iter().filter(|a| a.verdict == "allowed").count();
+    let asked_count = audit_entries.iter().filter(|a| a.verdict == "asked").count();
+    let denied_count = audit_entries.iter().filter(|a| a.verdict == "denied").count();
+
+    let playbooks = crate::agent_playbooks::list_agent_playbooks();
+    let playbook_runs = crate::agent_playbooks::list_playbook_runs(None);
+
+    json!({
+        "agentId": agent_id,
+        "activeAutopilotCount": crate::local_autopilot::active_autopilot_agent_ids().len(),
+        "activeRoutineCount": crate::routines::active_routine_agent_ids().len(),
+        "activePlaybookAgentCount": crate::agent_playbooks::active_playbook_agent_ids().len(),
+        "recentRoutineRuns": recent_routine_runs,
+        "auditCounts": {
+            "allowed": allowed_count,
+            "asked": asked_count,
+            "denied": denied_count,
+            "total": audit_entries.len(),
+        },
+        "playbooksCount": playbooks.get("playbooks").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
+        "recentPlaybookRuns": playbook_runs.get("runs").and_then(Value::as_array).map(|a| a.iter().take(5).cloned().collect::<Vec<_>>()).unwrap_or_default(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2303,6 +2377,14 @@ mod tests {
 
         let templates = list_curated_agent_templates();
         assert_eq!(templates["templates"].as_array().unwrap().len(), 5);
+
+        let summary = get_agent_autonomy_summary(None);
+        assert!(summary["auditCounts"].is_object());
+        assert!(summary["recentRoutineRuns"].is_array());
+        let rail = list_agent_rail_activity_sync(None);
+        if let Some(first) = rail.first() {
+            assert!(first["runningSources"].is_array());
+        }
 
         let _ = std::fs::remove_dir_all(&mind_root);
     }

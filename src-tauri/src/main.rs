@@ -551,6 +551,7 @@ fn main() {
             export_agent_bundle,
             import_agent_bundle,
             list_curated_agent_templates,
+            get_agent_autonomy_summary,
             list_agent_starters,
             list_workspace_branches,
             switch_workspace_branch,

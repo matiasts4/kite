@@ -1,0 +1,806 @@
+/* Core UI Primitives Kit — mapped 1:1 to docs/visual-language.md & AGENTS.md §1-§2.
+   Uses semantic CSS custom properties only (no hardcoded hex values, no arbitrary radii/heights). */
+
+/* -------------------------------------------------------------------------- */
+/* Button                                                                     */
+/* -------------------------------------------------------------------------- */
+
+.kite-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-family: inherit;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  border-radius: var(--control-radius, var(--vl-radius-md, 8px));
+  border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  cursor: pointer;
+  user-select: none;
+  text-decoration: none;
+  transition:
+    transform 140ms cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    opacity 140ms ease;
+}
+
+.kite-btn:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+  outline-offset: 2px;
+}
+
+.kite-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.kite-btn:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+/* Sizes */
+.kite-btn--sm {
+  height: var(--vl-control-sm, 26px);
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.kite-btn--md {
+  height: var(--vl-control-md, 32px);
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.kite-btn--lg {
+  height: var(--vl-control-lg, 38px);
+  padding: 0 15px;
+  font-size: 13px;
+}
+
+.kite-btn--icon.kite-btn--sm {
+  width: var(--vl-control-sm, 26px);
+  padding: 0;
+}
+
+.kite-btn--icon.kite-btn--md {
+  width: var(--vl-control-md, 32px);
+  padding: 0;
+}
+
+.kite-btn--icon.kite-btn--lg {
+  width: var(--vl-control-lg, 38px);
+  padding: 0;
+}
+
+/* Variants */
+.kite-btn--primary {
+  background: linear-gradient(
+    180deg,
+    var(--vl-primary-top, rgb(26, 32, 41)),
+    var(--vl-primary-bottom, rgb(11, 15, 20))
+  );
+  color: var(--vl-primary-ink, var(--text-primary, rgb(240, 246, 252)));
+  border-color: var(--vl-primary-border, var(--vl-stroke-strong, rgba(255, 255, 255, 0.22)));
+  box-shadow:
+    var(--vl-inset, inset 0 1px 0 rgba(255, 255, 255, 0.06)),
+    0 2px 6px -2px rgba(0, 0, 0, 0.55);
+}
+
+.kite-btn--primary:not(:disabled):hover {
+  background: linear-gradient(
+    180deg,
+    var(--vl-primary-top-hover, rgb(34, 42, 52)),
+    var(--vl-primary-bottom-hover, rgb(17, 22, 29))
+  );
+  border-color: var(--vl-primary-border-hover, var(--vl-stroke-strong, rgba(255, 255, 255, 0.32)));
+  transform: translateY(-1px);
+}
+
+.kite-btn--secondary {
+  background: var(--vl-surface-raised, rgb(22, 27, 34));
+  color: var(--text-primary, rgb(240, 246, 252));
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.22));
+  box-shadow: var(--vl-inset, inset 0 1px 0 rgba(255, 255, 255, 0.06));
+}
+
+.kite-btn--secondary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--vl-surface-raised, rgb(22, 27, 34)) 86%, var(--text-primary, rgb(240, 246, 252)) 14%);
+  transform: translateY(-1px);
+}
+
+.kite-btn--ghost {
+  background: transparent;
+  color: var(--text-primary, rgb(240, 246, 252));
+  border-color: transparent;
+}
+
+.kite-btn--ghost:not(:disabled):hover {
+  background: color-mix(in srgb, var(--text-primary, rgb(255, 255, 255)) 8%, transparent);
+  border-color: var(--vl-stroke, rgba(255, 255, 255, 0.12));
+}
+
+.kite-btn--danger {
+  background: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 12%, transparent);
+  color: var(--danger, rgb(248, 81, 73));
+  border-color: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 42%, transparent);
+}
+
+.kite-btn--danger:not(:disabled):hover {
+  background: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 20%, transparent);
+  border-color: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 65%, transparent);
+  transform: translateY(-1px);
+}
+
+.kite-btn__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.kite-btn__spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--pill-radius, 9999px);
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  animation: kite-spin 650ms linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes kite-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Field (InputField, SearchField, TextareaField, FieldLabel, FieldError)     */
+/* -------------------------------------------------------------------------- */
+
+.kite-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kite-field__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary, rgba(240, 246, 252, 0.78));
+  line-height: 1.3;
+}
+
+.kite-field__required {
+  color: var(--danger, rgb(248, 81, 73));
+}
+
+.kite-field__control {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  background: var(--vl-surface-canvas, rgb(11, 15, 20));
+  border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--control-radius, var(--vl-radius-md, 8px));
+  box-shadow: var(--vl-inset-field, inset 0 1px 2px rgba(0, 0, 0, 0.38));
+  padding: 0 10px;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.kite-field__control--sm {
+  height: var(--vl-control-sm, 26px);
+  padding: 0 8px;
+}
+
+.kite-field__control--md {
+  height: var(--vl-control-md, 32px);
+}
+
+.kite-field__control--lg {
+  height: var(--vl-control-lg, 38px);
+  padding: 0 12px;
+}
+
+.kite-field__control--textarea {
+  height: auto;
+  min-height: 76px;
+  padding: 8px 10px;
+  align-items: stretch;
+}
+
+.kite-field__control:hover:not(.kite-field__control--disabled) {
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.22));
+}
+
+.kite-field__control:focus-within:not(.kite-field__control--disabled) {
+  border-color: var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+  box-shadow:
+    var(--vl-inset-field, inset 0 1px 2px rgba(0, 0, 0, 0.38)),
+    0 0 0 2px color-mix(in srgb, var(--vl-focus, var(--accent, rgb(92, 143, 255))) 28%, transparent);
+}
+
+.kite-field__control--error {
+  border-color: var(--danger, rgb(248, 81, 73));
+}
+
+.kite-field__control--error:focus-within {
+  border-color: var(--danger, rgb(248, 81, 73));
+  box-shadow:
+    var(--vl-inset-field, inset 0 1px 2px rgba(0, 0, 0, 0.38)),
+    0 0 0 2px color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 28%, transparent);
+}
+
+.kite-field__control--disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.kite-field__input,
+.kite-field__textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text-primary, rgb(240, 246, 252));
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.kite-field__input::placeholder,
+.kite-field__textarea::placeholder {
+  color: var(--text-muted, var(--text-tertiary, rgba(240, 246, 252, 0.45)));
+}
+
+.kite-field__input:disabled,
+.kite-field__textarea:disabled {
+  cursor: not-allowed;
+}
+
+.kite-field__textarea {
+  resize: vertical;
+  min-height: 58px;
+}
+
+.kite-field__addon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted, var(--text-tertiary, rgba(240, 246, 252, 0.55)));
+  flex-shrink: 0;
+}
+
+.kite-field__kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 5px;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--text-muted, rgba(240, 246, 252, 0.65));
+  background: var(--vl-surface-raised, rgb(22, 27, 34));
+  border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--vl-radius-xs, 4px);
+  flex-shrink: 0;
+}
+
+.kite-field__clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--vl-radius-xs, 4px);
+  background: transparent;
+  color: var(--text-muted, rgba(240, 246, 252, 0.65));
+  cursor: pointer;
+}
+
+.kite-field__clear:hover {
+  background: color-mix(in srgb, var(--text-primary, rgb(255, 255, 255)) 10%, transparent);
+  color: var(--text-primary, rgb(240, 246, 252));
+}
+
+.kite-field__clear:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+  outline-offset: 1px;
+}
+
+.kite-field__hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted, var(--text-tertiary, rgba(240, 246, 252, 0.58)));
+}
+
+.kite-field__error {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--danger, rgb(248, 81, 73));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Card                                                                       */
+/* -------------------------------------------------------------------------- */
+
+.kite-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--vl-surface-raised, rgb(22, 27, 34));
+  border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--card-radius, var(--vl-radius-lg, 12px));
+  box-shadow: var(--vl-inset, inset 0 1px 0 rgba(255, 255, 255, 0.06));
+  color: var(--text-primary, rgb(240, 246, 252));
+  overflow: hidden;
+  transition:
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.kite-card--pad-none {
+  padding: 0;
+}
+
+.kite-card--pad-sm {
+  padding: 12px;
+  gap: 8px;
+}
+
+.kite-card--pad-md {
+  padding: 16px;
+  gap: 12px;
+}
+
+.kite-card--interactive {
+  cursor: pointer;
+}
+
+.kite-card--interactive:hover {
+  transform: translateY(-2px);
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.22));
+  box-shadow:
+    var(--vl-inset, inset 0 1px 0 rgba(255, 255, 255, 0.06)),
+    var(--vl-shadow-md, var(--vl-shadow-card, 0 14px 28px -18px rgba(0, 0, 0, 0.8)));
+}
+
+.kite-card--interactive:active {
+  transform: scale(0.985);
+}
+
+.kite-card--interactive:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+  outline-offset: 2px;
+}
+
+.kite-card--selected {
+  border-color: var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+  box-shadow:
+    var(--vl-inset, inset 0 1px 0 rgba(255, 255, 255, 0.06)),
+    0 0 0 1px var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+}
+
+.kite-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kite-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kite-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Modal                                                                      */
+/* -------------------------------------------------------------------------- */
+
+.kite-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--glass-modal-scrim, rgba(0, 0, 0, 0.72));
+  backdrop-filter: blur(6px);
+}
+
+.kite-modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: calc(100vh - 32px);
+  background: var(--vl-surface-overlay, rgb(28, 33, 40));
+  border: 1px solid var(--vl-stroke-strong, rgba(255, 255, 255, 0.22));
+  border-radius: var(--dialog-radius, var(--vl-radius-xl, 14px));
+  box-shadow:
+    var(--vl-inset, inset 0 1px 0 rgba(255, 255, 255, 0.06)),
+    var(--vl-shadow-lg, var(--vl-shadow-overlay, 0 18px 40px -24px rgba(0, 0, 0, 0.8)));
+  color: var(--text-primary, rgb(240, 246, 252));
+  overflow: hidden;
+}
+
+.kite-modal--sm {
+  max-width: 380px;
+}
+
+.kite-modal--md {
+  max-width: 520px;
+}
+
+.kite-modal--lg {
+  max-width: 680px;
+}
+
+.kite-modal__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+}
+
+.kite-modal__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kite-modal__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-primary, rgb(240, 246, 252));
+}
+
+.kite-modal__description {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted, var(--text-secondary, rgba(240, 246, 252, 0.68)));
+}
+
+.kite-modal__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  border-radius: var(--control-radius, var(--vl-radius-md, 8px));
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted, rgba(240, 246, 252, 0.68));
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.kite-modal__close:hover {
+  background: color-mix(in srgb, var(--text-primary, rgb(255, 255, 255)) 10%, transparent);
+  color: var(--text-primary, rgb(240, 246, 252));
+}
+
+.kite-modal__close:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+  outline-offset: 2px;
+}
+
+.kite-modal__body {
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kite-modal__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tabs                                                                       */
+/* -------------------------------------------------------------------------- */
+
+.kite-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.kite-tabs__list {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--vl-surface-canvas, rgb(11, 15, 20));
+  border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--control-radius, var(--vl-radius-md, 8px));
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.kite-tabs__tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--control-radius, 8px) - 1px);
+  background: transparent;
+  color: var(--text-muted, var(--text-secondary, rgba(240, 246, 252, 0.65)));
+  font-family: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease,
+    border-color 140ms ease;
+}
+
+.kite-tabs__tab--sm {
+  height: var(--vl-control-sm, 26px);
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.kite-tabs__tab--md {
+  height: var(--vl-control-md, 32px);
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.kite-tabs__tab:hover:not(:disabled) {
+  color: var(--text-primary, rgb(240, 246, 252));
+}
+
+.kite-tabs__tab[aria-selected='true'] {
+  background: var(--vl-surface-raised, rgb(22, 27, 34));
+  color: var(--text-primary, rgb(240, 246, 252));
+  border-color: var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  box-shadow: var(--vl-inset, inset 0 1px 0 rgba(255, 255, 255, 0.06));
+}
+
+.kite-tabs__tab:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.kite-tabs__tab:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent, rgb(92, 143, 255)));
+  outline-offset: 2px;
+}
+
+.kite-tabs__panel {
+  min-width: 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Badge                                                                      */
+/* -------------------------------------------------------------------------- */
+
+.kite-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  color: var(--text-primary, rgb(240, 246, 252));
+  background: var(--vl-surface-raised, rgb(22, 27, 34));
+}
+
+.kite-badge--chip {
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+.kite-badge--pill {
+  border-radius: var(--pill-radius, 9999px);
+}
+
+.kite-badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--pill-radius, 9999px);
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.kite-badge--neutral {
+  color: var(--text-secondary, rgba(240, 246, 252, 0.8));
+  background: var(--vl-surface-raised, rgb(22, 27, 34));
+  border-color: var(--vl-stroke, rgba(255, 255, 255, 0.12));
+}
+
+.kite-badge--accent {
+  color: var(--accent, rgb(92, 143, 255));
+  background: color-mix(in srgb, var(--accent, rgb(92, 143, 255)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent, rgb(92, 143, 255)) 36%, transparent);
+}
+
+.kite-badge--success {
+  color: var(--success, rgb(63, 185, 80));
+  background: color-mix(in srgb, var(--success, rgb(63, 185, 80)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--success, rgb(63, 185, 80)) 36%, transparent);
+}
+
+.kite-badge--warning {
+  color: var(--warning, rgb(210, 153, 34));
+  background: color-mix(in srgb, var(--warning, rgb(210, 153, 34)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--warning, rgb(210, 153, 34)) 36%, transparent);
+}
+
+.kite-badge--danger {
+  color: var(--danger, rgb(248, 81, 73));
+  background: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 36%, transparent);
+}
+
+/* -------------------------------------------------------------------------- */
+/* EmptyState                                                                 */
+/* -------------------------------------------------------------------------- */
+
+.kite-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  padding: 24px 16px;
+  background: var(--vl-surface-canvas, rgb(11, 15, 20));
+  border: 1px dashed var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  border-radius: var(--card-radius, var(--vl-radius-lg, 12px));
+}
+
+.kite-empty--error {
+  border-color: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 45%, transparent);
+  background: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 6%, var(--vl-surface-canvas, rgb(11, 15, 20)));
+}
+
+.kite-empty__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--control-radius, var(--vl-radius-md, 8px));
+  background: var(--vl-surface-raised, rgb(22, 27, 34));
+  border: 1px solid var(--vl-stroke, rgba(255, 255, 255, 0.12));
+  color: var(--text-muted, rgba(240, 246, 252, 0.7));
+}
+
+.kite-empty--error .kite-empty__icon {
+  color: var(--danger, rgb(248, 81, 73));
+  border-color: color-mix(in srgb, var(--danger, rgb(248, 81, 73)) 38%, transparent);
+}
+
+.kite-empty__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, rgb(240, 246, 252));
+}
+
+.kite-empty__description {
+  margin: 0;
+  max-width: 360px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted, var(--text-secondary, rgba(240, 246, 252, 0.65)));
+}
+
+.kite-empty__action {
+  margin-top: 4px;
+}
+
+/* -------------------------------------------------------------------------- */
+/* UiKitPreview layout                                                        */
+/* -------------------------------------------------------------------------- */
+
+.kite-uikit {
+  min-height: 100vh;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 24px;
+  background: var(--vl-surface-canvas, rgb(11, 15, 20));
+  color: var(--text-primary, rgb(240, 246, 252));
+  overflow-x: hidden;
+}
+
+.kite-uikit__inner {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.kite-uikit__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kite-uikit__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.kite-uikit__subtitle {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted, rgba(240, 246, 252, 0.68));
+}
+
+.kite-uikit__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  min-width: 0;
+}
+
+.kite-uikit__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kite-uikit__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}

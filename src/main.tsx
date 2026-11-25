@@ -18,6 +18,10 @@ if (import.meta.env.DEV && params.has('animate')) {
   );
 } else if (import.meta.env.DEV && params.has('motion')) {
   void import('./motion/MotionLab').then(({ renderMotionLab }) => renderMotionLab(root));
+} else if (import.meta.env.DEV && params.has('ui-kit')) {
+  void import('./components/ui/UiKitPreview').then(({ renderUiKitPreview }) =>
+    renderUiKitPreview(root)
+  );
 } else {
   ReactDOM.createRoot(root).render(
     <MotionProvider>

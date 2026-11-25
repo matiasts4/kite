@@ -15,7 +15,12 @@ import {
 import {
   transcribeWithGrokCloud,
   resetSttEndpointCacheForTests,
+  buildGrokSttWsUrl,
+  float32ToInt16Pcm,
+  openGrokStreamingSttSession,
+  type WebSocketLike,
 } from './transcriptionProviders';
+import { isSpanishOpenClause, SpeculativePartialPreCapture } from './speechPartial';
 import { voiceSessionStore } from './voiceSessionStore';
 
 describe('SETH Voice Mode — Phase 1 (Barge-in, Adaptive VAD, Turn Arbitrator, Streaming Prosody, STT Cache)', () => {
@@ -131,6 +136,122 @@ describe('SETH Voice Mode — Phase 1 (Barge-in, Adaptive VAD, Turn Arbitrator, 
     expect(computeAdaptiveEndpointMs('dile a Nova eh', 1000)).toBeGreaterThanOrEqual(1800);
   });
 
+  it('S2/T2: isSpanishOpenClause detects open Spanish connectors, hesitations, and trailing punctuation', () => {
+    const openCases = [
+      'bueno eh',
+      'necesito em',
+      'revisa este',
+      'abre un hilo para',
+      'lanza un agente con',
+      'me gustaría que',
+      'el archivo de',
+      'busca en',
+      'hazlo por',
+      'algo como',
+      'claude o',
+      'terminales y',
+      'revisa e',
+      'ni',
+      'dime si',
+      'quiero hacerlo porque',
+      'avísame cuando',
+      'mira donde',
+      'intenta aunque',
+      'primero revisa,',
+      'espera un segundo...',
+      'déjame pensar…',
+    ];
+    for (const phrase of openCases) {
+      expect(isSpanishOpenClause(phrase), `expected open clause for "${phrase}"`).toBe(true);
+      const endpointMs = computeAdaptiveEndpointMs(phrase, 2400);
+      expect(endpointMs).toBeGreaterThanOrEqual(1850);
+      expect(endpointMs).toBeLessThanOrEqual(2100);
+    }
+
+    expect(isSpanishOpenClause('Abre un hilo con Claude.')).toBe(false);
+    expect(isSpanishOpenClause('cierra Orion')).toBe(false);
+    expect(computeAdaptiveEndpointMs('quiero revisar la configuración del servidor', 1800)).toBeGreaterThanOrEqual(950);
+  });
+
+  it('T2: openGrokStreamingSttSession streams PCM16 frames, emits partials, sends audio.done, and times out handshake at 1200ms', async () => {
+    expect(buildGrokSttWsUrl('https://api.x.ai/v1', 'es-ES', 400)).toBe(
+      'wss://api.x.ai/v1/stt?sample_rate=16000&encoding=pcm&interim_results=true&language=es&endpointing=400'
+    );
+
+    const pcm16 = float32ToInt16Pcm(new Float32Array([-1, 0, 0.5, 1]), 16000, 16000);
+    expect(Array.from(pcm16)).toEqual([-32768, 0, 16384, 32767]);
+
+    const sentFrames: Array<string | ArrayBuffer | ArrayBufferView> = [];
+    let activeMockSocket: WebSocketLike | null = null;
+    class MockWebSocket implements WebSocketLike {
+      readyState = 0;
+      binaryType = 'arraybuffer';
+      onopen: ((ev: any) => void) | null = null;
+      onmessage: ((ev: any) => void) | null = null;
+      onerror: ((ev: any) => void) | null = null;
+      onclose: ((ev: any) => void) | null = null;
+      constructor(public url: string, public protocols?: string | string[]) {
+        activeMockSocket = this;
+      }
+      send(data: string | ArrayBuffer | ArrayBufferView) {
+        sentFrames.push(data);
+      }
+      close() {
+        this.readyState = 3;
+      }
+    }
+
+    const partials: string[] = [];
+    const session = openGrokStreamingSttSession({
+      apiKey: 'xai-test-key',
+      baseUrl: 'https://api.x.ai/v1',
+      language: 'es-ES',
+      WebSocketImpl: MockWebSocket,
+      onPartial: (p) => partials.push(p),
+    });
+    expect(session).not.toBeNull();
+    expect(session!.url).toContain('wss://api.x.ai/v1/stt?');
+
+    // Queue pre-roll before socket opens, then open socket
+    session!.sendPcm16(new Int16Array([100, 200]));
+    activeMockSocket!.readyState = 1;
+    activeMockSocket!.onopen?.({});
+    expect(await session!.waitUntilReady()).toBe(true);
+    expect(sentFrames).toHaveLength(1);
+
+    // Send live frame + emit transcript.created, transcript.partial, is_final, Done
+    session!.sendPcm16(new Int16Array([300, 400]));
+    expect(sentFrames).toHaveLength(2);
+
+    activeMockSocket!.onmessage?.({ data: JSON.stringify({ type: 'transcript.created', transcript: 'oye' }) });
+    activeMockSocket!.onmessage?.({ data: JSON.stringify({ type: 'transcript.partial', transcript: 'oye argos' }) });
+    activeMockSocket!.onmessage?.({ data: JSON.stringify({ type: 'transcript.partial', transcript: 'oye argos abre', is_final: true }) });
+    expect(partials).toEqual(['oye', 'oye argos', 'oye argos abre']);
+
+    const finishPromise = session!.finish();
+    expect(sentFrames[sentFrames.length - 1]).toBe(JSON.stringify({ type: 'audio.done' }));
+    activeMockSocket!.onmessage?.({ data: JSON.stringify({ type: 'Done', transcript: 'un hilo' }) });
+    await expect(finishPromise).resolves.toBe('oye argos abre un hilo');
+
+    // Handshake timeout (1200ms) fails cleanly without blocking
+    vi.useFakeTimers();
+    try {
+      const errors: string[] = [];
+      const slowSession = openGrokStreamingSttSession({
+        apiKey: 'xai-test-key',
+        WebSocketImpl: MockWebSocket,
+        onError: (err) => errors.push(err),
+      });
+      await vi.advanceTimersByTimeAsync(1250);
+      expect(await slowSession!.waitUntilReady()).toBe(false);
+      expect(slowSession!.hasFailed()).toBe(true);
+      expect(errors[0]).toMatch(/1200ms/);
+      await expect(slowSession!.finish()).resolves.toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('S2: VoiceTurnArbitrator queues proactive notices while user or SETH has the floor and flushes cleanly', () => {
     const arbitrator = new VoiceTurnArbitrator();
     const spoken: string[] = [];
@@ -232,5 +353,39 @@ describe('SETH Voice Mode — Phase 1 (Barge-in, Adaptive VAD, Turn Arbitrator, 
     expect(spoken).not.toMatch(/Seguimos conversando por ac[aá]/i);
     expect(spoken).toContain('zedVoice.ts');
     expect(spoken).toContain('docs.kite.dev');
+  });
+
+  it('S3/T3: SpeculativePartialPreCapture fires after >250ms stable partial and cancels when speech changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const onStable = vi.fn(async (partial: string) => ({
+        workspaceId: 'ws-spec',
+        workspaceName: `spec:${partial}`,
+      }));
+      const spec = new SpeculativePartialPreCapture({
+        stabilityMs: 250,
+        onStable,
+      });
+
+      spec.update('revisa el');
+      await vi.advanceTimersByTimeAsync(150);
+      expect(onStable).not.toHaveBeenCalled();
+
+      // Speech changed before 250ms -> old timer cancelled
+      spec.update('revisa el archivo auth');
+      await vi.advanceTimersByTimeAsync(200);
+      expect(onStable).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(70);
+      expect(onStable).toHaveBeenCalledTimes(1);
+      expect(onStable).toHaveBeenCalledWith('revisa el archivo auth');
+
+      const consumed = spec.consume('revisa el archivo auth por favor');
+      expect(consumed?.workspaceId).toBe('ws-spec');
+      // Second consume returns null (consumed once)
+      expect(spec.consume('revisa el archivo auth por favor')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

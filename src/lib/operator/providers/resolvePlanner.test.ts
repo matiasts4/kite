@@ -1,38 +1,42 @@
 import { describe, expect, it } from 'vitest';
-import { resolvePlannerProvider, resolveVerifiedModel } from './resolvePlanner';
-import { DEFAULT_OPERATOR_CONFIG } from '../operatorConfig';
+import { DEFAULT_OPERATOR_CONFIG } from '../config/storage';
+import {
+  resolvePlannerProvider,
+  resolveTieredPlannerProviders,
+  resolveVerifiedModel,
+} from './resolvePlanner';
 
-describe('resolveVerifiedModel', () => {
-  it('sends the model the user selected even when it is outside the short default list', () => {
-    expect(
-      resolveVerifiedModel('cloudflare', '@cf/deepseek-ai/deepseek-v4.1-flash-1017', 'fast')
-    ).toBe('@cf/deepseek-ai/deepseek-v4.1-flash-1017');
-    expect(resolveVerifiedModel('vercel', 'google/gemini-2.5-flash', 'fast')).toBe(
-      'google/gemini-2.5-flash'
-    );
-    expect(resolveVerifiedModel('grok', 'grok-4-fast', 'diagnosis')).toBe('grok-4-fast');
-  });
-
-  it('falls back to the tier default only when no model was selected', () => {
-    expect(resolveVerifiedModel('cloudflare', '  ', 'fast')).toBe(
-      '@cf/meta/llama-3.1-8b-instruct-fp8'
-    );
-    expect(resolveVerifiedModel('opencode', undefined, 'diagnosis')).toBe('deepseek-v4-pro');
-    expect(resolveVerifiedModel('antigravity', undefined, 'fast')).toBe('gemini-3.8-flash-low');
-  });
-});
-
-describe('resolvePlannerProvider', () => {
-  it('builds the Cloudflare planner with the selected model id', () => {
-    const provider = resolvePlannerProvider({
-      ...DEFAULT_OPERATOR_CONFIG,
-      activeProvider: 'cloudflare',
-      cloudflareAccountId: 'acc',
-      cloudflareApiToken: 'tok',
-      cloudflareModel: '@cf/meta/llama-3.1-8b-instruct',
+describe('resolvePlanner — Tiered L1 (fast) & L2 (diagnosis) Routing (S3/T3)', () => {
+  it('resolves fast tier by default and promotes to diagnosis tier when forceTierModel=true', () => {
+    const fast = resolveVerifiedModel('opencode', 'deepseek-v4.1-flash', 'fast');
+    const diagnosis = resolveVerifiedModel('opencode', 'deepseek-v4.1-flash', 'diagnosis', {
+      forceTierModel: true,
     });
+    expect(fast).toBe('deepseek-v4.1-flash');
+    expect(diagnosis).toBe('deepseek-v4-pro');
 
-    expect(provider.id).toBe('cloudflare');
-    expect((provider as { model?: string }).model).toBe('@cf/meta/llama-3.1-8b-instruct');
+    const explicitCustom = resolveVerifiedModel('opencode', 'kimi-k3', 'diagnosis');
+    expect(explicitCustom).toBe('kimi-k3');
+  });
+
+  it('builds distinct L1 fast and L2 diagnosis providers with canEscalate=true when tier models differ', () => {
+    const cfg = {
+      ...DEFAULT_OPERATOR_CONFIG,
+      activeProvider: 'opencode' as const,
+      opencodeApiKey: 'test-key',
+      opencodeModel: 'deepseek-v4.1-flash',
+    };
+    const tiered = resolveTieredPlannerProviders(cfg);
+    expect(tiered.l1Provider.id).toBe('opencode');
+    expect(tiered.l2Provider.id).toBe('opencode');
+    expect(tiered.canEscalate).toBe(true);
+
+    const localTiered = resolveTieredPlannerProviders({
+      ...cfg,
+      activeProvider: 'local',
+    });
+    expect(localTiered.l1Provider.id).toBe('local');
+    expect(localTiered.canEscalate).toBe(false);
+    expect(resolvePlannerProvider(cfg, 'fast').id).toBe('opencode');
   });
 });

@@ -8,6 +8,12 @@ import { buildOperatorSystemPrompt } from './planner/prompt';
 import { planTurnHeuristic } from './planner/heuristic';
 import { voiceSessionStore } from './voice/voiceSessionStore';
 import { voiceTurnArbitrator } from './voice/turnArbitrator';
+import { ctxClient } from './context/ctxClient';
+import { executePlan } from './executor';
+import { runOperatorTurn, getOptimisticAsyncAck } from './index';
+import { ttsNarrator } from './ttsNarrator';
+import * as chatIndex from './chatIndex';
+import type { PlannerProvider } from './providers/types';
 import {
   formatWorkspaceRosterForPrompt,
   resetWorkspaceSnapshotCacheForTests,
@@ -57,6 +63,10 @@ describe('SETH Conversational Orchestrator — S1..S4', () => {
     resetEpisodicMemoryCacheForTests();
     resetWorkingContextForTests();
     resetSubagentReturnWatcherForTests();
+    ctxClient.resetForTests();
+    voiceSessionStore.clearDraftProposal('voice-thread-1');
+    voiceSessionStore.clearDraftProposal('__default__');
+    voiceSessionStore.setHandsFreeReplyWindow(0);
   });
 
   afterEach(() => {
@@ -494,6 +504,384 @@ describe('SETH Conversational Orchestrator — S1..S4', () => {
       });
       const wc = getSessionWorkingContext('voice-thread-1');
       expect(wc.decisions).toHaveLength(1);
+    });
+  });
+
+  describe('T3 — Consultative Argos Brain, ctxClient, peek_*, DraftTaskProposal & Folded Returns', () => {
+    it('S2.2/S2.3: ctxClient packs voice context under 250 tokens, scrubs volatile KV tokens, and supports in-memory share/CCR fallback', async () => {
+      const packed = await ctxClient.packVoiceContext({
+        workspaceName: 'kite',
+        gitBranch: 'feat/response-thread',
+        mode: 'thread',
+        voiceSessionActive: true,
+        boundThreadId: 'voice-thread-1',
+        workingContextSummary: 'Unificación de Argos y kite-ctx',
+      });
+      expect(packed.estimatedTokens).toBeLessThan(250);
+      expect(packed.packedText).toContain('Proyecto="kite"');
+
+      const kv = await ctxClient.kvPlan({
+        staticPrefix: 'Identidad estática hace 5s',
+        dynamicTail: 'Rama=feat/response-thread',
+      });
+      expect(kv.volatileTokensScrubbed).toBe(1);
+      expect(kv.stablePrefix).not.toContain('hace 5s');
+
+      await ctxClient.sharePut('brief:Explorer', 'Revisar auth');
+      expect(await ctxClient.shareGet('brief:Explorer')).toBe('Revisar auth');
+      expect(ctxClient.getInMemoryShareMap().get('brief:Explorer')?.value).toBe('Revisar auth');
+
+      const hash = ctxClient.ccrStoreLocal('Línea 1: auth ok\nLínea 2: falta timeout');
+      expect(await ctxClient.ccrRetrieve(hash, { search: 'timeout' })).toContain('falta timeout');
+    });
+
+    it('S3.1: executes peek_changes, peek_runs, peek_agents, peek_files, and stay_silent cleanly within fast budget', async () => {
+      ctxClient.registerFallbackFileContent('src/auth.ts', 'export function login() {}\nexport function logout() {}');
+
+      const res = await executePlan(
+        {
+          strategy: 'llm',
+          actions: [
+            { type: 'peek_changes', includeDiff: false },
+            { type: 'peek_runs', limit: 3, filterStatus: 'all' },
+            { type: 'peek_agents', scope: 'all' },
+            { type: 'peek_files', path: 'src/auth.ts', mode: 'signatures' },
+          ],
+        },
+        { workspaceId: 'ws-kite', gitBranch: 'feat/response-thread' }
+      );
+      expect(res.overallSuccess).toBe(true);
+      expect(res.receipts).toHaveLength(4);
+      expect((res.receipts[3].data as any)?.content).toContain('export function login()');
+
+      const silentRes = await executePlan({
+        strategy: 'llm',
+        actions: [{ type: 'stay_silent', reason: 'ambient noise' }],
+      });
+      expect(silentRes.overallSuccess).toBe(true);
+      expect(silentRes.reply).toBe('');
+      expect(silentRes.receipts[0].silent).toBe(true);
+    });
+
+    it('S3.2/S3.3: runs bounded peek_* -> propose_task -> refine_proposal -> fast heuristic confirm_proposal lifecycle and skips TTS on stay_silent', async () => {
+      voiceSessionStore.startSession('voice-thread-1', 'thread');
+      const speakSpy = vi.spyOn(ttsNarrator, 'speak').mockResolvedValue();
+      const chatCatalogSpy = vi.spyOn(chatIndex, 'fetchLiveChatCatalog');
+
+      let hop = 0;
+      const mockProvider: PlannerProvider = {
+        id: 'mock-argos',
+        plan: vi.fn(async (messages) => {
+          hop += 1;
+          if (hop === 1) {
+            // Hop 1: fast read-only peek before proposing
+            return {
+              rawText: JSON.stringify({
+                reply: '',
+                actions: [{ type: 'peek_agents', scope: 'all' }],
+              }),
+              latencyMs: 15,
+              model: 'argos-test',
+            };
+          }
+          if (hop === 2) {
+            // Hop 2 after peek observation: propose consultative task
+            expect(messages.some((m: { content: string }) => m.content.includes('Observación peek_agents'))).toBe(true);
+            return {
+              rawText: JSON.stringify({
+                reply: 'Propongo explorar auth. ¿Lo lanzo con Claude?',
+                actions: [
+                  {
+                    type: 'propose_task',
+                    targetKind: 'subagent',
+                    title: 'Explorar módulo auth',
+                    taskBrief: 'Revisar el flujo de autenticación actual.',
+                    role: 'Explorer',
+                    provider: 'grok',
+                    mode: 'explore',
+                    questionForUser: '¿Lo lanzo con Grok o preferís Claude?',
+                  },
+                ],
+              }),
+              latencyMs: 20,
+              model: 'argos-test',
+            };
+          }
+          // Hop 3: refinement turn receives active DraftTaskProposal in prompt
+          expect(messages[0].content).toContain('PROPUESTA DE TAREA ACTIVA');
+          return {
+            rawText: JSON.stringify({
+              reply: 'Actualizado a Claude.',
+              actions: [
+                {
+                  type: 'refine_proposal',
+                  provider: 'claude',
+                  questionForUser: '¿Confirmamos con Claude?',
+                },
+              ],
+            }),
+            latencyMs: 20,
+            model: 'argos-test',
+          };
+        }),
+      };
+
+      const ctx = {
+        workspaceId: 'ws-kite',
+        mode: 'thread',
+        voiceSessionActive: true,
+        boundThreadId: 'voice-thread-1',
+        activeTerminals: [],
+      };
+
+      // Turn 1: peek_agents -> propose_task (does NOT call fetchLiveChatCatalog on default path)
+      const t1 = await runOperatorTurn('revisemos el módulo de autenticación', {
+        provider: mockProvider,
+        context: ctx,
+        ttsEnabled: true,
+      });
+      expect(chatCatalogSpy).not.toHaveBeenCalled();
+      expect(t1.plan.actions[0].type).toBe('propose_task');
+      expect(voiceSessionStore.getDraftProposal('voice-thread-1')?.provider).toBe('grok');
+      expect(voiceSessionStore.isInHandsFreeReplyWindow()).toBe(true);
+      expect(speakSpy).toHaveBeenCalledTimes(1);
+
+      // Turn 2: refinement ("mejor usa Claude")
+      const t2 = await runOperatorTurn('mejor usa Claude', {
+        provider: mockProvider,
+        context: ctx,
+        ttsEnabled: true,
+      });
+      expect(t2.plan.actions[0].type).toBe('refine_proposal');
+      expect(voiceSessionStore.getDraftProposal('voice-thread-1')?.provider).toBe('claude');
+      expect(voiceSessionStore.getDraftProposal('voice-thread-1')?.revision).toBe(2);
+
+      // Turn 3: fast heuristic confirmation ("dale") -> dispatches spawn_subagent & stores brief in ctxClient
+      vi.mocked(invokeCommand).mockResolvedValueOnce({
+        status: 'submitted',
+        address: 'thread:child-confirmed-1',
+        threadId: 'child-confirmed-1',
+      });
+      const t3 = await runOperatorTurn('dale', {
+        provider: mockProvider,
+        context: ctx,
+        ttsEnabled: true,
+      });
+      expect(t3.strategy).toBe('heuristic');
+      expect(t3.plan.actions[0].type).toBe('confirm_proposal');
+      expect(t3.overallSuccess).toBe(true);
+      expect(voiceSessionStore.getDraftProposal('voice-thread-1')).toBeNull();
+      expect(await ctxClient.shareGet('brief:Explorer')).toContain('Revisar el flujo de autenticación');
+
+      // Cancel path check
+      await executePlan(
+        {
+          strategy: 'llm',
+          actions: [
+            {
+              type: 'propose_task',
+              targetKind: 'subagent',
+              title: 'Otra tarea',
+              taskBrief: 'Revisar logs.',
+            },
+          ],
+        },
+        ctx
+      );
+      expect(voiceSessionStore.getDraftProposal('voice-thread-1')).not.toBeNull();
+      const tCancel = await runOperatorTurn('olvídalo', {
+        provider: mockProvider,
+        context: ctx,
+      });
+      expect(tCancel.plan.actions[0].type).toBe('cancel_proposal');
+      expect(voiceSessionStore.getDraftProposal('voice-thread-1')).toBeNull();
+
+      // stay_silent skips TTS
+      speakSpy.mockClear();
+      const silentProvider: PlannerProvider = {
+        id: 'mock-silent',
+        plan: vi.fn(async () => ({
+          rawText: JSON.stringify({ reply: '', actions: [{ type: 'stay_silent', reason: 'noise' }] }),
+          latencyMs: 10,
+          model: 'argos-test',
+        })),
+      };
+      const tSilent = await runOperatorTurn('mmm', {
+        provider: silentProvider,
+        context: ctx,
+        ttsEnabled: true,
+      });
+      expect(tSilent.reply).toBe('');
+      expect(speakSpy).not.toHaveBeenCalled();
+    });
+
+    it('S2.3/S3.3: folds multiple concurrent subagent returns in VoiceTurnArbitrator and stores <<ccr:HASH>> findings in ctxClient', async () => {
+      voiceSessionStore.startSession('voice-thread-1', 'thread');
+      const spoken: string[] = [];
+
+      const stop = startSubagentReturnWatcher({
+        speak: (text) => {
+          spoken.push(text);
+        },
+        isVoiceSessionOpen: () => true,
+      });
+
+      trackDelegatedSubagent({
+        childThreadId: 'child-fold-1',
+        parentThreadId: 'voice-thread-1',
+        role: 'Explorer',
+        provider: 'claude',
+        mode: 'explore',
+        task: 'Revisar auth',
+        workspaceId: 'ws-kite',
+      });
+      trackDelegatedSubagent({
+        childThreadId: 'child-fold-2',
+        parentThreadId: 'voice-thread-1',
+        role: 'Auditor',
+        provider: 'grok',
+        mode: 'explore',
+        task: 'Revisar permisos',
+        workspaceId: 'ws-kite',
+      });
+
+      vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args: any) => {
+        if (cmd === 'dispatch_read') {
+          if (args?.address === 'thread:child-fold-1') {
+            return { status: 'settled', text: 'Auth usa JWT con expiración corta.' };
+          }
+          return { status: 'settled', text: 'Permisos validan roles en el middleware.' };
+        }
+        return {};
+      });
+
+      voiceTurnArbitrator.transition('user_speaking');
+
+      await handleSubagentSettlementEvent({
+        kind: 'subagentRunUpdated',
+        threadId: 'voice-thread-1',
+        subagentId: 'sub-f1',
+        run: { childThreadId: 'child-fold-1', role: 'Explorer', status: 'completed' },
+      });
+      await handleSubagentSettlementEvent({
+        kind: 'subagentRunUpdated',
+        threadId: 'voice-thread-1',
+        subagentId: 'sub-f2',
+        run: { childThreadId: 'child-fold-2', role: 'Auditor', status: 'completed' },
+      });
+
+      expect(spoken).toHaveLength(0);
+      expect(voiceTurnArbitrator.getFoldedUpdateCount()).toBe(2);
+
+      const finding1 = await ctxClient.shareGet('finding:child-fold-1');
+      expect(finding1).toMatch(/<<ccr:[0-9a-f]+>>/);
+
+      voiceTurnArbitrator.transition('post_tts_guard');
+      expect(spoken).toHaveLength(0);
+
+      voiceTurnArbitrator.transition('awaiting_reply');
+      expect(spoken).toHaveLength(1);
+      expect(spoken[0]).toContain('Terminaron 2 tareas en segundo plano');
+      expect(spoken[0]).toContain('Explorer');
+      expect(spoken[0]).toContain('Auditor');
+      expect(voiceTurnArbitrator.getFoldedUpdateCount()).toBe(0);
+
+      stop();
+    });
+  });
+
+  describe('T3 — 3-Tier Hybrid Routing (L0 -> L1 -> L2) & Safe Optimistic Acks (S3)', () => {
+    it('escalates from L1 (fast) to L2 (diagnosis) when L1 returns escalate: true, preserving peek context', async () => {
+      localStorage.setItem(
+        'kite.operator.providerConfig.v2',
+        JSON.stringify({
+          activeProvider: 'opencode',
+          opencodeApiKey: 'test-key',
+          opencodeModel: 'deepseek-v4.1-flash',
+        })
+      );
+
+      const planSpy = vi.fn();
+      const l1Mock: PlannerProvider = {
+        id: 'opencode',
+        plan: vi.fn(async () => {
+          planSpy('L1');
+          return {
+            rawText: JSON.stringify({
+              escalate: true,
+              answer: 'Voy a revisar esto en profundidad.',
+              actions: [],
+            }),
+            latencyMs: 90,
+            model: 'deepseek-v4.1-flash',
+          };
+        }),
+      };
+      const l2Mock: PlannerProvider = {
+        id: 'opencode',
+        plan: vi.fn(async () => {
+          planSpy('L2');
+          return {
+            rawText: JSON.stringify({
+              reply: 'Propongo armar el ODD completo de seguridad.',
+              actions: [
+                {
+                  type: 'propose_task',
+                  targetKind: 'subagent',
+                  title: 'ODD de Seguridad',
+                  taskBrief: 'Diseñar el ODD completo de seguridad.',
+                  mode: 'odd',
+                  oddMode: true,
+                },
+              ],
+            }),
+            latencyMs: 220,
+            model: 'deepseek-v4-pro',
+          };
+        }),
+      };
+
+      const res = await runOperatorTurn('diseña la arquitectura ODD de autenticación completa', {
+        source: 'voz',
+        ttsEnabled: false,
+        context: { workspaceId: 'ws-kite', workspaceName: 'kite', mode: 'thread' },
+        provider: l1Mock,
+        diagnosisProvider: l2Mock,
+      });
+
+      expect(planSpy.mock.calls.map((c) => c[0])).toEqual(['L1', 'L2']);
+      expect(res.plan.actions).toHaveLength(1);
+      expect(res.plan.actions[0].type).toBe('propose_task');
+    });
+
+    it('permits optimistic spoken ack ONLY for safe async launches and strictly forbids it on destructive actions', () => {
+      expect(
+        getOptimisticAsyncAck({
+          strategy: 'llm',
+          actions: [
+            {
+              type: 'spawn_subagent',
+              via: 'thread',
+              mode: 'explore',
+              task: 'Revisar auth',
+            },
+          ],
+        })
+      ).toMatch(/subagente|segundo plano/i);
+
+      expect(
+        getOptimisticAsyncAck({
+          strategy: 'llm',
+          actions: [{ type: 'close_terminals', target: 'all' }],
+        })
+      ).toBeNull();
+
+      expect(
+        getOptimisticAsyncAck({
+          strategy: 'llm',
+          actions: [{ type: 'cancel_proposal' }],
+        })
+      ).toBeNull();
     });
   });
 });

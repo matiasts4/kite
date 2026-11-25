@@ -65,13 +65,22 @@ export const VERIFIED_PROVIDER_MODELS: Record<string, { fast: string; diagnosis:
   },
 };
 
+export interface ResolveModelOptions {
+  forceTierModel?: boolean;
+}
+
 export function resolveVerifiedModel(
   provider: string,
   requestedModel?: string,
-  tier: 'fast' | 'diagnosis' = 'fast'
+  tier: 'fast' | 'diagnosis' = 'fast',
+  options?: ResolveModelOptions
 ): string {
   const catalog = VERIFIED_PROVIDER_MODELS[provider];
   if (!catalog) return (requestedModel && requestedModel.trim()) || 'unknown';
+
+  if (options?.forceTierModel) {
+    return catalog[tier];
+  }
 
   const requested = requestedModel?.trim();
   if (requested) {
@@ -85,13 +94,14 @@ export function resolveVerifiedModel(
 
 export function resolvePlannerProvider(
   config: OperatorProviderConfig,
-  tier: 'fast' | 'diagnosis' = 'fast'
+  tier: 'fast' | 'diagnosis' = 'fast',
+  options?: ResolveModelOptions
 ): PlannerProvider {
   if (config.activeProvider === 'local') {
     return new LocalPlannerProvider();
   }
   if (config.activeProvider === 'opencode') {
-    const model = resolveVerifiedModel('opencode', config.opencodeModel, tier);
+    const model = resolveVerifiedModel('opencode', config.opencodeModel, tier, options);
     return new OpenAiCompatPlannerProvider({
       id: 'opencode',
       baseUrl: config.opencodeBaseUrl || 'https://opencode.ai/inference/go/openai/v1',
@@ -102,7 +112,7 @@ export function resolvePlannerProvider(
     });
   }
   if (config.activeProvider === 'vercel') {
-    const model = resolveVerifiedModel('vercel', config.vercelModel, tier);
+    const model = resolveVerifiedModel('vercel', config.vercelModel, tier, options);
     return new OpenAiCompatPlannerProvider({
       id: 'vercel',
       baseUrl: config.vercelBaseUrl || 'https://ai-gateway.vercel.app/v1',
@@ -121,7 +131,7 @@ export function resolvePlannerProvider(
       cfBase = `${cfBase.replace(/\/+$/, '')}/${accountId}/ai/v1`;
     }
 
-    const model = resolveVerifiedModel('cloudflare', config.cloudflareModel, tier);
+    const model = resolveVerifiedModel('cloudflare', config.cloudflareModel, tier, options);
     return new OpenAiCompatPlannerProvider({
       id: 'cloudflare',
       baseUrl: cfBase,
@@ -130,7 +140,7 @@ export function resolvePlannerProvider(
     });
   }
   if (config.activeProvider === 'grok') {
-    const model = resolveVerifiedModel('grok', config.grokModel, tier);
+    const model = resolveVerifiedModel('grok', config.grokModel, tier, options);
     if (shouldUseGrokHttpApi(config)) {
       return new OpenAiCompatPlannerProvider({
         id: 'grok',
@@ -148,11 +158,42 @@ export function resolvePlannerProvider(
     return new LocalPlannerProvider();
   }
   if (config.activeProvider === 'antigravity') {
-    const model = resolveVerifiedModel('antigravity', config.antigravityModel, tier);
+    const model = resolveVerifiedModel('antigravity', config.antigravityModel, tier, options);
     return new CliPlannerProvider({
       engine: 'antigravity',
       model,
     });
   }
   return new LocalPlannerProvider();
+}
+
+export interface TieredPlannerProviders {
+  l1Provider: PlannerProvider;
+  l2Provider: PlannerProvider;
+  canEscalate: boolean;
+}
+
+export function resolveTieredPlannerProviders(
+  config: OperatorProviderConfig
+): TieredPlannerProviders {
+  const l1Provider = resolvePlannerProvider(config, 'fast');
+  if (config.activeProvider === 'local' || l1Provider.id === 'local') {
+    return { l1Provider, l2Provider: l1Provider, canEscalate: false };
+  }
+
+  const catalog = VERIFIED_PROVIDER_MODELS[config.activeProvider];
+  const l1Model = resolveVerifiedModel(config.activeProvider, undefined, 'fast');
+  const l2Model = resolveVerifiedModel(config.activeProvider, undefined, 'diagnosis', {
+    forceTierModel: true,
+  });
+  const canEscalate = Boolean(catalog && l2Model !== l1Model);
+  const l2Provider = canEscalate
+    ? resolvePlannerProvider(config, 'diagnosis', { forceTierModel: true })
+    : l1Provider;
+
+  return {
+    l1Provider,
+    l2Provider,
+    canEscalate,
+  };
 }

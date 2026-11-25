@@ -27,9 +27,10 @@ import { loadOperatorConfig } from './operatorConfig';
 import { runLedger } from './runLedger';
 import { getActiveAgentTerminals } from '../terminalRegistry';
 import type { PlannerProvider, ProviderMessage } from './providers/types';
-import { resolvePlannerProvider } from './providers/resolvePlanner';
+import { resolveTieredPlannerProviders } from './providers/resolvePlanner';
 import { zedAssistantFailureMessage } from './assistantFailureNotice';
 import { voiceSessionStore } from './voice/voiceSessionStore';
+import { consumeSpeculativeTurnContext } from './voice/zedVoice';
 import {
   buildEnrichedTurnContext,
   filterTerminalsForWorkspace,
@@ -62,6 +63,8 @@ export * from './providers/cli';
 export interface RunOperatorTurnOptions {
   source?: 'texto' | 'voz' | 'sugerencia' | 'shortcut';
   provider?: PlannerProvider;
+  /** Optional L2 diagnosis provider override used when L1 emits `escalate: true`. */
+  diagnosisProvider?: PlannerProvider;
   workspaceId?: string | null;
   mode?: string;
   ttsEnabled?: boolean;
@@ -74,6 +77,42 @@ export interface RunOperatorTurnOptions {
   history?: ProviderMessage[];
   /** Optional streaming callback invoked as each complete conversational sentence arrives from LLM. */
   onStreamSentence?: (sentence: string) => void;
+}
+
+const DESTRUCTIVE_ACTION_TYPES = new Set<string>([
+  'close_terminals',
+  'cancel_proposal',
+  'cancel_subagent',
+]);
+
+/**
+ * Returns a short non-blocking optimistic spoken acknowledgement ONLY for safe async
+ * background launches (`spawn_subagent`, `launch_thread` with `focusThread !== true`).
+ * Strictly returns null if any destructive action is present.
+ */
+export function getOptimisticAsyncAck(plan: OperatorPlan): string | null {
+  if (!plan || !Array.isArray(plan.actions) || plan.actions.length === 0) {
+    return null;
+  }
+  if (plan.actions.some((a) => DESTRUCTIVE_ACTION_TYPES.has(a.type))) {
+    return null;
+  }
+  const allSafeBackgroundAsync = plan.actions.every((a) => {
+    if (a.type === 'spawn_subagent') {
+      return a.via !== 'terminal';
+    }
+    if (a.type === 'launch_thread') {
+      return a.focusThread !== true;
+    }
+    return false;
+  });
+  if (!allSafeBackgroundAsync) {
+    return null;
+  }
+  if (plan.actions.length === 1 && plan.actions[0].type === 'spawn_subagent') {
+    return 'Lanzando el subagente en segundo plano; apenas tenga resultados te aviso.';
+  }
+  return 'Iniciando el trabajo en segundo plano.';
 }
 
 /**
@@ -170,8 +209,10 @@ export async function runOperatorTurn(
   if (sttFinalizedAt !== undefined) {
     runLedger.recordVoiceMilestones(turnId, { sttFinalizedAt });
   }
+  const speculativeContext = !options.context ? consumeSpeculativeTurnContext(input) : null;
   const context =
     options.context ||
+    speculativeContext ||
     (await buildEnrichedTurnContext(options.mode, options.workspaceId).catch(() =>
       captureCurrentTurnContext(options.mode, options.workspaceId)
     ));
@@ -190,7 +231,10 @@ export async function runOperatorTurn(
   });
 
   const config = loadOperatorConfig();
-  const provider = options.provider || resolvePlannerProvider(config);
+  const tieredProviders = resolveTieredPlannerProviders(config);
+  const provider = options.provider || tieredProviders.l1Provider;
+  const l2Provider =
+    options.diagnosisProvider || (options.provider ? options.provider : tieredProviders.l2Provider);
 
   try {
     // 0. Normalize Spanish STT phonetics & analyze clause-level polarity (preserving raw input in trace).
@@ -391,7 +435,7 @@ export async function runOperatorTurn(
 
       const MAX_PEEK_HOPS = 3;
       let workingHistory: ProviderMessage[] = effectiveHistory ? [...effectiveHistory] : [];
-      plan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
+      let llmPlan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
         onStreamSentence: streamSentenceHandler,
         pendingDisambiguation: activePending,
         draftProposal: activeDraftProposal,
@@ -401,24 +445,57 @@ export async function runOperatorTurn(
       let peekHop = 0;
       while (
         peekHop < MAX_PEEK_HOPS &&
-        plan.actions.length > 0 &&
-        plan.actions.every((a) => isPeekActionType(a.type))
+        llmPlan.actions.length > 0 &&
+        llmPlan.actions.every((a) => isPeekActionType(a.type))
       ) {
-        const peekExec = await executePlan(plan, context, turnId);
+        const peekExec = await executePlan(llmPlan, context, turnId);
         accumulatedPeekReceipts.push(...peekExec.receipts);
         const obsSummary = formatReactObservation(peekExec.receipts);
         workingHistory = [
           ...workingHistory,
-          { role: 'assistant', content: JSON.stringify({ actions: plan.actions }) },
+          { role: 'assistant', content: JSON.stringify({ actions: llmPlan.actions }) },
           { role: 'user', content: `Resultados de inspección rápida (solo lectura):\n${obsSummary}\nResponde al usuario o emite "propose_task" según corresponda.` },
         ];
         peekHop += 1;
-        plan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
+        llmPlan = await planTurnLLM(normalizedInput, provider, context, turnId, workingHistory, {
           onStreamSentence: streamSentenceHandler,
           pendingDisambiguation: activePending,
           draftProposal: voiceSessionStore.getDraftProposal(disambiguationScope),
         });
       }
+
+      // L1 -> L2 Diagnosis Escalation (reusing already-collected peek_* context & cached prefix)
+      if (llmPlan.escalate && (options.diagnosisProvider || tieredProviders.canEscalate)) {
+        runLedger.recordVoiceClassification(turnId, { tier: 'L2' });
+        emitTrace({
+          turnId,
+          ev: 'intent.route',
+          route: 'llm',
+          tier: 'L2',
+          transport: 'cascaded',
+          routerDecisionAt: Date.now(),
+          reason: 'l1_escalate_diagnosis',
+          rawInput: input,
+          normalizedInput,
+        });
+        if (accumulatedPeekReceipts.length > 0) {
+          workingHistory = [
+            ...workingHistory,
+            {
+              role: 'user',
+              content: `Contexto ya inspeccionado en L1:\n${formatReactObservation(accumulatedPeekReceipts)}`,
+            },
+          ];
+        }
+        llmPlan = await planTurnLLM(normalizedInput, l2Provider, context, turnId, workingHistory, {
+          onStreamSentence: streamSentenceHandler,
+          pendingDisambiguation: activePending,
+          draftProposal: voiceSessionStore.getDraftProposal(disambiguationScope),
+          forceFullToolCatalog: true,
+        });
+      }
+
+      plan = llmPlan;
 
       if (streamingQueue) {
         if (streamingQueue.hasSpokenAny()) {
@@ -467,6 +544,30 @@ export async function runOperatorTurn(
     if (plan.actions.length > 0 && !isSilentTurn) {
       runLedger.recordVoiceMilestones(turnId, { firstActionStartAt: Date.now() });
     }
+    const optimisticAck = getOptimisticAsyncAck(plan);
+    let optimisticSpoken = false;
+    if (
+      optimisticAck &&
+      options.ttsEnabled &&
+      !options.muted &&
+      !isSilentTurn &&
+      !options.onStreamSentence
+    ) {
+      optimisticSpoken = true;
+      try {
+        runLedger.recordVoiceMilestones(turnId, { ttsRequestAt: Date.now() });
+        void ttsNarrator.speak(optimisticAck, {
+          voiceName: config.persona?.voice || 'Ara',
+          rate: config.ttsRate || 1.0,
+          lang: config.persona?.language === 'en' ? 'en-US' : 'es-ES',
+          turnId,
+          turnStartedAt: startTime,
+          sttFinalizedAt,
+        });
+      } catch {
+        optimisticSpoken = false;
+      }
+    }
     const execution = await executePlan(plan, context, turnId);
     const receipts = [...accumulatedPeekReceipts, ...execution.receipts];
     const reply = isSilentTurn
@@ -487,8 +588,14 @@ export async function runOperatorTurn(
       void recordDelegationsFromReceipts(context.workspaceId, receipts).catch(() => {});
     }
 
-    // 3. Speak reply via TTS if requested, not muted, and not a silent turn
-    if (options.ttsEnabled && !options.muted && reply && !isSilentTurn) {
+    // 3. Speak reply via TTS if requested, not muted, and not already optimistically spoken (unless execution failed)
+    if (
+      options.ttsEnabled &&
+      !options.muted &&
+      reply &&
+      !isSilentTurn &&
+      (!optimisticSpoken || !overallSuccess)
+    ) {
       try {
         runLedger.recordVoiceMilestones(turnId, { ttsRequestAt: Date.now() });
         ttsNarrator.speak(reply, {

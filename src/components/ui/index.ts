@@ -27,6 +27,15 @@ export { EmptyState, type EmptyStateProps, type EmptyStateTone } from './EmptySt
 export { UiKitPreview, renderUiKitPreview } from './UiKitPreview';
 
 export { SelectMenu, type SelectMenuProps, type SelectMenuRow } from './SelectMenu';
+export {
+  ColorPickerPopover,
+  DEFAULT_COLOR_PICKER_PRESETS,
+  hexToHsv,
+  hsvToHex,
+  normalizeHexColor,
+  type ColorPickerPopoverProps,
+  type HsvColor,
+} from './ColorPickerPopover';
 export { Sheet, type SheetProps, type SheetButtonProps } from './Sheet';
 export { ErrorBoundary, type ErrorBoundaryProps } from './ErrorBoundary';
 export {

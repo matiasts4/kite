@@ -1,0 +1,247 @@
+/* In-app Color Picker Popover — token-driven, zero WebView2 native dialog flakiness */
+
+.kite-color-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke-strong, rgba(255, 255, 255, 0.18)));
+  background: var(--glass-field-bg, var(--block-fill, rgba(255, 255, 255, 0.04)));
+  cursor: pointer;
+  flex: none;
+  transition:
+    border-color var(--duration-ink, 150ms) ease,
+    background-color var(--duration-ink, 150ms) ease,
+    transform 120ms ease;
+}
+
+.kite-color-trigger--compact {
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+.kite-color-trigger--chip {
+  width: var(--control-row, 28px);
+  height: var(--control-row, 28px);
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+.kite-color-trigger:hover {
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.34));
+  background: var(--hover-fill, rgba(255, 255, 255, 0.08));
+}
+
+.kite-color-trigger:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 2px;
+}
+
+.kite-color-trigger--active,
+.kite-color-trigger[aria-expanded='true'] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.kite-color-trigger__swatch {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--vl-radius-xs, 4px);
+  background: var(--swatch-color, var(--accent));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 16%, transparent);
+  display: block;
+}
+
+.kite-color-trigger__pip {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 11px;
+  height: 11px;
+  border-radius: var(--pill-radius, 9999px);
+  background: var(--menu-plate, var(--pane));
+  border: 1px solid var(--glass-border, var(--vl-stroke));
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.kite-color-popover {
+  position: fixed;
+  z-index: 12000;
+  width: 244px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: var(--card-radius, 12px);
+  border: 1px solid var(--glass-border, var(--vl-stroke-strong, rgba(255, 255, 255, 0.16)));
+  background: var(--menu-plate, var(--pane));
+  color: var(--text-primary);
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.42),
+    0 2px 8px rgba(0, 0, 0, 0.24);
+  box-sizing: border-box;
+  left: var(--popover-left, 0px);
+  top: var(--popover-top, 0px);
+}
+
+.kite-color-popover__pad {
+  position: relative;
+  width: 100%;
+  height: 116px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  background:
+    linear-gradient(to top, rgb(0 0 0), transparent),
+    linear-gradient(to right, rgb(255 255 255), hsl(var(--picker-hue, 210) 100% 50%));
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.kite-color-popover__thumb {
+  position: absolute;
+  left: var(--thumb-x, 50%);
+  top: var(--thumb-y, 50%);
+  width: 12px;
+  height: 12px;
+  border-radius: var(--pill-radius, 9999px);
+  border: 2px solid rgb(255 255 255);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.65),
+    0 2px 4px rgba(0, 0, 0, 0.45);
+  background: var(--swatch-color, var(--accent));
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.kite-color-popover__hue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kite-color-popover__hue {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 10px;
+  margin: 0;
+  border-radius: var(--pill-radius, 9999px);
+  background: linear-gradient(
+    to right,
+    hsl(0 92% 56%),
+    hsl(60 92% 52%),
+    hsl(120 82% 48%),
+    hsl(180 86% 48%),
+    hsl(240 90% 60%),
+    hsl(300 84% 58%),
+    hsl(360 92% 56%)
+  );
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  cursor: pointer;
+}
+
+.kite-color-popover__hue::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--pill-radius, 9999px);
+  background: rgb(255 255 255);
+  border: 2px solid rgba(0, 0, 0, 0.45);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+}
+
+.kite-color-popover__swatches {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+
+.kite-color-popover__swatch {
+  width: 100%;
+  height: var(--vl-control-sm, 26px);
+  padding: 3px;
+  border-radius: var(--vl-radius-sm, 6px);
+  border: 1px solid transparent;
+  background: var(--block-fill, rgba(255, 255, 255, 0.03));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    border-color var(--duration-ink, 140ms) ease,
+    transform 120ms ease;
+}
+
+.kite-color-popover__swatch:hover {
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.28));
+  transform: scale(1.06);
+}
+
+.kite-color-popover__swatch[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.kite-color-popover__swatch-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--pill-radius, 9999px);
+  background: var(--swatch-color);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 16%, transparent);
+  display: block;
+}
+
+.kite-color-popover__hex-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kite-color-popover__preview {
+  width: var(--control-row, 28px);
+  height: var(--control-row, 28px);
+  border-radius: var(--vl-radius-sm, 6px);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  background: var(--swatch-color, var(--accent));
+  flex: none;
+}
+
+.kite-color-popover__hex-input {
+  flex: 1;
+  min-width: 0;
+  height: var(--control-row, 28px);
+  padding: 0 8px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  background: var(--glass-field-bg, var(--block-fill));
+  color: var(--text-primary);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.kite-color-popover__hex-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-color-trigger,
+  .kite-color-popover__swatch {
+    transition: none;
+  }
+}
+
+html[data-motion='reduce'] .kite-color-trigger,
+html[data-motion='reduce'] .kite-color-popover__swatch {
+  transition: none;
+}

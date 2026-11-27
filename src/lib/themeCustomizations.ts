@@ -11,6 +11,10 @@ export type BackdropPresetId =
   | 'solar-horizon'
   | 'event-horizon'
   | 'lunar-eclipse'
+  | 'astral-nebula'
+  | 'tokyo-rain'
+  | 'misty-forest'
+  | 'cloud-sea'
   | 'custom-image';
 
 export type ConcreteBackdropPresetId = Exclude<BackdropPresetId, 'theme-default'>;
@@ -610,26 +614,50 @@ export const BACKDROP_PRESETS: readonly BackdropPresetDescriptor[] = [
   {
     id: 'alpine-dusk',
     label: 'Crepúsculo Alpino',
-    blurb: 'Siluetas de montañas al anochecer, bruma en el valle y cielo estrellado',
+    blurb: 'Cordillera alpina nevada en crepúsculo invernal con bruma índigo y cielo estrellado',
     previewGradient: 'linear-gradient(180deg, #1e1b4b 0%, #4c1d95 55%, #0f172a 100%)',
   },
   {
     id: 'solar-horizon',
     label: 'Horizonte Solar',
-    blurb: 'Arco planetario terracota cálido sobre dunas basálticas',
+    blurb: 'Corona planetaria ámbar-terracota con anillos estelares sobre dunas oscuras',
     previewGradient: 'radial-gradient(circle at 50% 80%, #ea580c 0%, #7c2d12 45%, #1c1917 100%)',
   },
   {
     id: 'event-horizon',
     label: 'Horizonte de Eventos',
-    blurb: 'Agujero negro supermasivo con disco de acreción luminoso sobre crestas basálticas estrelladas',
+    blurb: 'Agujero negro supermasivo en el espacio profundo con anillo de fotones y disco de acreción',
     previewGradient: 'radial-gradient(circle at 50% 44%, #f59e0b 0%, #6366f1 32%, #090d16 78%)',
   },
   {
     id: 'lunar-eclipse',
     label: 'Claro de Luna',
-    blurb: 'Luna plateada entre bruma nocturna sobre océano tranquilo y cielo estrellado',
-    previewGradient: 'radial-gradient(circle at 32% 28%, #bae6fd 0%, #334155 44%, #090d16 100%)',
+    blurb: 'Luna llena luminosa entre nubes nocturnas sobre horizonte oceánico abierto',
+    previewGradient: 'radial-gradient(circle at 50% 30%, #bae6fd 0%, #334155 44%, #090d16 100%)',
+  },
+  {
+    id: 'astral-nebula',
+    label: 'Nebulosa Astral',
+    blurb: 'Nubes cósmicas de zafiro, esmeralda y amatista entre cúmulos estelares',
+    previewGradient: 'radial-gradient(circle at 52% 45%, #2dd4bf 0%, #6366f1 42%, #070b16 100%)',
+  },
+  {
+    id: 'tokyo-rain',
+    label: 'Tokio Sakura',
+    blurb: 'Cerezos sakura iluminados junto a un canal nocturno de Tokio con reflejos suaves',
+    previewGradient: 'radial-gradient(circle at 48% 36%, #f9a8d4 0%, #6366f1 42%, #0f172a 100%)',
+  },
+  {
+    id: 'misty-forest',
+    label: 'Bosque de Niebla',
+    blurb: 'Coníferas antiguas envueltas en bruma esmeralda al amanecer',
+    previewGradient: 'linear-gradient(180deg, #1e3a3a 0%, #0f2926 55%, #071312 100%)',
+  },
+  {
+    id: 'cloud-sea',
+    label: 'Pradera Celeste',
+    blurb: 'Colinas verdes soleadas bajo un cielo azulado amplio con nubes luminosas, ideal para temas claros',
+    previewGradient: 'linear-gradient(180deg, #38bdf8 0%, #bae6fd 54%, #4ade80 100%)',
   },
   {
     id: 'custom-image',
@@ -744,6 +772,10 @@ export const BACKDROP_WALLPAPER_URLS: Partial<Record<ConcreteBackdropPresetId, s
   'solar-horizon': '/wallpapers/solar-horizon.jpg',
   'event-horizon': '/wallpapers/event-horizon.jpg',
   'lunar-eclipse': '/wallpapers/lunar-eclipse.jpg',
+  'astral-nebula': '/wallpapers/astral-nebula.jpg',
+  'tokyo-rain': '/wallpapers/tokyo-rain.jpg',
+  'misty-forest': '/wallpapers/misty-forest.jpg',
+  'cloud-sea': '/wallpapers/cloud-sea.jpg',
 };
 
 export const DEFAULT_THEME_CUSTOMIZATIONS: KiteThemeCustomizations = {
@@ -1163,8 +1195,6 @@ export function applyThemeCustomizationsToDocument(state: KiteThemeCustomization
     activePalette === 'ember-editorial' ||
     activePalette === 'warm-atelier';
 
-  const effectiveSurface =
-    state.overrides.surface ?? (isCustomPack ? pack.tokens.pane : null);
   const effectiveBackground =
     state.overrides.surface ?? (isCustomPack ? pack.tokens.background : null);
   const effectiveSidebar =
@@ -1173,8 +1203,6 @@ export function applyThemeCustomizationsToDocument(state: KiteThemeCustomization
     state.overrides.ink ?? (isCustomPack ? pack.tokens.textPrimary : null);
   const effectiveSecondaryInk =
     !state.overrides.ink && isCustomPack ? pack.tokens.textSecondary : null;
-  const effectiveAccent =
-    state.overrides.accent ?? (isCustomPack ? pack.tokens.accent : null);
 
   if (effectiveBackground) {
     setThemeVar('--background', effectiveBackground);
@@ -1182,10 +1210,25 @@ export function applyThemeCustomizationsToDocument(state: KiteThemeCustomization
     removeThemeVar('--background');
   }
 
-  if (effectiveSurface) {
-    setThemeVar('--pane', effectiveSurface);
-    setThemeVar('--composer', effectiveSurface);
-    setThemeVar('--menu-plate', effectiveSurface);
+  if (state.overrides.surface) {
+    const customSurface = state.overrides.surface;
+    setThemeVar('--pane', customSurface);
+    setThemeVar(
+      '--composer',
+      resolvedMode === 'light'
+        ? `color-mix(in srgb, ${customSurface} 95%, #ffffff)`
+        : `color-mix(in srgb, ${customSurface} 93%, #ffffff)`
+    );
+    setThemeVar(
+      '--menu-plate',
+      resolvedMode === 'light'
+        ? `color-mix(in srgb, ${customSurface} 97%, #ffffff)`
+        : `color-mix(in srgb, ${customSurface} 89%, #ffffff)`
+    );
+  } else if (isCustomPack) {
+    setThemeVar('--pane', pack.tokens.pane);
+    removeThemeVar('--composer');
+    removeThemeVar('--menu-plate');
   } else {
     removeThemeVar('--pane');
     removeThemeVar('--composer');
@@ -1210,15 +1253,28 @@ export function applyThemeCustomizationsToDocument(state: KiteThemeCustomization
     removeThemeVar('--text-secondary');
   }
 
-  if (effectiveAccent) {
-    setThemeVar('--accent', effectiveAccent);
+  if (state.overrides.accent) {
+    const customAccent = state.overrides.accent;
+    setThemeVar('--accent', customAccent);
+    setThemeVar('--accent-fill', customAccent);
     setThemeVar(
-      '--accent-fill',
-      `color-mix(in srgb, ${effectiveAccent} 16%, transparent)`
+      '--accent-fill-hover',
+      `color-mix(in srgb, ${customAccent} 86%, #ffffff)`
     );
+    setThemeVar(
+      '--accent-tint',
+      `color-mix(in srgb, ${customAccent} 15%, transparent)`
+    );
+  } else if (isCustomPack) {
+    setThemeVar('--accent', pack.tokens.accent);
+    removeThemeVar('--accent-fill');
+    removeThemeVar('--accent-fill-hover');
+    removeThemeVar('--accent-tint');
   } else {
     removeThemeVar('--accent');
     removeThemeVar('--accent-fill');
+    removeThemeVar('--accent-fill-hover');
+    removeThemeVar('--accent-tint');
   }
 
   // Diff semantic colors & daltonized override

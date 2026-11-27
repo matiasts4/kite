@@ -10,6 +10,8 @@ import {
 } from './icons';
 import { ThemeItem, DARK_THEMES, LIGHT_THEMES } from './types';
 import { SegmentedIndicator } from '../../ui/SegmentedIndicator';
+import { ColorPickerPopover } from '../../ui/ColorPickerPopover';
+import { SelectMenu } from '../../ui/SelectMenu';
 import {
   AGENT_ACTIVITY_INDICATOR_COLOR_OPTIONS,
   AGENT_ACTIVITY_INDICATOR_OPTIONS,
@@ -185,11 +187,18 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
   const indicatorStyle = useAgentActivityIndicatorStyle();
   const indicatorColor = useAgentActivityIndicatorColor();
   const isCustomIndicatorHex = /^#[0-9a-fA-F]{6}$/.test(indicatorColor);
+  const INDICATOR_PRESET_HEX: Record<string, string> = {
+    status: '#4ade80',
+    accent: customizations.overrides.accent ?? activePack.tokens.accent,
+    cyan: '#38bdf8',
+    violet: '#a78bfa',
+    amber: '#fbbf24',
+    rose: '#fb7185',
+    neutral: '#a3a3a3',
+  };
   const customIndicatorColorValue = isCustomIndicatorHex
     ? indicatorColor
-    : indicatorColor === 'accent'
-      ? (customizations.overrides.accent ?? activePack.tokens.accent)
-      : '#4ade80';
+    : INDICATOR_PRESET_HEX[indicatorColor] ?? '#4ade80';
 
   useEffect(() => {
     setCustomUrlDraft(customizations.backdrop.customImageUrl);
@@ -507,7 +516,7 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
                     <span
                       aria-hidden="true"
                       className="customizations-indicator-color-dot"
-                      style={{ background: opt.swatch }}
+                      style={{ '--swatch-bg': opt.swatch } as React.CSSProperties}
                     />
                     <span>{opt.label}</span>
                   </button>
@@ -530,28 +539,25 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
                       <span
                         aria-hidden="true"
                         className="customizations-indicator-swatch__fill"
-                        style={{ background: opt.swatch }}
+                        style={{ '--swatch-bg': opt.swatch } as React.CSSProperties}
                       />
                     </button>
                   );
                 })}
-                <label
-                  className={`customizations-indicator-custom${
-                    isCustomIndicatorHex ? ' customizations-indicator-custom--active' : ''
-                  }`}
+                <ColorPickerPopover
+                  active={isCustomIndicatorHex}
+                  ariaLabel="Color personalizado del indicador"
+                  dialogLabel="Selector de color del indicador"
+                  onChange={(nextHex) =>
+                    writeAgentActivityIndicatorColor(nextHex as AgentActivityIndicatorColor)
+                  }
                   title="Color personalizado"
-                >
-                  <input
-                    aria-label="Color personalizado del indicador"
-                    className="customizations-indicator-custom__input"
-                    onChange={(e) => {
-                      const next = e.target.value as AgentActivityIndicatorColor;
-                      writeAgentActivityIndicatorColor(next);
-                    }}
-                    type="color"
-                    value={/^#[0-9a-fA-F]{6}$/.test(customIndicatorColorValue) ? customIndicatorColorValue : '#4ade80'}
-                  />
-                </label>
+                  triggerVariant="compact"
+                  value={customIndicatorColorValue}
+                />
+                {isCustomIndicatorHex && (
+                  <span className="customizations-indicator-custom__hex">{indicatorColor}</span>
+                )}
               </span>
             </div>
           </div>
@@ -833,12 +839,13 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
                       {field.label}
                     </label>
                     <div className="customizations-color-chip__controls">
-                      <input
-                        aria-label={`Color personalizado de ${field.label}`}
-                        className="customizations-color-input"
+                      <ColorPickerPopover
+                        active={Boolean(currentVal)}
+                        ariaLabel={`Color personalizado de ${field.label}`}
+                        dialogLabel={`Color de ${field.label}`}
                         id={`override-color-${field.key}`}
-                        onChange={(e) => updateOverrides({ [field.key]: e.target.value })}
-                        type="color"
+                        onChange={(nextHex) => updateOverrides({ [field.key]: nextHex })}
+                        triggerVariant="chip"
                         value={/^#[0-9a-fA-F]{6}$/.test(effectiveHex) ? effectiveHex : '#5c8fff'}
                       />
                       <span className="customizations-color-chip__hex">
@@ -873,49 +880,57 @@ export const CustomizationsTab: React.FC<CustomizationsTabProps> = ({
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <label className="settings-row__title" htmlFor="ui-font-select">
+              <h3 className="settings-row__title" id="ui-font-select-label">
                 Tipografía de interfaz
-              </label>
+              </h3>
               <p>Tipografía principal de la interfaz en barras laterales, chat y configuración.</p>
             </div>
             <div className="settings-row__control settings-row__control--menu">
-              <select
-                aria-label="Tipografía de interfaz"
-                className="ui-field settings-control"
-                id="ui-font-select"
-                onChange={(e) => updateOverrides({ uiFont: e.target.value || null })}
-                value={customizations.overrides.uiFont ?? ''}
-              >
-                {UI_FONT_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.value ?? ''}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <SelectMenu
+                className="settings-select"
+                label="Tipografía de interfaz"
+                onSelect={(id) => {
+                  const chosen = UI_FONT_OPTIONS.find((opt) => opt.id === id);
+                  updateOverrides({ uiFont: chosen?.value ?? null });
+                }}
+                rows={UI_FONT_OPTIONS.map((opt) => ({
+                  id: opt.id,
+                  title: opt.label,
+                  badge: opt.sample,
+                }))}
+                value={
+                  UI_FONT_OPTIONS.find((opt) => opt.value === customizations.overrides.uiFont)?.id ??
+                  'default'
+                }
+              />
             </div>
           </div>
 
           <div className="ui-card__row settings-row">
             <div className="settings-row__copy">
-              <label className="settings-row__title" htmlFor="code-font-select">
+              <h3 className="settings-row__title" id="code-font-select-label">
                 Tipografía de código
-              </label>
+              </h3>
               <p>Fuente monoespaciada para diffs, bloques de código y símbolos en línea.</p>
             </div>
             <div className="settings-row__control settings-row__control--menu">
-              <select
-                aria-label="Tipografía de código"
-                className="ui-field settings-control"
-                id="code-font-select"
-                onChange={(e) => updateOverrides({ codeFont: e.target.value || null })}
-                value={customizations.overrides.codeFont ?? ''}
-              >
-                {CODE_FONT_OPTIONS.map((opt) => (
-                  <option key={opt.id} value={opt.value ?? ''}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <SelectMenu
+                className="settings-select"
+                label="Tipografía de código"
+                onSelect={(id) => {
+                  const chosen = CODE_FONT_OPTIONS.find((opt) => opt.id === id);
+                  updateOverrides({ codeFont: chosen?.value ?? null });
+                }}
+                rows={CODE_FONT_OPTIONS.map((opt) => ({
+                  id: opt.id,
+                  title: opt.label,
+                  badge: opt.sample,
+                }))}
+                value={
+                  CODE_FONT_OPTIONS.find((opt) => opt.value === customizations.overrides.codeFont)
+                    ?.id ?? 'default'
+                }
+              />
             </div>
           </div>
 

@@ -76,6 +76,10 @@ describe('themeCustomizations engine', () => {
       'solar-horizon',
       'event-horizon',
       'lunar-eclipse',
+      'astral-nebula',
+      'tokyo-rain',
+      'misty-forest',
+      'cloud-sea',
       'custom-image',
     ]);
     expect(BACKDROP_PRESETS.map((p) => p.label)).toEqual([
@@ -86,6 +90,10 @@ describe('themeCustomizations engine', () => {
       'Horizonte Solar',
       'Horizonte de Eventos',
       'Claro de Luna',
+      'Nebulosa Astral',
+      'Tokio Sakura',
+      'Bosque de Niebla',
+      'Pradera Celeste',
       'Imagen personalizada',
     ]);
     expect(Object.keys(BACKDROP_WALLPAPER_URLS)).toEqual([
@@ -94,6 +102,10 @@ describe('themeCustomizations engine', () => {
       'solar-horizon',
       'event-horizon',
       'lunar-eclipse',
+      'astral-nebula',
+      'tokyo-rain',
+      'misty-forest',
+      'cloud-sea',
     ]);
     expect(HERO_FIGURE_OPTIONS.map((f) => f.label)).toEqual([
       'Predeterminado del tema',
@@ -283,5 +295,38 @@ describe('themeCustomizations engine', () => {
     expect(migrated.backdrop.dimming).toBe(14);
     applyThemeCustomizationsToDocument(migrated);
     expect(document.documentElement.getAttribute('data-surface-glass')).toBe('true');
+  });
+
+  it('preserves surface elevation between --pane, --composer, and --menu-plate and keeps --accent-fill solid', () => {
+    const aurora = sanitizeThemeCustomizations({
+      ...DEFAULT_THEME_CUSTOMIZATIONS,
+      appearanceMode: 'dark',
+      darkThemeId: 'aurora-studio',
+    });
+    applyThemeCustomizationsToDocument(aurora);
+    expect(document.documentElement.style.getPropertyValue('--pane')).toBe('#0d1424');
+    expect(document.documentElement.style.getPropertyValue('--composer')).toBe('');
+    expect(document.documentElement.style.getPropertyValue('--menu-plate')).toBe('');
+    expect(document.documentElement.style.getPropertyValue('--accent')).toBe('#38bdf8');
+    expect(document.documentElement.style.getPropertyValue('--accent-fill')).toBe('');
+
+    const customOverrides = sanitizeThemeCustomizations({
+      ...DEFAULT_THEME_CUSTOMIZATIONS,
+      appearanceMode: 'dark',
+      darkThemeId: 'kite-dark',
+      overrides: {
+        ...DEFAULT_THEME_CUSTOMIZATIONS.overrides,
+        surface: '#11131a',
+        accent: '#ff55aa',
+      },
+    });
+    applyThemeCustomizationsToDocument(customOverrides);
+    expect(document.documentElement.style.getPropertyValue('--pane')).toBe('#11131a');
+    expect(document.documentElement.style.getPropertyValue('--composer')).not.toBe('#11131a');
+    expect(document.documentElement.style.getPropertyValue('--composer')).toContain('color-mix');
+    expect(document.documentElement.style.getPropertyValue('--menu-plate')).not.toBe('#11131a');
+    expect(document.documentElement.style.getPropertyValue('--menu-plate')).toContain('color-mix');
+    expect(document.documentElement.style.getPropertyValue('--accent-fill')).toBe('#ff55aa');
+    expect(document.documentElement.style.getPropertyValue('--accent-tint')).toContain('color-mix');
   });
 });

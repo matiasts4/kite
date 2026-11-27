@@ -94,6 +94,10 @@ describe('CustomizationsTab UI overhaul', () => {
       'Horizonte Solar',
       'Horizonte de Eventos',
       'Claro de Luna',
+      'Nebulosa Astral',
+      'Tokio Sakura',
+      'Bosque de Niebla',
+      'Pradera Celeste',
       'Imagen personalizada',
     ]);
     await user.click(
@@ -206,9 +210,8 @@ describe('CustomizationsTab UI overhaul', () => {
       })
     );
 
-    fireEvent.change(screen.getByLabelText(/Tipografía de interfaz/i), {
-      target: { value: '"Instrument Serif", "Newsreader", Georgia, Cambria, serif' },
-    });
+    await user.click(screen.getByRole('combobox', { name: /Tipografía de interfaz/i }));
+    await user.click(screen.getByRole('option', { name: /Serif Editorial/i }));
     expect(onUpdateCustomizations).toHaveBeenCalledWith(
       expect.objectContaining({
         overrides: expect.objectContaining({
@@ -217,9 +220,8 @@ describe('CustomizationsTab UI overhaul', () => {
       })
     );
 
-    fireEvent.change(screen.getByLabelText(/Tipografía de código/i), {
-      target: { value: '"JetBrains Mono", "Fira Code", monospace' },
-    });
+    await user.click(screen.getByRole('combobox', { name: /Tipografía de código/i }));
+    await user.click(screen.getByRole('option', { name: /JetBrains Mono/i }));
     expect(onUpdateCustomizations).toHaveBeenCalledWith(
       expect.objectContaining({
         overrides: expect.objectContaining({
@@ -341,11 +343,25 @@ describe('CustomizationsTab UI overhaul', () => {
       expect(node).toHaveAttribute('data-color-mode', 'accent');
     });
 
-    const customColorInput = screen.getByLabelText(/Color personalizado del indicador/i);
-    fireEvent.change(customColorInput, { target: { value: '#22d3ee' } });
+    const cyanSwatch = screen.getByRole('button', { name: /^Cian$/i });
+    await user.click(cyanSwatch);
+    expect(cyanSwatch).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('kite.agentActivityIndicatorColor')).toBe('cyan');
+    preview.querySelectorAll('[data-testid="agent-status-indicator"]').forEach((node) => {
+      expect(node).toHaveAttribute('data-color-mode', 'cyan');
+      expect(node).toHaveStyle({ color: '#38bdf8' });
+    });
+
+    const customColorTrigger = screen.getByRole('button', {
+      name: /Color personalizado del indicador/i,
+    });
+    await user.click(customColorTrigger);
+    const hexInput = screen.getByLabelText(/Código hexadecimal/i);
+    fireEvent.change(hexInput, { target: { value: '#22d3ee' } });
     expect(localStorage.getItem('kite.agentActivityIndicatorColor')).toBe('#22d3ee');
     preview.querySelectorAll('[data-testid="agent-status-indicator"]').forEach((node) => {
       expect(node).toHaveAttribute('data-color-mode', '#22d3ee');
+      expect(node).toHaveStyle({ color: '#22d3ee' });
     });
   });
 });

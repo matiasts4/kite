@@ -44,6 +44,7 @@ You are operating inside Google AI Studio (cloud browser / web container). Recog
 ## 3. Repository Skills Discovery (Progressive Disclosure)
 Before executing specialized tasks in the imported repository, read `AGENTS.md` and load the matching skill file under `.agents/skills/<skill>/SKILL.md` FIRST instead of guessing rules:
 - **Feature planning, ODD specs, task sizing, or Risk lines** -> `.agents/skills/odd-workflow/SKILL.md` (+ `references/odd-template.md`)
+- **Tier 1/2/3 verification, quality gate, and build/release separation** -> `.agents/skills/kite-delivery-loop/SKILL.md` (+ `references/verifier-checklist.md`)
 - **Commits, diff slicing, changelog, or PR planning** -> `.agents/skills/work-unit-commits/SKILL.md`
 - **Adversarial review ("Judgment Day" / "juzgar" / pre-release audit)** -> `.agents/skills/judgment-day/SKILL.md` (+ `references/audit-prompts.md`)
 - **Porting / parity with another workflow or product** -> `.agents/skills/port-from-product/SKILL.md` (+ `references/`)
@@ -115,5 +116,5 @@ When wrapping up significant multi-step work in AI Studio, finish your response 
 | Frontend tests (`npx vitest run`) | Run if Vitest runnable cleanly | Mandatory before commit |
 | Production build (`npm run build`) | Optional preview check | Mandatory before release |
 | Rust suite (`cargo test --manifest-path src-tauri/Cargo.toml --workspace`) | **Not available** | Mandatory after pulling Rust/IPC edits |
-| Desktop CDP E2E (`npm run verify:desktop:e2e`) | **Not available** | Mandatory after UI/layout/IPC edits |
+| Desktop CDP E2E (`npm run verify:desktop:e2e`) | **Not available** | Mandatory locally for Tier 2 (scoped) and Tier 3 (full) UI/layout/IPC edits; skipped for Tier 1 micro changes and routine builds/releases |
 | Clean-room audit (`node .kite/sanitizer/audit-references.mjs --all`) | **Not available** (`.kite/` gitignored) | Mandatory before commit/push |

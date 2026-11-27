@@ -69,10 +69,14 @@ To prevent jarring height jumps when users navigate across lateral tabs and pane
    - Public task specifications live under `odd/tasks/<slug>.md`. They must be 100% product-focused and clean of external donor or cloning references.
    - Internal investigation tasks live under `.kite/tasks/<slug>.md` (gitignored).
    - A correction that belongs to an existing ODD updates that document in the same change: append the user's words to `## Log`, rewrite the affected `S#`, and reopen or add the linked task. Do not leave the fix floating only in code.
-2. **Quality Verification & 4-Lane Delivery Gate**:
-   - Follow `.agents/skills/kite-delivery-loop/SKILL.md` for every non-trivial feature or UI slice: **Proposer** (slim vertical slice + IPC/UI/E2E contract) -> **Builder** (`npm run verify:gate:fast` during iteration) -> **Automated Gate** (`npm run verify:gate`) -> **Independent QA & Visual Verifier** (separate read-only agent inspecting `verifier-handoff.md` and captured CDP PNGs).
-   - Run `npm run verify:ipc` and `npm run verify:design` (included inside `npm run verify:gate`) to enforce real Rust `generate_handler![]` parity, design tokens, and zero silent IPC `catch {}` blocks.
-   - Never mark an ODD verification task `[x]` if `verify:gate` returned `FAILED`, `INCOMPLETE` (`--skip-e2e`), or `FAST_ONLY` on a UI/runtime slice.
+2. **Quality Verification & Tiered Delivery Gate**:
+   - Follow `.agents/skills/kite-delivery-loop/SKILL.md` proportionally to change scope:
+     - **Tier 1 (Micro / Non-Visual)** — copy, static assets/wallpapers, unit tests, pure logic with no layout or IPC changes: run `npm run verify:gate -- --tier micro` (or `verify:gate:fast` when only non-UI/test files changed). Zero E2E and zero Verifier subagent; `PASS` closes the ODD task `[x]`.
+     - **Tier 2 (Scoped Visual)** — bounded visual/CSS/state fix in 1 view/component with no shell/cross-view impact and `Risk: none`: run `npm run verify:gate -- --tier scoped --spec <slug>` and inspect the 1–2 relevant PNGs **inline** (no separate Verifier subagent).
+     - **Tier 3 (Large / Feature / Structural UI or IPC)** — new feature/view, shell/multi-view layout change, new/changed IPC, or `Risk: item 1–6`: run full 4-lane flow (**Proposer** -> **Builder** -> **Automated Gate** `npm run verify:gate` -> **Independent QA & Visual Verifier** inspecting `1366x840` and `960x680` CDP PNGs).
+   - Run `npm run verify:ipc` and `npm run verify:design` (included automatically inside `verify:gate`) to enforce real Rust `generate_handler![]` parity, design tokens, and zero silent IPC `catch {}` blocks.
+   - Never mark a Tier 2/3 ODD verification task `[x]` if `verify:gate` returned `FAILED`, `INCOMPLETE` (`--skip-e2e`), or `FAST_ONLY`.
+   - **Build / Release Separation**: Packaging (`npm run release`, `release:fast`, `build:installer`, `update`) runs unit tests + build (or `--skip-tests` when tests just passed with no edits since) and **never** re-runs Desktop CDP E2E or Independent Verifier for already-verified ODD work. Reserve `--profile full` for manual milestone/pre-major audits only.
    - For real desktop UI, streaming, orchestration, and layout verification over CDP, run `npm run verify:desktop:e2e` (see [docs/qa/catalog.md](docs/qa/catalog.md) and local skill `kite-desktop-qa`).
    - Before any commit or push, run `node .kite/sanitizer/audit-references.mjs --check`.
 3. **Matching another product**:
@@ -116,7 +120,7 @@ Before executing matching work, read the full `SKILL.md` file rather than guessi
 | `judgment-day` | Explicit adversarial/dual review (`judgment day`, `juzgar`, blind pre-release diff audit) | [`.agents/skills/judgment-day/SKILL.md`](.agents/skills/judgment-day/SKILL.md) |
 | `port-from-product` | Feature parity requests (`copy from`, `match`, `parity`, `port`) and full surface inventories | [`.agents/skills/port-from-product/SKILL.md`](.agents/skills/port-from-product/SKILL.md) |
 | `cognitive-doc-design` | Writing or refactoring guides, READMEs, RFCs, or review docs with low cognitive load | [`.agents/skills/cognitive-doc-design/SKILL.md`](.agents/skills/cognitive-doc-design/SKILL.md) |
-| `kite-delivery-loop` | Feature proposals, UI slices, `verify:gate`, Proposer -> Builder -> Independent Visual/QA Verifier workflow | [`.agents/skills/kite-delivery-loop/SKILL.md`](.agents/skills/kite-delivery-loop/SKILL.md) |
+| `kite-delivery-loop` | Feature proposals, UI slices, `verify:gate`, Tier 1/2/3 verification, release separation | [`.agents/skills/kite-delivery-loop/SKILL.md`](.agents/skills/kite-delivery-loop/SKILL.md) |
 | `kite-desktop-qa` | Desktop E2E, Tauri CDP verification, layout matrix, and sabotage fault checks | [`.agents/skills/kite-desktop-qa/SKILL.md`](.agents/skills/kite-desktop-qa/SKILL.md) |
 | `qa-task-handoff` | QA task, manual test, testeo pendiente, crear en Tasks for Voice Mode, Zed/SETH, and Agent | [`.agents/skills/qa-task-handoff/SKILL.md`](.agents/skills/qa-task-handoff/SKILL.md) |
 | `skill-creator` | Creating or updating skills inside `.agents/skills/` | [`.agents/skills/skill-creator/SKILL.md`](.agents/skills/skill-creator/SKILL.md) |

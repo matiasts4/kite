@@ -11,7 +11,12 @@ import {
   verifyIpcWorkspace,
 } from './verify-ipc.mjs';
 import { lintFileContent, verifyDesignWorkspace } from './verify-design.mjs';
-import { planGateExecution, buildVerifierHandoffMarkdown, computeGateVerdict } from './verify-gate.mjs';
+import {
+  planGateExecution,
+  buildVerifierHandoffMarkdown,
+  computeGateVerdict,
+  extractE2eArtifactDirs,
+} from './verify-gate.mjs';
 
 const CONFIG_PATH = path.resolve(import.meta.dirname, 'gate.config.json');
 const GATE_CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
@@ -385,4 +390,144 @@ test('verify-gate computeGateVerdict enforces exit codes for FAILED, INCOMPLETE,
   const pass = computeGateVerdict({ anyFailed: false, profile: 'standard', needsVisualReview: false });
   assert.equal(pass.verdict, 'PASS');
   assert.equal(pass.exitCode, 0);
+});
+
+test('verify-gate excludes test-only files from E2E and visual review while still running their Vitest paths', () => {
+  const plan = planGateExecution(
+    GATE_CONFIG,
+    [
+      'src/lib/themeCustomizations.ts',
+      'src/lib/themeCustomizations.test.ts',
+      'src/components/views/settings/CustomizationsTab.test.tsx',
+    ],
+    { profile: 'standard' },
+  );
+
+  assert.equal(plan.needsVisualReview, false);
+  assert.deepEqual(plan.e2eSpecs, []);
+  assert.equal(plan.visualReviewMode, 'none');
+  assert.ok(plan.vitestPaths.includes('src/components/views/settings'));
+  assert.ok(plan.vitestPaths.includes('src/lib/themeCustomizations.test.ts'));
+});
+
+test('verify-gate decoupled areas and excludePatterns prevent cross-area E2E explosion', () => {
+  const voiceCssPlan = planGateExecution(
+    GATE_CONFIG,
+    ['src/components/views/settings/argos/VoicePickerModal.css'],
+    { profile: 'standard' },
+  );
+  assert.deepEqual(voiceCssPlan.matchedAreas, ['voice-and-argos']);
+  assert.deepEqual(voiceCssPlan.e2eSpecs, ['voice-mode']);
+
+  const settingsPlan = planGateExecution(
+    GATE_CONFIG,
+    ['src/components/views/settings/CustomizationsTab.tsx'],
+    { profile: 'standard' },
+  );
+  assert.deepEqual(settingsPlan.matchedAreas, ['settings']);
+  assert.deepEqual(settingsPlan.e2eSpecs, ['settings-tasks']);
+
+  const uiKitPlan = planGateExecution(
+    GATE_CONFIG,
+    ['src/components/ui/Button.tsx'],
+    { profile: 'standard' },
+  );
+  assert.deepEqual(uiKitPlan.matchedAreas, ['ui-primitives']);
+  assert.deepEqual(uiKitPlan.e2eSpecs, ['ui-kit']);
+});
+
+test('verify-gate supports Tier 1 micro, Tier 2 scoped --spec, and Tier 3 large modes', () => {
+  const microPlan = planGateExecution(
+    GATE_CONFIG,
+    ['src/components/views/settings/CustomizationsTab.tsx'],
+    { tier: 'micro' },
+  );
+  assert.equal(microPlan.profile, 'fast');
+  assert.equal(microPlan.tier, 'micro');
+  assert.deepEqual(microPlan.e2eSpecs, []);
+  assert.equal(microPlan.needsVisualReview, false);
+  assert.equal(microPlan.visualReviewMode, 'none');
+
+  assert.deepEqual(
+    computeGateVerdict({ anyFailed: false, profile: 'fast', tier: 'micro', needsVisualReview: false }),
+    { verdict: 'PASS', reason: 'Tier 1 (micro) verified without Desktop CDP E2E.', exitCode: 0 },
+  );
+  assert.deepEqual(
+    computeGateVerdict({ anyFailed: false, profile: 'fast', tier: 'micro', needsVisualReview: true }),
+    { verdict: 'PASS', reason: 'Tier 1 (micro) verified without Desktop CDP E2E.', exitCode: 0 },
+  );
+
+  const scopedPlan = planGateExecution(
+    GATE_CONFIG,
+    ['src/components/views/chat/ChatComposer.tsx'],
+    { tier: 'scoped', specs: ['thread-streaming'] },
+  );
+  assert.equal(scopedPlan.tier, 'scoped');
+  assert.deepEqual(scopedPlan.e2eSpecs, ['thread-streaming']);
+  assert.equal(scopedPlan.needsVisualReview, true);
+  assert.equal(scopedPlan.visualReviewMode, 'inline');
+
+  const largePlan = planGateExecution(
+    GATE_CONFIG,
+    ['src/components/views/chat/ChatComposer.tsx'],
+    { tier: 'large' },
+  );
+  assert.equal(largePlan.tier, 'large');
+  assert.equal(largePlan.visualReviewMode, 'independent-verifier');
+
+  const implicitScopedPlan = planGateExecution(
+    GATE_CONFIG,
+    ['src/components/views/chat/ChatComposer.tsx'],
+    { specs: ['thread-streaming'] },
+  );
+  assert.equal(implicitScopedPlan.tier, 'scoped');
+  assert.equal(implicitScopedPlan.visualReviewMode, 'inline');
+});
+
+test('verify-gate extractE2eArtifactDirs isolates directories from current E2E stdout/stderr', () => {
+  const repoRoot = path.resolve(os.tmpdir(), 'kite-e2e-scope-test');
+  const dirA = path.join(repoRoot, 'test-results', 'e2e', 'run-A', 'SETTINGS-TASKS-01');
+  const dirB = path.join(repoRoot, 'test-results', 'e2e', 'run-A', 'CODE-DIFFS-01');
+  const output = [
+    `[PASS] SETTINGS-TASKS-01 (1200ms) — artifacts: ${dirA}`,
+    `[FAIL] CODE-DIFFS-01 (900ms): layout error`,
+    `  Logs & artifacts: ${dirB}`,
+    `[PASS] SETTINGS-TASKS-01 (1200ms) — artifacts: ${dirA}`,
+  ].join('\n');
+
+  assert.deepEqual(extractE2eArtifactDirs(output, repoRoot), [
+    'test-results/e2e/run-A/SETTINGS-TASKS-01',
+    'test-results/e2e/run-A/CODE-DIFFS-01',
+  ]);
+});
+
+test('verify-gate handoff markdown differentiates Tier 2 inline review from Tier 3 independent verifier', () => {
+  const inlineMd = buildVerifierHandoffMarkdown({
+    timestamp: '2026-11-25T12-00-00Z',
+    profile: 'standard',
+    tier: 'scoped',
+    visualReviewMode: 'inline',
+    verdict: 'PASS',
+    changedFiles: ['src/components/views/settings/CustomizationsTab.tsx'],
+    matchedAreas: ['settings'],
+    needsVisualReview: true,
+    stages: [{ id: 'e2e', status: 'passed', durationMs: 25000, summary: '1/1 passed' }],
+    screenshots: ['test-results/e2e/run-1/SETTINGS-TASKS-01/02-settings-customizations-1366x840.png'],
+  });
+  assert.ok(inlineMd.includes('Scoped Inline Visual Check (Tier 2)'));
+  assert.equal(inlineMd.includes('## Independent Verifier Contract'), false);
+
+  const verifierMd = buildVerifierHandoffMarkdown({
+    timestamp: '2026-11-25T12-00-00Z',
+    profile: 'standard',
+    tier: 'large',
+    visualReviewMode: 'independent-verifier',
+    verdict: 'PASS',
+    changedFiles: ['src/components/views/chat/ChatComposer.tsx'],
+    matchedAreas: ['chat-and-thread'],
+    needsVisualReview: true,
+    stages: [{ id: 'e2e', status: 'passed', durationMs: 40000, summary: '2/2 passed' }],
+    screenshots: ['test-results/e2e/run-1/UI-LAYOUT-01/01-standard-closed-dock-1366x840.png'],
+  });
+  assert.ok(verifierMd.includes('## Independent Verifier Contract'));
 });

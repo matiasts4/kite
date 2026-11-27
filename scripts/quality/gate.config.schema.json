@@ -89,6 +89,7 @@
             "properties": {
               "id": { "type": "string" },
               "patterns": { "type": "array", "items": { "type": "string" } },
+              "excludePatterns": { "type": "array", "items": { "type": "string" } },
               "vitestPaths": { "type": "array", "items": { "type": "string" } },
               "cargoFilters": { "type": "array", "items": { "type": "string" } },
               "e2eSpecs": { "type": "array", "items": { "type": "string" } },

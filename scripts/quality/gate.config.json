@@ -123,15 +123,15 @@
     "sanitizerCommand": "node .kite/sanitizer/audit-references.mjs --check",
     "profiles": {
       "fast": {
-        "description": "Tight Builder inner loop: IPC contracts, diff design lint, sanitizer, TypeScript, and affected Vitest suites.",
-        "stages": ["ipc", "design", "sanitizer", "quality-tests", "tsc", "vitest"]
+        "description": "Tier 1 (micro / non-visual) and Builder inner loop: IPC contracts, diff design lint, sanitizer, quality tests, TypeScript, and affected Vitest + Cargo suites (0 E2E).",
+        "stages": ["ipc", "design", "sanitizer", "quality-tests", "tsc", "vitest", "cargo"]
       },
       "standard": {
-        "description": "Mandatory pre-closeout gate: all fast checks + affected Cargo tests + affected Desktop CDP E2E + Verifier Handoff report.",
+        "description": "Tier 2 (scoped visual with --tier scoped --spec) and Tier 3 (large feature/structural UI or IPC) gate: fast checks + affected Desktop CDP E2E + handoff report.",
         "stages": ["ipc", "design", "sanitizer", "quality-tests", "tsc", "vitest", "cargo", "e2e"]
       },
       "full": {
-        "description": "Release-grade full verification: full Vitest suite, full Cargo workspace, full Desktop CDP E2E suite.",
+        "description": "Manual milestone / pre-major audit only: full Vitest suite, full Cargo workspace, full Desktop CDP E2E suite. Do NOT run for routine patch builds or releases.",
         "stages": ["ipc", "design", "sanitizer", "quality-tests", "tsc", "vitest-all", "cargo-all", "e2e-all"]
       }
     },
@@ -140,13 +140,16 @@
         "id": "chat-and-thread",
         "patterns": [
           "src/components/views/chat/**",
+          "src/components/sidebar/ThreadRoster.tsx",
+          "src/components/sidebar/types.ts",
+          "src/components/sidebar/ThreadRoster.test.tsx",
           "src/lib/ipc/chat.ts",
           "src-tauri/src/chat/**",
           "src-tauri/src/chat_commands/**"
         ],
-        "vitestPaths": ["src/components/views/chat"],
+        "vitestPaths": ["src/components/views/chat", "src/components/sidebar/ThreadRoster.test.tsx"],
         "cargoFilters": ["chat::"],
-        "e2eSpecs": ["desktop-smoke", "thread-streaming", "ui-layout"],
+        "e2eSpecs": ["thread-streaming", "ui-layout"],
         "visualReview": true
       },
       {
@@ -154,6 +157,7 @@
         "patterns": [
           "src/components/views/subagents/**",
           "src/components/RightDock.tsx",
+          "src/components/dock/**",
           "src-tauri/src/dispatch/**",
           "src-tauri/src/dispatch_wire/**"
         ],
@@ -168,6 +172,7 @@
           "src/lib/operator/**",
           "src/components/Argos*.tsx",
           "src/components/Zed*.tsx",
+          "src/components/views/voice/**",
           "src/components/views/settings/argos/**",
           "src/components/views/settings/zed/**",
           "src-tauri/src/voice_audio/**",
@@ -176,7 +181,7 @@
           "src-tauri/src/audio_ducking.rs",
           "src-tauri/src/operator_runtime.rs"
         ],
-        "vitestPaths": ["src/lib/operator", "src/components/views/settings/argos", "src/components/views/chat/ThreadVoiceMode.test.tsx"],
+        "vitestPaths": ["src/lib/operator", "src/components/views/voice", "src/components/views/settings/argos", "src/components/views/chat/ThreadVoiceMode.test.tsx"],
         "cargoFilters": ["voice_audio", "voice_realtime", "dictation"],
         "e2eSpecs": ["voice-mode"],
         "visualReview": true
@@ -197,38 +202,102 @@
         ],
         "vitestPaths": ["src/components/views/agents", "src/components/views/routines", "src/components/sidebar/AgentRoster.test.tsx"],
         "cargoFilters": ["agents", "agent_mind", "agent_playbooks", "routines", "local_autopilot"],
-        "e2eSpecs": ["agents-routines", "ui-layout"],
+        "e2eSpecs": ["agents-routines"],
         "visualReview": true
       },
       {
-        "id": "shell-and-ui",
+        "id": "shell",
         "patterns": [
           "src/App.tsx",
+          "src/index.css",
           "src/components/TitleBar.tsx",
           "src/components/Sidebar.tsx",
-          "src/components/ui/**",
-          "src/components/views/**/*.css",
           "src/visual-language.css"
         ],
-        "vitestPaths": ["src/components/TitleBar.test.tsx", "src/components/Sidebar.test.tsx", "src/components/ui"],
+        "vitestPaths": ["src/components/TitleBar.test.tsx", "src/components/Sidebar.test.tsx"],
         "cargoFilters": [],
-        "e2eSpecs": ["desktop-smoke", "ui-layout", "ui-kit"],
+        "e2eSpecs": ["desktop-smoke", "ui-layout"],
         "visualReview": true
       },
       {
-        "id": "settings-tasks-and-files",
+        "id": "ui-primitives",
+        "patterns": [
+          "src/components/ui/**"
+        ],
+        "vitestPaths": ["src/components/ui"],
+        "cargoFilters": [],
+        "e2eSpecs": ["ui-kit"],
+        "visualReview": true
+      },
+      {
+        "id": "settings",
         "patterns": [
           "src/components/views/settings/**",
+          "src/components/views/SettingsView.tsx",
+          "src/components/theme/**"
+        ],
+        "excludePatterns": [
+          "src/components/views/settings/argos/**",
+          "src/components/views/settings/zed/**"
+        ],
+        "vitestPaths": ["src/components/views/settings", "src/components/theme"],
+        "cargoFilters": [],
+        "e2eSpecs": ["settings-tasks"],
+        "visualReview": true
+      },
+      {
+        "id": "agent-updates",
+        "patterns": [
+          "src/components/updates/**",
+          "src/lib/agentUpdates*",
+          "src/components/quota/ProviderConnectionPanel*",
+          "src-tauri/src/agent_maintenance.rs",
+          "src-tauri/src/user_path.rs"
+        ],
+        "vitestPaths": [
+          "src/components/updates/AgentUpdates.test.tsx",
+          "src/components/quota/ProviderConnectionPanel.test.tsx",
+          "src/lib/agentUpdates.test.ts"
+        ],
+        "cargoFilters": ["agent_maintenance::tests", "user_path::tests"],
+        "e2eSpecs": ["topbar-popovers", "settings-tasks"],
+        "visualReview": true
+      },
+      {
+        "id": "tasks-and-tickets",
+        "patterns": [
           "src/components/views/tickets/**",
-          "src/components/views/files/**",
-          "src/components/views/diffs/**",
-          "src/components/code/**",
           "src-tauri/src/local_tasks.rs",
           "src-tauri/src/tickets.rs"
         ],
-        "vitestPaths": ["src/components/views/settings", "src/components/views/tickets", "src/components/views/diffs"],
+        "vitestPaths": ["src/components/views/tickets"],
         "cargoFilters": ["local_tasks"],
-        "e2eSpecs": ["settings-tasks", "code-diffs"],
+        "e2eSpecs": ["settings-tasks"],
+        "visualReview": true
+      },
+      {
+        "id": "code-and-diffs",
+        "patterns": [
+          "src/components/views/files/**",
+          "src/components/views/diffs/**",
+          "src/components/code/**"
+        ],
+        "vitestPaths": ["src/components/views/diffs"],
+        "cargoFilters": [],
+        "e2eSpecs": ["code-diffs"],
+        "visualReview": true
+      },
+      {
+        "id": "remote-control",
+        "patterns": [
+          "src-tauri/src/remote/**",
+          "src/lib/remote/**",
+          "src/lib/ipc/remote.ts",
+          "src/components/views/settings/RemoteTab*"
+        ],
+        "vitestPaths": ["src/lib/remote", "src/components/views/settings/RemoteTab.test.tsx"],
+        "cargoFilters": ["remote::"],
+        "e2eSpecs": ["settings-tasks"],
         "visualReview": true
       },
       {

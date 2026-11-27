@@ -110,6 +110,52 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
     expect(container.querySelector('[data-testid^="theme-hero-figure-"]')).toBeNull();
   });
 
+  it('plays mount greeting choreography, reacts to click/poke, and tracks composer curious mood across hero figures', async () => {
+    const { fireEvent } = await import('@testing-library/react');
+    const { rerender } = render(
+      <ThemeHeroFigure figure="pixel-companion" variant="hero" triggerKey="chat-1" />
+    );
+
+    const fig = screen.getByTestId('theme-hero-figure-pixel-companion');
+    expect(fig).toHaveAttribute('data-reaction', 'greeting');
+    expect(fig).toHaveAttribute('data-interactive', 'true');
+    expect(fig.querySelector('.kite-px__arm-right')).not.toBeNull();
+    expect(fig.querySelector('.kite-px__eyes')).not.toBeNull();
+
+    // Clicking the mascot triggers an excited burst reaction
+    fireEvent.click(fig);
+    expect(fig).toHaveAttribute('data-reaction', 'excited');
+
+    // Passing curious mood (e.g. composer typing) reflects live state
+    rerender(
+      <ThemeHeroFigure
+        figure="pixel-companion"
+        variant="hero"
+        triggerKey="chat-1"
+        mood="curious"
+      />
+    );
+    expect(fig).toHaveAttribute('data-mood', 'curious');
+
+    // Changing triggerKey (opening a new chat) replays greeting entrance
+    rerender(
+      <ThemeHeroFigure
+        figure="pixel-companion"
+        variant="hero"
+        triggerKey="chat-2"
+        mood="idle"
+      />
+    );
+    expect(fig).toHaveAttribute('data-reaction', 'greeting');
+
+    // Watermark remains non-interactive
+    rerender(<ThemeHeroFigure figure="pixel-companion" variant="watermark" />);
+    expect(screen.getByTestId('theme-hero-figure-pixel-companion')).toHaveAttribute(
+      'data-interactive',
+      'false'
+    );
+  });
+
   it('renders ThemeHeroFigure inside ChatHome and CodeHome empty states and respects style="none"', () => {
     writeThemeCustomizations({
       ...DEFAULT_THEME_CUSTOMIZATIONS,
@@ -137,6 +183,10 @@ describe('StageBackdrop & ThemeHeroFigure visual components', () => {
       'solar-horizon',
       'event-horizon',
       'lunar-eclipse',
+      'astral-nebula',
+      'tokyo-rain',
+      'misty-forest',
+      'cloud-sea',
       'custom-image',
     ];
 

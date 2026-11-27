@@ -18,7 +18,7 @@ export interface StageBackdropProps {
   className?: string;
 }
 
-export const StageBackdrop: React.FC<StageBackdropProps> = ({
+const StageBackdropInner: React.FC<StageBackdropProps> = ({
   customizations,
   variant = 'stage',
   overridePreset,
@@ -113,3 +113,5 @@ export const StageBackdrop: React.FC<StageBackdropProps> = ({
     </div>
   );
 };
+
+export const StageBackdrop = React.memo(StageBackdropInner);

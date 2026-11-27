@@ -1,4 +1,4 @@
-/* Stage Backdrop & Hero Figures — Visual Theme Layers */
+/* Stage Backdrop & Reactive Hero Figures — Visual Theme Layers */
 
 .stage-backdrop {
   position: absolute;
@@ -49,7 +49,7 @@
 }
 
 .stage-backdrop__scrim {
-  background: var(--background, #090a0c);
+  background: var(--background);
   transition: opacity 160ms ease;
 }
 
@@ -62,11 +62,12 @@
   background-position: 0 0, 3px 3px;
 }
 
+/* Crisp architectural corner watermark (non-interactive, GPU-quiet) */
 .stage-backdrop__watermark {
   position: absolute;
-  right: 28px;
-  bottom: 24px;
-  opacity: 0.14;
+  right: 26px;
+  bottom: 20px;
+  opacity: 0.16;
   pointer-events: none;
 }
 
@@ -78,12 +79,26 @@
   justify-content: center;
   pointer-events: none;
   user-select: none;
+  outline: none;
   --voice-level: 0;
+  --gaze-x: 0;
+  --gaze-y: 0;
+}
+
+.theme-hero-figure--interactive {
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: var(--card-radius, 12px);
+}
+
+.theme-hero-figure--interactive:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 4px;
 }
 
 .theme-hero-figure--hero {
-  width: 112px;
-  height: 92px;
+  width: 120px;
+  height: 104px;
   margin-bottom: 8px;
 }
 
@@ -93,8 +108,8 @@
 }
 
 .theme-hero-figure--card {
-  width: 64px;
-  height: 52px;
+  width: 68px;
+  height: 58px;
 }
 
 .theme-hero-figure--miniature {
@@ -103,30 +118,52 @@
 }
 
 .theme-hero-figure--watermark {
-  width: 132px;
-  height: 110px;
+  width: 176px;
+  height: 152px;
+}
+
+.theme-hero-figure__stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* Pure radial-gradient halo — visually rich without expensive filter: blur() repaints */
 .theme-hero-figure__halo {
   position: absolute;
-  inset: -6%;
+  inset: -8%;
   border-radius: var(--pill-radius, 9999px);
   background: radial-gradient(
     circle,
-    color-mix(in srgb, var(--accent, #5c8fff) 24%, transparent) 0%,
-    color-mix(in srgb, var(--accent, #5c8fff) 8%, transparent) 44%,
+    color-mix(in srgb, var(--accent) 26%, transparent) 0%,
+    color-mix(in srgb, var(--accent) 9%, transparent) 44%,
     transparent 72%
   );
   transform: scale(calc(0.94 + var(--voice-level, 0) * 0.24));
-  transition: transform 0.14s ease-out, opacity 0.18s ease;
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+}
+
+.theme-hero-figure--interactive:hover .theme-hero-figure__halo,
+.theme-hero-figure[data-reaction='excited'] .theme-hero-figure__halo {
+  transform: scale(1.14);
+}
+
+.theme-hero-figure[data-mood='curious'] .theme-hero-figure__halo {
+  transform: scale(1.06);
+}
+
+.theme-hero-figure--watermark .theme-hero-figure__halo {
+  opacity: 0.38;
 }
 
 .theme-hero-figure[data-voice-state='muted'] .theme-hero-figure__halo,
 .theme-hero-figure[data-voice-state='error'] .theme-hero-figure__halo {
   background: radial-gradient(
     circle,
-    color-mix(in srgb, var(--status-failed, #ef4444) 22%, transparent) 0%,
+    color-mix(in srgb, var(--status-failed) 24%, transparent) 0%,
     transparent 68%
   );
   transform: scale(0.9);
@@ -139,19 +176,288 @@
   overflow: visible;
 }
 
-.theme-hero-figure--hero .theme-hero-figure__svg {
-  animation: kite-hero-float 6.5s ease-in-out infinite;
-}
-
-/* Active voice animations run ONLY during live voice states (0 work when idle) */
+/* Shared SVG transform origins */
 .theme-hero-figure__orbit,
 .theme-hero-figure__orbit-reverse,
 .theme-hero-figure__pulse-core,
-.theme-hero-figure__bar {
+.theme-hero-figure__bar,
+.kite-px__rig,
+.kite-px__head,
+.kite-px__antenna,
+.kite-px__shadow,
+.kite-px__eye-pair,
+.kite-px__spark,
+.kite-px__foot,
+.kite-kc__craft,
+.kite-kc__tail,
+.kite-oc__tilt-a,
+.kite-oc__star,
+.kite-iso__cap,
+.kite-iso__core,
+.kite-eb__sun,
+.kite-eb__star,
+.kite-kr__diamond {
   transform-box: fill-box;
   transform-origin: center;
 }
 
+.kite-px__arm-right {
+  transform-box: fill-box;
+  transform-origin: 25% 20%;
+}
+
+.kite-px__arm-left {
+  transform-box: fill-box;
+  transform-origin: 75% 20%;
+}
+
+.kite-eb__leaf-left {
+  transform-box: fill-box;
+  transform-origin: 100% 90%;
+}
+
+.kite-eb__leaf-right {
+  transform-box: fill-box;
+  transform-origin: 0% 90%;
+}
+
+/* ============================================================================
+   1. PIXEL COMPANION — Living idle, entrance hop+wave, curious gaze, poke jump
+   ============================================================================ */
+
+.theme-hero-figure--hero .kite-px__rig,
+.customizations-figure-tile:hover .kite-px__rig {
+  animation: kite-px-idle-bob 3.6s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-px__shadow {
+  animation: kite-px-shadow-idle 3.6s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-px__eye-pair,
+.customizations-figure-tile:hover .kite-px__eye-pair {
+  animation: kite-px-blink 5.2s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-px__eyes {
+  transform: translate(calc(var(--gaze-x, 0) * 3.2px), calc(var(--gaze-y, 0) * 2px));
+  transition: transform 140ms ease-out;
+}
+
+.theme-hero-figure--hero .kite-px__antenna {
+  animation: kite-px-antenna-sway 3.6s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-px__sparkles {
+  opacity: 0;
+}
+
+/* Greeting on open chat + Excited on click */
+.theme-hero-figure[data-reaction='greeting'] .kite-px__rig,
+.theme-hero-figure[data-reaction='excited'] .kite-px__rig {
+  animation: kite-px-hop 1.15s cubic-bezier(0.22, 1, 0.36, 1) 1, kite-px-idle-bob 3.6s ease-in-out 1.15s infinite;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-px__shadow,
+.theme-hero-figure[data-reaction='excited'] .kite-px__shadow {
+  animation: kite-px-shadow-hop 1.15s cubic-bezier(0.22, 1, 0.36, 1) 1, kite-px-shadow-idle 3.6s ease-in-out 1.15s infinite;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-px__arm-right,
+.theme-hero-figure[data-reaction='excited'] .kite-px__arm-right,
+.customizations-figure-tile:hover .kite-px__arm-right {
+  animation: kite-px-wave 1.1s ease-in-out 1;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-px__sparkles,
+.theme-hero-figure[data-reaction='excited'] .kite-px__sparkles,
+.customizations-figure-tile:hover .kite-px__sparkles {
+  opacity: 1;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-px__spark,
+.theme-hero-figure[data-reaction='excited'] .kite-px__spark,
+.customizations-figure-tile:hover .kite-px__spark {
+  animation: kite-sparkle-pop 1.15s ease-out 1 both;
+}
+
+.kite-px__spark--2 {
+  animation-delay: 80ms;
+}
+
+.kite-px__spark--3 {
+  animation-delay: 160ms;
+}
+
+.kite-px__spark--4 {
+  animation-delay: 120ms;
+}
+
+/* Curious mood while user types in composer */
+.theme-hero-figure[data-mood='curious'] .kite-px__head {
+  transform: rotate(-5deg) translateY(1.5px);
+  transition: transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.theme-hero-figure[data-mood='curious'] .kite-px__beacon {
+  animation: kite-figure-pulse 1.2s ease-in-out infinite;
+}
+
+/* ============================================================================
+   2. KITE CREST — Banking wind glide, swoop entrance, diamond shimmer burst
+   ============================================================================ */
+
+.theme-hero-figure--hero .kite-kc__craft,
+.customizations-figure-tile:hover .kite-kc__craft {
+  animation: kite-kc-glide 4.4s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-kc__tail,
+.customizations-figure-tile:hover .kite-kc__tail {
+  animation: kite-kc-tail-sway 2.8s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-kc__reticle {
+  animation: kite-figure-spin 26s linear infinite;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-kc__craft {
+  animation: kite-kc-swoop 1.05s cubic-bezier(0.22, 1, 0.36, 1) 1, kite-kc-glide 4.4s ease-in-out 1.05s infinite;
+}
+
+.theme-hero-figure[data-reaction='excited'] .kite-kc__craft {
+  animation: kite-kc-spin-pop 0.9s cubic-bezier(0.22, 1, 0.36, 1) 1, kite-kc-glide 4.4s ease-in-out 0.9s infinite;
+}
+
+.theme-hero-figure[data-mood='curious'] .kite-kc__beacon {
+  animation: kite-figure-pulse 1.3s ease-in-out infinite;
+}
+
+/* ============================================================================
+   3. ORBITAL CONSTELLATION — Celestial astrolabe & sequential star ignition
+   ============================================================================ */
+
+.theme-hero-figure--hero .kite-oc__outer,
+.customizations-figure-tile:hover .kite-oc__outer {
+  animation: kite-figure-spin 22s linear infinite;
+}
+
+.theme-hero-figure--hero .kite-oc__tilt-b,
+.customizations-figure-tile:hover .kite-oc__tilt-b {
+  animation: kite-figure-spin-reverse 18s linear infinite;
+}
+
+.theme-hero-figure--hero .kite-oc__star {
+  animation: kite-star-twinkle 3.2s ease-in-out infinite;
+}
+
+.kite-oc__star--2 {
+  animation-delay: 0.45s;
+}
+
+.kite-oc__star--3 {
+  animation-delay: 0.9s;
+}
+
+.kite-oc__star--4 {
+  animation-delay: 1.35s;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-oc__core,
+.theme-hero-figure[data-reaction='excited'] .kite-oc__core {
+  animation: kite-figure-pulse 0.85s ease-in-out 2;
+}
+
+.theme-hero-figure[data-mood='curious'] .kite-oc__outer {
+  animation-duration: 9s;
+}
+
+/* ============================================================================
+   4. ISOMETRIC CONSTRUCT — Magnetic levitation split & crystal core pulse
+   ============================================================================ */
+
+.theme-hero-figure--hero .kite-iso__cap,
+.customizations-figure-tile:hover .kite-iso__cap {
+  animation: kite-iso-levitate 3.8s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-iso__core,
+.customizations-figure-tile:hover .kite-iso__core {
+  animation: kite-figure-pulse 2.8s ease-in-out infinite;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-iso__cap,
+.theme-hero-figure[data-reaction='excited'] .kite-iso__cap {
+  animation: kite-iso-assemble 1.05s cubic-bezier(0.22, 1, 0.36, 1) 1, kite-iso-levitate 3.8s ease-in-out 1.05s infinite;
+}
+
+.theme-hero-figure[data-mood='curious'] .kite-iso__cap {
+  transform: translateY(-4px);
+  transition: transform 240ms ease;
+}
+
+/* ============================================================================
+   5. EDITORIAL BOTANICAL — Gentle breeze sway, bloom entrance, star shimmer
+   ============================================================================ */
+
+.theme-hero-figure--hero .kite-eb__leaf-left,
+.customizations-figure-tile:hover .kite-eb__leaf-left {
+  animation: kite-leaf-sway-left 4.2s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-eb__leaf-right,
+.customizations-figure-tile:hover .kite-eb__leaf-right {
+  animation: kite-leaf-sway-right 4.2s ease-in-out infinite;
+}
+
+.theme-hero-figure--hero .kite-eb__sun,
+.customizations-figure-tile:hover .kite-eb__sun {
+  animation: kite-figure-spin 30s linear infinite;
+}
+
+.theme-hero-figure--hero .kite-eb__star {
+  animation: kite-star-twinkle 3.4s ease-in-out infinite;
+}
+
+.kite-eb__star--2 {
+  animation-delay: 1.1s;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-eb__leaf-left,
+.theme-hero-figure[data-reaction='excited'] .kite-eb__leaf-left {
+  animation: kite-leaf-bloom 1s cubic-bezier(0.22, 1, 0.36, 1) 1, kite-leaf-sway-left 4.2s ease-in-out 1s infinite;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-eb__leaf-right,
+.theme-hero-figure[data-reaction='excited'] .kite-eb__leaf-right {
+  animation: kite-leaf-bloom 1s cubic-bezier(0.22, 1, 0.36, 1) 1, kite-leaf-sway-right 4.2s ease-in-out 1s infinite;
+}
+
+/* ============================================================================
+   6. KINETIC RING — Precision counter-rotation & harmonic ripple
+   ============================================================================ */
+
+.theme-hero-figure--hero .kite-kr__outer,
+.customizations-figure-tile:hover .kite-kr__outer {
+  animation: kite-figure-spin 16s linear infinite;
+}
+
+.theme-hero-figure--hero .kite-kr__inner,
+.customizations-figure-tile:hover .kite-kr__inner {
+  animation: kite-figure-spin-reverse 12s linear infinite;
+}
+
+.theme-hero-figure[data-reaction='greeting'] .kite-kr__bars .theme-hero-figure__bar,
+.theme-hero-figure[data-reaction='excited'] .kite-kr__bars .theme-hero-figure__bar,
+.theme-hero-figure[data-mood='curious'] .kite-kr__bars .theme-hero-figure__bar {
+  animation: kite-figure-bar 0.85s ease-in-out infinite;
+}
+
+.theme-hero-figure[data-mood='curious'] .kite-kr__outer {
+  animation-duration: 7s;
+}
+
+/* Voice-state animations (preserved for voice compatibility) */
 .theme-hero-figure[data-voice-state='listening'] .theme-hero-figure__orbit {
   animation: kite-figure-spin 18s linear infinite;
 }
@@ -196,13 +502,249 @@
   animation-delay: 0.48s;
 }
 
-@keyframes kite-hero-float {
+/* ============================================================================
+   KEYFRAMES
+   ============================================================================ */
+
+@keyframes kite-px-idle-bob {
   0%,
   100% {
-    transform: translateY(0px);
+    transform: translateY(0);
   }
   50% {
-    transform: translateY(-3px);
+    transform: translateY(-3.2px);
+  }
+}
+
+@keyframes kite-px-shadow-idle {
+  0%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0.22;
+  }
+  50% {
+    transform: scaleX(0.88);
+    opacity: 0.15;
+  }
+}
+
+@keyframes kite-px-hop {
+  0% {
+    transform: translateY(6px) scale(0.92, 1.06);
+  }
+  22% {
+    transform: translateY(-10px) scale(0.96, 1.07);
+  }
+  44% {
+    transform: translateY(1.5px) scale(1.06, 0.93);
+  }
+  64% {
+    transform: translateY(-5px) scale(0.98, 1.03);
+  }
+  82% {
+    transform: translateY(0.5px) scale(1.02, 0.98);
+  }
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+}
+
+@keyframes kite-px-shadow-hop {
+  0% {
+    transform: scaleX(1.08);
+  }
+  22% {
+    transform: scaleX(0.64);
+  }
+  44% {
+    transform: scaleX(1.1);
+  }
+  64% {
+    transform: scaleX(0.82);
+  }
+  100% {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes kite-px-wave {
+  0% {
+    transform: rotate(0deg);
+  }
+  20% {
+    transform: rotate(-128deg);
+  }
+  38% {
+    transform: rotate(-92deg);
+  }
+  56% {
+    transform: rotate(-132deg);
+  }
+  74% {
+    transform: rotate(-98deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes kite-px-blink {
+  0%,
+  44%,
+  48%,
+  100% {
+    transform: scaleY(1);
+  }
+  46% {
+    transform: scaleY(0.12);
+  }
+}
+
+@keyframes kite-px-antenna-sway {
+  0%,
+  100% {
+    transform: rotate(-3deg);
+  }
+  50% {
+    transform: rotate(3deg);
+  }
+}
+
+@keyframes kite-sparkle-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.3) translateY(4px);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1.15) translateY(-2px);
+  }
+  75% {
+    opacity: 0.85;
+    transform: scale(0.95) translateY(-4px);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.5) translateY(-7px);
+  }
+}
+
+@keyframes kite-kc-glide {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1.5deg);
+  }
+  50% {
+    transform: translateY(-4px) rotate(1.8deg);
+  }
+}
+
+@keyframes kite-kc-swoop {
+  0% {
+    opacity: 0.5;
+    transform: translate(-10px, 8px) rotate(-14deg) scale(0.88);
+  }
+  55% {
+    opacity: 1;
+    transform: translate(2px, -4px) rotate(4deg) scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) rotate(-1.5deg) scale(1);
+  }
+}
+
+@keyframes kite-kc-spin-pop {
+  0% {
+    transform: scale(1) rotate(0deg);
+  }
+  45% {
+    transform: scale(1.1) rotate(12deg) translateY(-5px);
+  }
+  75% {
+    transform: scale(0.97) rotate(-5deg) translateY(1px);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes kite-kc-tail-sway {
+  0%,
+  100% {
+    transform: rotate(-4deg);
+  }
+  50% {
+    transform: rotate(5deg);
+  }
+}
+
+@keyframes kite-iso-levitate {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4.5px);
+  }
+}
+
+@keyframes kite-iso-assemble {
+  0% {
+    transform: translateY(-10px) scale(0.92);
+  }
+  50% {
+    transform: translateY(2px) scale(1.03);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes kite-leaf-sway-left {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(-4deg);
+  }
+}
+
+@keyframes kite-leaf-sway-right {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(4deg);
+  }
+}
+
+@keyframes kite-leaf-bloom {
+  0% {
+    transform: scale(0.65) rotate(-12deg);
+    opacity: 0.5;
+  }
+  65% {
+    transform: scale(1.06) rotate(3deg);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+}
+
+@keyframes kite-star-twinkle {
+  0%,
+  100% {
+    opacity: 0.52;
+    transform: scale(0.86);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.16);
   }
 }
 
@@ -232,40 +774,39 @@
   }
   50% {
     opacity: 1;
-    transform: scale(1.08);
+    transform: scale(1.1);
   }
 }
 
 @keyframes kite-figure-bar {
   0%,
   100% {
-    transform: scaleY(0.55);
+    transform: scaleY(0.5);
   }
   50% {
-    transform: scaleY(1.05);
+    transform: scaleY(1.08);
   }
+}
+
+/* Pause decorative motion when window is minimized */
+html[data-window-state='minimized'] .theme-hero-figure * {
+  animation-play-state: paused !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .stage-backdrop__scrim,
-  .theme-hero-figure__svg,
   .theme-hero-figure__halo,
-  .theme-hero-figure__orbit,
-  .theme-hero-figure__orbit-reverse,
-  .theme-hero-figure__pulse-core,
-  .theme-hero-figure__bar {
+  .theme-hero-figure__svg,
+  .theme-hero-figure * {
     animation: none !important;
     transition: none !important;
   }
 }
 
 html[data-motion='reduce'] .stage-backdrop__scrim,
-html[data-motion='reduce'] .theme-hero-figure__svg,
 html[data-motion='reduce'] .theme-hero-figure__halo,
-html[data-motion='reduce'] .theme-hero-figure__orbit,
-html[data-motion='reduce'] .theme-hero-figure__orbit-reverse,
-html[data-motion='reduce'] .theme-hero-figure__pulse-core,
-html[data-motion='reduce'] .theme-hero-figure__bar {
+html[data-motion='reduce'] .theme-hero-figure__svg,
+html[data-motion='reduce'] .theme-hero-figure * {
   animation: none !important;
   transition: none !important;
 }

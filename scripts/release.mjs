@@ -32,6 +32,13 @@ const PRODUCTS = {
   studio: { label: 'Kite Code', file: 'Kite-Code', match: /Kite/i, extra: [] },
 };
 
+const releaseStart = Date.now();
+const formatDuration = (ms) => {
+  const totalSec = Math.round(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return min > 0 ? `${min}m ${sec}s` : `${sec}s`;
+};
 const step = (m) => console.log(`\n\x1b[36m▶ ${m}\x1b[0m`);
 const run = (cmd) => execSync(cmd, { cwd: root, stdio: 'inherit' });
 const out = (cmd) => execSync(cmd, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -323,6 +330,7 @@ const fast = has('fast') || has('quick');
 
 if (!has('skip-tests')) {
   step('Tests');
+  const testsStart = Date.now();
   try {
     if (fast) {
       console.log('⚡ Modo rápido: ejecutando tests sobre archivos modificados (--changed)...');
@@ -330,6 +338,7 @@ if (!has('skip-tests')) {
     } else {
       run('npm test -- --bail 1');
     }
+    console.log(`✔ Tests completados (${formatDuration(Date.now() - testsStart)})`);
   } catch {
     fail('Los tests fallan. Corrige o usa --skip-tests.');
   }
@@ -366,6 +375,7 @@ const built = [];
 for (const key of selected) {
   const prod = PRODUCTS[key];
   step(`Build ${prod.label}`);
+  const buildStart = Date.now();
   try { run(`npx tauri build --bundles nsis --ci ${prod.extra.join(' ')}`); }
   catch { fail(`Falló el build de ${prod.label}. Versión restaurada.`); }
 
@@ -403,33 +413,9 @@ for (const key of selected) {
   const mName = github ? `latest-${key}.json` : 'latest.json';
   fs.writeFileSync(path.join(outDir, `${key}-${mName}`), JSON.stringify(manifest, null, 2));
   built.push({ key, assetName, mName, manifest });
-  console.log(`✔ ${assetName}`);
+  console.log(`✔ ${assetName} (${formatDuration(Date.now() - buildStart)})`);
 }
 
-// ---- publicar ------------------------------------------------------------------------
-if (dryRun) {
-  restore();
-  console.log(`\n\x1b[32m✔ Dry-run OK. Artefactos en ${outDir} (versión restaurada, nada publicado).\x1b[0m`);
-  process.exit(0);
-}
-
-if (github) {
-  step('Commit + tag + push');
-  const files = 'package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock src/lib/changelogData.ts CHANGELOG.md';
-  run(`git commit -m "chore(release): v${next}" --only ${files}`);
-  run(`git tag v${next}`);
-  run(`git push origin HEAD v${next}`);
-  step('Crear GitHub Release');
-  const noteFile = path.join(outDir, 'NOTES.md');
-  fs.writeFileSync(noteFile, notes);
-  const assets = built.flatMap((b) => [path.join(outDir, b.assetName), path.join(outDir, `${b.key}-${b.mName}`)]);
-  const r = spawnSync('gh', ['release', 'create', `v${next}`, ...assets, '--title', `v${next}`, '--notes-file', noteFile], { cwd: root, stdio: 'inherit' });
-  if (r.status !== 0) { console.error('gh release create falló. Artefactos en ' + outDir); process.exit(1); }
-  console.log(`\n\x1b[32m✔ Release v${next} publicada en GitHub.\x1b[0m`);
-  process.exit(0);
-}
-
-step('Publicar en feed local');
 function pruneOldArtifacts(dir, keepCount = 2) {
   if (!fs.existsSync(dir)) return;
   const exes = fs.readdirSync(dir)
@@ -446,10 +432,39 @@ function pruneOldArtifacts(dir, keepCount = 2) {
       fs.rmSync(path.join(dir, item.name), { force: true });
       const sig = path.join(dir, `${item.name}.sig`);
       if (fs.existsSync(sig)) fs.rmSync(sig, { force: true });
-      console.log(`🧹 Podado instalador antiguo del feed: ${item.name}`);
+      console.log(`🧹 Podado instalador antiguo: ${item.name}`);
     } catch { /* ignore */ }
   }
 }
+
+// ---- publicar ------------------------------------------------------------------------
+if (dryRun) {
+  restore();
+  console.log(`\n\x1b[32m✔ Dry-run OK en ${formatDuration(Date.now() - releaseStart)}. Artefactos en ${outDir} (versión restaurada, nada publicado).\x1b[0m`);
+  process.exit(0);
+}
+
+pruneOldArtifacts(bundleDir, 2);
+
+if (github) {
+  step('Commit + tag + push');
+  const publishStart = Date.now();
+  const files = 'package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock src/lib/changelogData.ts CHANGELOG.md';
+  run(`git commit -m "chore(release): v${next}" --only ${files}`);
+  run(`git tag v${next}`);
+  run(`git push origin HEAD v${next}`);
+  step('Crear GitHub Release');
+  const noteFile = path.join(outDir, 'NOTES.md');
+  fs.writeFileSync(noteFile, notes);
+  const assets = built.flatMap((b) => [path.join(outDir, b.assetName), path.join(outDir, `${b.key}-${b.mName}`)]);
+  const r = spawnSync('gh', ['release', 'create', `v${next}`, ...assets, '--title', `v${next}`, '--notes-file', noteFile], { cwd: root, stdio: 'inherit' });
+  if (r.status !== 0) { console.error('gh release create falló. Artefactos en ' + outDir); process.exit(1); }
+  console.log(`\n\x1b[32m✔ Release v${next} publicada en GitHub (${formatDuration(Date.now() - publishStart)} | Total: ${formatDuration(Date.now() - releaseStart)}).\x1b[0m`);
+  process.exit(0);
+}
+
+step('Publicar en feed local');
+const publishStart = Date.now();
 
 function pruneOldReleases(releasesDir, keepCount = 2) {
   if (!fs.existsSync(releasesDir)) return;
@@ -497,4 +512,4 @@ for (const b of built) {
     console.log(j.version === next ? `✔ ${b.key}: feed OK (${next})` : `⚠ ${b.key}: el feed sirve ${j.version}`);
   } catch (e) { console.log(`⚠ ${b.key}: no pude verificar el feed (${e.message})`); }
 }
-console.log(`\n\x1b[32m✔ v${next} publicada en el feed local. Las apps instaladas la detectarán al abrir o desde "Buscar actualizaciones".\x1b[0m`);
+console.log(`\n\x1b[32m✔ v${next} publicada en el feed local (${formatDuration(Date.now() - publishStart)} | Total: ${formatDuration(Date.now() - releaseStart)}). Las apps instaladas la detectarán al abrir o desde "Buscar actualizaciones".\x1b[0m`);

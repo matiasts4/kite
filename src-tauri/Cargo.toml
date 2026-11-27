@@ -3,7 +3,7 @@ members = [".", "crates/kite-ctx"]
 
 [package]
 name = "kite-code"
-version = "0.1.79"
+version = "0.1.94"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"
@@ -33,6 +33,7 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["json", "blocking", "multipart"] }
 dotenvy = "0.15"
+regex = "1"
 vt100 = "0.15"
 kite-ctx = { path = "crates/kite-ctx" }
 cpal = "0.15"
@@ -42,13 +43,17 @@ base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Environment",
     "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_Shell",
 ] }
 
 [build-dependencies]
@@ -69,9 +74,9 @@ overflow-checks = false
 
 [profile.release]
 opt-level = 2
-codegen-units = 16
+codegen-units = 64
 lto = false
-incremental = true
+incremental = false
 strip = "symbols"
 overflow-checks = false
 

@@ -5,6 +5,8 @@
 mod cli_wire;
 #[path = "../ctx_cli.rs"]
 mod ctx_cli;
+#[path = "../user_path.rs"]
+mod user_path;
 
 mod persist {
     use std::path::PathBuf;
@@ -65,9 +67,44 @@ fn main() {
         let code = cli_wire::run_cli(&args[2..], None);
         std::process::exit(code);
     }
+    if args.get(1).map(String::as_str) == Some("agent") {
+        if args.get(2).map(String::as_str) == Some("install-template") {
+            if let Some(gui) = sibling_gui_binary() {
+                match std::process::Command::new(&gui).args(&args[1..]).status() {
+                    Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                    Err(err) => {
+                        eprintln!("Failed to run Kite Code ({}): {err}", gui.display());
+                        std::process::exit(1);
+                    }
+                }
+            }
+            eprintln!("Sibling kite-code binary not found for install-template.");
+            std::process::exit(1);
+        }
+        let code = cli_wire::run_cli(&args[1..], None);
+        std::process::exit(code);
+    }
     if args.get(1).map(String::as_str) == Some("ctx") {
         let code = ctx_cli::run_ctx_cli(&args[2..]);
         std::process::exit(code);
+    }
+    if args.get(1).map(String::as_str) == Some("plugin") {
+        if let Some(gui) = sibling_gui_binary() {
+            match std::process::Command::new(&gui).args(&args[1..]).output() {
+                Ok(out) => {
+                    use std::io::Write;
+                    let _ = std::io::stdout().write_all(&out.stdout);
+                    let _ = std::io::stderr().write_all(&out.stderr);
+                    std::process::exit(out.status.code().unwrap_or(1));
+                }
+                Err(err) => {
+                    eprintln!("Failed to run Kite Code plugin CLI ({}): {err}", gui.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+        eprintln!("Sibling kite-code binary not found for plugin CLI.");
+        std::process::exit(1);
     }
     if matches!(
         args.get(1).map(String::as_str),

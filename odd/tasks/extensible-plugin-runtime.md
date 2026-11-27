@@ -1,0 +1,54 @@
+# Extensible Plugin Runtime, Sidecar Supervisor, and Loopback Proxy
+
+Objective: Build Kite Code's real filesystem-backed extensible plugin runtime with multi-format manifest discovery, local/Git/archive installation, external enable/disable persistence, hidden process-tree sidecar supervision, and a dedicated loopback HTTP/WebSocket reverse proxy so real external plugins (including Android device hubs and preview panes) run seamlessly inside Kite without hardcoding them into core.
+Branch: `feat/remote-control`. Test runner: `cargo test --manifest-path src-tauri/Cargo.toml plugin_runtime`.
+Does not change protected zones (`TitleBar.tsx` mode switcher).
+
+## Specs
+
+- **S1 — Clean-Room Runtime & Read-Only Shared Root Isolation**:
+  - Verbatim:
+    > "Claramente como plugins, no integrarlos directamente en el código fuente de nosotros, sino que darle soporte para instalarlos o agregarlos como extensiones o algo así."
+  - Behavior: All plugin discovery, installation, sidecar supervision, and runtime state operate generically over bundle manifests without hardcoding domain-specific plugins into Kite's core UI or backend. Shared system plugin roots are mounted strictly read-only; Kite persists all runtime state, installed copies, and sidecar logs under Kite's own `roaming_app_dir()` and `~/.kite/plugins/`.
+  - Checks: `node .kite/sanitizer/audit-references.mjs --check`, unit tests verifying shared system roots are never mutated on enable/disable/uninstall.
+
+- **S2 — Bundle Manifests, Multi-Format Import & Discovery**:
+  - Verbatim:
+    > "dar soporte a plugins, pero reales. Por ejemplo. El de Android CLI ... darle soporte para instalarlos o agregarlos como extensiones"
+  - Behavior: Parse `plugin.json` as JSONC (comments and trailing commas allowed), plus compatibility manifest normalization for `.claude-plugin/plugin.json`, `.cursor-plugin/plugin.json`, `.gemini-plugin/plugin.json`, and `gemini-extension.json`. Parse `sidecars/<id>/sidecar.json` and `sidecars.json` external folder refs, `mcp_config.json` (`${PLUGIN_ROOT}` / `${PLUGIN_DATA}` expansion), `skills/<name>/SKILL.md`, `rules/AGENTS.md` + `rules/*.md`, `agents/*.md`, `hooks.json`, and relative `logo` assets (converted to safe data URIs while rejecting `..`, absolute paths, and URLs). Discover workspace `.agents/plugins/` + `.agents/plugins.json` (`entries`/`inherits` with `include_only`/`exclude`), Kite global `~/.kite/plugins/` + `<roaming_app_dir>/plugins/`, and opt-in shared system roots (`enableSharedSystemRoots`, defaulting `true` and persisted in `plugin_runtime_settings.json`), deduplicating collisions by plugin directory/name priority and persisting enable/disable overrides externally in `<roaming_app_dir>/plugin_runtime_state.json`.
+  - Checks: Rust unit tests covering JSONC parsing, compatibility manifests, path-traversal rejection, collision deduplication, external enable/disable override, and Android CLI bundle fixtures.
+
+- **S3 — Plugin Installers & CLI Lifecycle**:
+  - Verbatim:
+    > "darle soporte para instalarlos o agregarlos como extensiones o algo así"
+  - Behavior: Support installing bundles into `<roaming_app_dir>/plugins/` from local directories, Git repositories (`git clone --depth 1` with optional ref/subdir and traversal checks), and `.zip` archives (staging + path-escape checks), plus clean uninstallation for Kite-managed bundles (refusing deletion of read-only shared-root bundles). Expose `kite plugin <list|install|enable|disable|uninstall|sidecars|logs>` in the console CLI.
+  - Checks: Rust unit tests for folder/archive/install validation, traversal rejection, uninstall isolation, and CLI command parsing.
+
+- **S4 — Managed Sidecar Process Supervisor**:
+  - Verbatim:
+    > "te da la posibilidad de utilizar un Android. Dentro de la aplicación."
+  - Behavior: Manage sidecar child processes defined in `sidecars/<id>/sidecar.json` via `hidden_exec::spawn_streaming_with_owned_env` (hidden console + Windows Job Object process-tree cleanup). Allocate ephemeral loopback ports (`127.0.0.1:0`), inject `KITE_SIDECAR_WEB_PORT`, compatibility port/data aliases, `PLUGIN_ROOT`, `PLUGIN_DATA`, `KITE_SIDECAR_ID`, and `KITE_EXECUTABLE_DATA_DIR`, stream stdout/stderr to an in-memory 500-line ring buffer and `<roaming_app_dir>/sidecar_data/<plugin>/<sidecar>/logs/sidecar.log`, enforce `restart_policy` (`always` | `on-failure` | `never`) with exponential backoff (`500ms..15s`, resetting after 30s uptime), and expose start/stop/restart/logs commands plus clean shutdown on app exit.
+  - Checks: Rust unit tests spawning a real Node/script mock sidecar verifying port injection, log capture, restart-on-crash, and clean process-tree termination.
+
+- **S5 — Dedicated Per-Sidecar Loopback HTTP/WebSocket Reverse Proxy**:
+  - Behavior: Bind one dedicated ephemeral `127.0.0.1:0` listener per active UI sidecar so root-relative requests (`/api/*`, `/__launcher/retry`, `/mirror/ws`) resolve natively at `/`. Authenticate browser iframe requests using a per-sidecar random token (`?__kite_token=<token>` -> `Set-Cookie: kite_sidecar_auth=<token>; HttpOnly; SameSite=Lax; Path=/` + `302`), reject unauthenticated requests with `401`, rewrite `Host` and `Origin` headers to `http://127.0.0.1:<upstream_port>` on HTTP and WebSocket upgrades, strip `X-Frame-Options` and CSP `frame-ancestors`, tunnel WebSocket `101 Switching Protocols` frames bidirectionally, and return `503 Service Unavailable` when the upstream port is offline or booting.
+  - Checks: Rust unit tests verifying `Origin` rewrite against a strict 403 upstream, `X-Frame-Options` stripping, token-to-cookie auth + 401 rejection, live bidirectional WebSocket echo tunneling, and `503` offline status.
+
+- **S6 — Tauri IPC Surface & Legacy Connector Preservation**:
+  - Behavior: Preserve all existing 29 service connector IPC commands in `src-tauri/src/plugins.rs` untouched and register all new `plugin_runtime_*` commands in `src-tauri/src/main.rs` (`plugin_runtime_list`, `plugin_runtime_get_settings`, `plugin_runtime_save_settings`, `plugin_runtime_set_enabled`, `plugin_runtime_install_folder`, `plugin_runtime_install_git`, `plugin_runtime_install_archive`, `plugin_runtime_uninstall`, `plugin_runtime_refresh`, `plugin_runtime_pick_folder`, `plugin_runtime_sidecar_action`, `plugin_runtime_sidecar_logs`, `plugin_runtime_list_sidecars`).
+  - Checks: `npm run verify:ipc`, `cargo test --manifest-path src-tauri/Cargo.toml plugin_runtime`, and live smoke verification launching the local Android Device Hub sidecar through `SidecarSupervisor` + `SidecarProxyPool`.
+
+## Tasks
+
+- [x] **T1** (`S1`, `S2`, `S3`, Risk: `item 2 (file/install path validation)`, route: `delegated`): Implement `src-tauri/src/plugin_runtime/manifest.rs` and `src-tauri/src/plugin_runtime/registry.rs` with JSONC manifest parsing, multi-format compatibility normalization, workspace/global/shared-root discovery, external state persistence, folder/git/archive installers, and unit tests. Evidence: `manifest` 5/5 passed, `registry` 5/5 passed.
+- [x] **T2** (`S4`, Risk: `item 4 (process lifecycle & job-object concurrency)`, route: `delegated`): Implement `src-tauri/src/plugin_runtime/sidecar.rs` (`SidecarSupervisor`) with hidden process-tree spawning, port allocation, env expansion, log ring buffer + file teeing, exponential backoff restarts, and live process tests. Evidence: `sidecar` 12/12 passed.
+- [x] **T3** (`S5`, Risk: `item 2 (loopback proxy token auth & header/origin sanitization)` + `item 4 (async TCP/WS tunneling)`, route: `delegated`): Implement `src-tauri/src/plugin_runtime/proxy.rs` (`SidecarProxyPool`) with per-sidecar ephemeral HTTP/WS proxy, token-cookie auth, `Origin`/`Host` rewrite, frame-header stripping, `503` offline page, and full HTTP+WS tests. Evidence: `proxy` 10/10 passed.
+- [x] **T4** (`S1`–`S6`, Risk: `item 3 (main.rs handler registration & CLI wiring)`, route: `inline`): Wire `src-tauri/src/plugin_runtime/{mod.rs,commands.rs,cli.rs}`, add `regex = "1"` in `src-tauri/Cargo.toml`, register lifecycle hooks and IPC commands in `src-tauri/src/main.rs`, add `kite plugin` CLI in `src-tauri/src/bin/kite.rs`, verify all unit tests + live Android CLI sidecar smoke test + `audit-references.mjs`, and commit ODD 1. Evidence: `cargo check --bin kite` clean; `cargo test --bin kite-code plugin_runtime` 35/35 passed (1 ignored); `live_android_cli_device_hub_proxy_smoke -- --ignored` 1/1 passed (200 OK through proxy with zero `X-Frame-Options`); `audit-references.mjs` `[AUDIT CLEAN]`; `verify:ipc` PASS.
+  - Closure `Risk: item 2 (file/archive path checks & loopback proxy token auth) + item 3 (main.rs Tauri handler additions) + item 4 (process tree & async WS proxy lifecycle)`.
+
+## Log
+
+- **L1 (2026-11-27)**:
+  > "Creo que tenemos que irnos en algo bastante grande, tiene que ver con dar soporte a plugins, pero reales. Por ejemplo. El de Android CLI que implementa [external host]. Me parece bastante, bastante útil. Quiero decir, te da la posibilidad de utilizar un Android. Dentro de la aplicación... Claramente como plugins, no integrarlos directamente en el código fuente de nosotros, sino que darle soporte para instalarlos o agregarlos como extensiones o algo así."
+- **L2 (2026-11-27)**:
+  > "Sí, me parece correcto. Quisiera que plantearas todos los ODDs. Seguidos, porque trabajarás en todo seguido... ¿Me dejas poder llevar a tener funcionando el plugin que te pedí? Pero también hay que no lo sé, tener todo lo demás listo. Entonces, considerando eso, quiero que trabajes y plantees los ODDs correspondientes. Luego ataques, sin detenerte. Puedes hacerlo con bastantes subagentes"

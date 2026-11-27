@@ -53,6 +53,7 @@ pub mod agent_inbox;
 pub mod credentials;
 pub mod connections;
 pub mod plugins;
+pub mod plugin_runtime;
 pub mod agent_maintenance;
 pub mod dispatch;
 pub mod dispatch_wire;
@@ -63,6 +64,8 @@ pub mod ctx_bridge;
 pub mod user_path;
 pub mod voice_audio;
 pub mod voice_realtime;
+pub mod remote;
+pub mod native_agent;
 
 use logger::log_trace;
 use tauri::Manager;
@@ -93,7 +96,7 @@ use quota::*;
 use routines::*;
 use session::*;
 use system_metrics::*;
-use context_monitor::{fetch_context_monitor, reset_context_monitor};
+use context_monitor::{fetch_context_monitor, refresh_context_monitor, reset_context_monitor};
 use terminal::*;
 use account_switcher::{close_residual_provider_processes, inspect_provider_sessions};
 use tickets::*;
@@ -114,6 +117,7 @@ fn register_windows_shutdown_handler() {
 
     unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
         if ctrl_type == 2 || ctrl_type == 5 || ctrl_type == 6 {
+            crate::plugin_runtime::shutdown_plugin_runtime();
             crate::terminal::snapshot_and_shutdown_all_terminals("windows_ctrl_shutdown");
             crate::dispatch_wire::shutdown();
             if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
@@ -211,6 +215,57 @@ fn reload_main_when_vite_is_up(handle: tauri::AppHandle) {
     });
 }
 
+fn run_install_agent_template_cli(args: &[String]) -> i32 {
+    let mut template_id: Option<String> = None;
+    let mut workspace: Option<String> = None;
+    let mut places: Vec<String> = Vec::new();
+    let mut out_path: Option<String> = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        if (arg == "--workspace" || arg == "-w") && i + 1 < args.len() {
+            workspace = Some(args[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        if (arg == "--place" || arg == "-p") && i + 1 < args.len() {
+            places.push(args[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        if (arg == "--out" || arg == "-o") && i + 1 < args.len() {
+            out_path = Some(args[i + 1].clone());
+            i += 2;
+            continue;
+        }
+        if !arg.starts_with('-') && template_id.is_none() {
+            template_id = Some(arg.to_string());
+        }
+        i += 1;
+    }
+    let Some(tpl_id) = template_id.filter(|s| !s.trim().is_empty()) else {
+        eprintln!("Usage: kite agent install-template <template-id> [--workspace <path>] [--place <path>] [--out <path>]");
+        return 2;
+    };
+    match crate::agents::install_curated_agent_template_core(&tpl_id, workspace.as_deref(), &places) {
+        Ok(result) => {
+            let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+            if let Some(ref p) = out_path {
+                if let Err(err) = std::fs::write(p, &text) {
+                    eprintln!("Failed to write output file {p}: {err}");
+                    return 1;
+                }
+            }
+            println!("{text}");
+            0
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            1
+        }
+    }
+}
+
 fn main() {
     // Load local .env file in development if present
     dotenvy::dotenv().ok();
@@ -251,7 +306,15 @@ fn main() {
         std::process::exit(code);
     }
     if args.len() >= 2 && args[1] == "agent" {
+        if args.get(2).map(String::as_str) == Some("install-template") {
+            let code = run_install_agent_template_cli(&args[3..]);
+            std::process::exit(code);
+        }
         let code = crate::dispatch_wire::run_dispatch_cli(&args[1..]);
+        std::process::exit(code);
+    }
+    if args.len() >= 2 && args[1] == "plugin" {
+        let code = crate::plugin_runtime::cli::run_plugin_cli(&args[2..]);
         std::process::exit(code);
     }
 
@@ -364,6 +427,7 @@ fn main() {
         .setup(move |app| {
             let _ = APP_HANDLE.set(app.handle().clone());
             log_trace("Setup hook running");
+            crate::notifications::init_os_notifications();
             if let Some(w) = app.get_webview_window("main") {
                 if let Some(panel) = ondemand_panel.as_deref() {
                     let _ = w.set_title(&format!("Kite Code — {}", panel));
@@ -379,9 +443,13 @@ fn main() {
             if !cfg!(debug_assertions) {
                 updater::spawn_startup_check(app.handle().clone());
             }
+            let _ = crate::chat::subagents::app_session_started_at_ms();
             std::thread::spawn(|| {
                 let _ = crate::persist::initial_state();
             });
+            crate::chat::session::global_process_governor().set_heavy_limit(
+                crate::native_agent::load_runtime_resource_settings().max_heavy_processes,
+            );
             crate::chat::persistent::start_idle_reaper();
             crate::routines::start_routine_scheduler();
             std::thread::spawn(|| {
@@ -402,6 +470,8 @@ fn main() {
             });
             crate::system_metrics::init_benchmark_from_env();
             crate::window::init_companion_global_shortcut(app.handle().clone());
+            crate::remote::start_remote_gateway_if_enabled();
+            crate::plugin_runtime::init_plugin_runtime_background();
             let windows = app.webview_windows();
             log_trace(&format!("Windows count in setup: {}", windows.len()));
             for (label, w) in &windows {
@@ -551,6 +621,10 @@ fn main() {
             export_agent_bundle,
             import_agent_bundle,
             list_curated_agent_templates,
+            install_curated_agent_template,
+            list_discoverable_skills,
+            set_agent_linked_skills,
+            capture_agent_skill_from_chat,
             get_agent_autonomy_summary,
             list_agent_starters,
             list_workspace_branches,
@@ -598,6 +672,7 @@ fn main() {
             notifications_refresh_authorization,
             notifications_report_attention,
             notifications_request_authorization,
+            notifications_send_os,
             notifications_set_preferences,
             notifications_snapshot,
             open_external_link,
@@ -762,6 +837,7 @@ fn main() {
             get_handoff_preview,
             get_system_metrics,
             fetch_context_monitor,
+            refresh_context_monitor,
             reset_context_monitor,
             start_terminal_benchmark,
             stop_terminal_benchmark,
@@ -773,6 +849,7 @@ fn main() {
             update_odd_task_status,
             get_odd_task_content,
             query_operator_agent,
+            prewarm_operator_agent,
             proxy_operator_http,
             proxy_operator_http_stream,
             cancel_operator_http_stream,
@@ -794,6 +871,19 @@ fn main() {
             plugins::plugin_connection_action,
             plugins::get_plugin_config,
             plugins::save_plugin_config,
+            plugin_runtime::commands::plugin_runtime_list,
+            plugin_runtime::commands::plugin_runtime_refresh,
+            plugin_runtime::commands::plugin_runtime_get_settings,
+            plugin_runtime::commands::plugin_runtime_save_settings,
+            plugin_runtime::commands::plugin_runtime_set_enabled,
+            plugin_runtime::commands::plugin_runtime_install_folder,
+            plugin_runtime::commands::plugin_runtime_install_git,
+            plugin_runtime::commands::plugin_runtime_install_archive,
+            plugin_runtime::commands::plugin_runtime_uninstall,
+            plugin_runtime::commands::plugin_runtime_pick_folder,
+            plugin_runtime::commands::plugin_runtime_sidecar_action,
+            plugin_runtime::commands::plugin_runtime_sidecar_logs,
+            plugin_runtime::commands::plugin_runtime_list_sidecars,
             get_agent_updates_summary,
             start_agent_tool_job,
             get_active_agent_tool_jobs,
@@ -824,6 +914,7 @@ fn main() {
             voice_audio::voice_audio_mark_speech_start,
             voice_audio::voice_audio_set_muted,
             voice_audio::voice_audio_stop_capture,
+            voice_audio::voice_audio_snapshot_wav,
             voice_audio::voice_audio_status,
             voice_realtime::voice_realtime_connect,
             voice_realtime::voice_realtime_disconnect,
@@ -831,9 +922,19 @@ fn main() {
             voice_realtime::voice_realtime_truncate,
             voice_realtime::voice_realtime_submit_tool_result,
             voice_realtime::voice_realtime_status,
+            voice_realtime::voice_realtime_set_muted,
             voice_audio::call_receipts::voice_call_receipt_save,
             voice_audio::call_receipts::voice_call_receipt_list,
             voice_audio::call_receipts::voice_call_receipt_get,
+            remote::remote_gateway_status,
+            remote::remote_gateway_configure,
+            remote::remote_gateway_create_pairing,
+            remote::remote_gateway_list_devices,
+            remote::remote_gateway_revoke_device,
+            remote::remote_argos_turn_reply,
+            native_agent::get_runtime_transport_metrics,
+            native_agent::save_runtime_resource_settings,
+            native_agent::get_runtime_resource_settings,
         ]);
         let mut context = tauri::generate_context!();
         if cfg!(debug_assertions) {
@@ -855,12 +956,16 @@ fn main() {
         match event {
             tauri::RunEvent::ExitRequested { code, .. } => {
                 log_trace(&format!("App ExitRequested with code: {:?}, exiting cleanly", code));
+                crate::plugin_runtime::shutdown_plugin_runtime();
+                crate::remote::shutdown_remote_gateway();
                 crate::operator_runtime::shutdown_warm_operator_sessions();
                 crate::dispatch_wire::shutdown_gui_bridge();
                 crate::core_daemon::on_client_window_close();
             }
             tauri::RunEvent::Exit => {
                 log_trace("App RunEvent::Exit, detaching GUI from persistent core");
+                crate::plugin_runtime::shutdown_plugin_runtime();
+                crate::remote::shutdown_remote_gateway();
                 crate::operator_runtime::shutdown_warm_operator_sessions();
                 crate::dispatch_wire::shutdown_gui_bridge();
                 crate::core_daemon::on_client_window_close();

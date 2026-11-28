@@ -1,0 +1,731 @@
+/* Subscription Quota Expanded Popover — Kite Studio Visual Language */
+
+.subscription-quota-popover {
+  width: 422px;
+  max-height: min(580px, calc(100vh - 60px));
+}
+
+/* Header & Provider Strip */
+.qt-pop-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--text-primary) 4%, transparent) 0%,
+    transparent 100%
+  );
+  border-bottom: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  flex-shrink: 0;
+}
+
+.qt-provider-rail {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.qt-provider-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex: 1;
+  min-width: 0;
+  scroll-behavior: smooth;
+  padding: 2px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--background) 46%, transparent);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+}
+
+.qt-provider-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.qt-provider-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--vl-control-sm, 26px);
+  padding: 0 9px;
+  border-radius: calc(var(--control-radius, 8px) - 1px);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.qt-provider-tab:hover:not(.qt-provider-tab--active) {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+}
+
+.qt-provider-tab--active {
+  background: var(--vl-surface-raised);
+  border-color: var(--vl-stroke-strong);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow:
+    var(--vl-inset),
+    0 1px 3px rgba(0, 0, 0, 0.28);
+}
+
+.qt-provider-tab--warn:not(.qt-provider-tab--active) {
+  color: var(--warning-text);
+}
+
+.qt-provider-tab:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 1px;
+}
+
+.qt-provider-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--pill-radius, 9999px);
+  flex-shrink: 0;
+}
+
+.qt-provider-dot--ok {
+  background: var(--status-running);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--status-running) 55%, transparent);
+}
+
+.qt-provider-dot--warn {
+  background: var(--warning-text);
+}
+
+/* Scrollable Body */
+.qt-pop-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Hero Quota Instrument Card */
+.qt-hero-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px 14px;
+  border-radius: var(--card-radius, 12px);
+  background:
+    radial-gradient(
+      140% 120% at 100% 0%,
+      color-mix(in srgb, var(--accent) 11%, transparent) 0%,
+      transparent 58%
+    ),
+    color-mix(in srgb, var(--vl-surface-raised) 88%, transparent);
+  border: 1px solid var(--glass-card-border, var(--vl-stroke));
+  box-shadow: var(--vl-inset);
+}
+
+.qt-hero-card[data-tone='warn'] {
+  background:
+    radial-gradient(
+      140% 120% at 100% 0%,
+      color-mix(in srgb, var(--warning-text) 13%, transparent) 0%,
+      transparent 58%
+    ),
+    color-mix(in srgb, var(--vl-surface-raised) 88%, transparent);
+  border-color: color-mix(in srgb, var(--warning-text) 26%, var(--vl-stroke));
+}
+
+.qt-hero-card[data-tone='danger'] {
+  background:
+    radial-gradient(
+      140% 120% at 100% 0%,
+      color-mix(in srgb, var(--status-failed) 14%, transparent) 0%,
+      transparent 58%
+    ),
+    color-mix(in srgb, var(--vl-surface-raised) 88%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed) 30%, var(--vl-stroke));
+}
+
+.qt-hero-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.qt-hero-identity {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.qt-hero-ring {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.qt-hero-ring__logo {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--background) 62%, var(--vl-surface-raised));
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.qt-hero-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.qt-hero-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.qt-hero-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.qt-hero-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.qt-hero-metric {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.qt-hero-pct {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.qt-hero-card[data-tone='warn'] .qt-hero-pct {
+  color: var(--warning-text);
+}
+
+.qt-hero-card[data-tone='danger'] .qt-hero-pct {
+  color: var(--status-failed);
+}
+
+.qt-hero-window-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint, var(--text-secondary));
+  margin-top: 4px;
+}
+
+.qt-hero-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 9px;
+  border-top: 1px solid var(--glass-inner-border, var(--vl-stroke));
+}
+
+.qt-hero-email {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  padding: 2px 7px;
+  border-radius: var(--vl-radius-sm, 6px);
+  background: color-mix(in srgb, var(--background) 42%, transparent);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Stale Notice Banner */
+.qt-stale-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--warning-text) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning-text) 32%, transparent);
+  color: var(--warning-text);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.qt-stale-banner svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* Active Account Switcher Bar */
+.qt-account-bar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--card-radius, 12px);
+  background: color-mix(in srgb, var(--vl-surface-raised) 76%, transparent);
+  border: 1px solid var(--glass-card-border, var(--vl-stroke));
+  box-shadow: var(--vl-inset);
+}
+
+.qt-account-bar__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.qt-account-bar__id {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.qt-account-bar__label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.qt-account-bar__email {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt-autoswitch-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--glass-inner-border, var(--vl-stroke));
+}
+
+.qt-autoswitch-strip__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.qt-text-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: opacity 140ms ease;
+}
+
+.qt-text-link:hover {
+  opacity: 0.85;
+}
+
+.qt-text-link--muted {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.qt-text-link--muted:hover {
+  color: var(--text-primary);
+}
+
+/* Model Windows Breakdown */
+.qt-windows {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.qt-window-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 11px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--vl-surface-raised) 74%, transparent);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.qt-window-row:hover {
+  border-color: var(--vl-stroke-strong);
+  background: color-mix(in srgb, var(--vl-surface-raised) 92%, transparent);
+}
+
+.qt-window-row__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.qt-window-row__name {
+  font-size: 11.5px;
+  font-weight: 550;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt-window-row__stat {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.qt-window-row__stat--warn {
+  color: var(--warning-text);
+  font-weight: 600;
+}
+
+.qt-window-row__stat--danger {
+  color: var(--status-failed);
+  font-weight: 600;
+}
+
+.qt-window-fill--ok {
+  background: var(--status-running);
+}
+
+.qt-window-fill--warn {
+  background: var(--warning-text);
+}
+
+.qt-window-fill--danger {
+  background: var(--status-failed);
+}
+
+.qt-window-row__reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--text-faint, var(--text-secondary));
+  font-variant-numeric: tabular-nums;
+}
+
+/* Diagnostic / Detected / Error Cards */
+.qt-diag-card {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  padding: 14px;
+  border-radius: var(--card-radius, 12px);
+  background: color-mix(in srgb, var(--vl-surface-raised) 82%, transparent);
+  border: 1px solid var(--glass-card-border, var(--vl-stroke));
+  box-shadow: var(--vl-inset);
+}
+
+.qt-diag-card[data-tone='warn'] {
+  background: color-mix(in srgb, var(--warning-text) 7%, var(--vl-surface-raised));
+  border-color: color-mix(in srgb, var(--warning-text) 28%, var(--vl-stroke));
+}
+
+.qt-diag-card[data-tone='danger'] {
+  background: color-mix(in srgb, var(--status-failed) 7%, var(--vl-surface-raised));
+  border-color: color-mix(in srgb, var(--status-failed) 30%, var(--vl-stroke));
+}
+
+.qt-diag-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.qt-diag-card__pedestal {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--background) 52%, var(--vl-surface-raised));
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  box-shadow: var(--vl-inset-field);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.qt-diag-card__copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.qt-diag-card__detail {
+  margin: 5px 0 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.qt-diag-card__callout {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  padding: 9px 10px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--background) 42%, transparent);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+}
+
+/* Vault Popout Drawer */
+.qt-chevron {
+  transition: transform 150ms ease;
+}
+
+.qt-chevron--open {
+  transform: rotate(180deg);
+}
+
+.qt-vault-drawer {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 100;
+  background: var(--menu-plate, var(--pane));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: 1px solid var(--vl-stroke-strong);
+  border-radius: var(--card-radius, 12px);
+  box-shadow:
+    var(--vl-inset),
+    0 18px 38px -12px rgba(0, 0, 0, 0.65);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 290px;
+  overflow-y: auto;
+}
+
+.qt-vault-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--control-radius, 8px);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.qt-vault-banner--warn {
+  background: color-mix(in srgb, var(--warning-text) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning-text) 32%, transparent);
+  color: var(--warning-text);
+}
+
+.qt-vault-banner--danger {
+  background: color-mix(in srgb, var(--status-failed) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-failed) 34%, transparent);
+  color: var(--danger-ink, var(--status-failed));
+}
+
+.qt-vault-banner--info {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent);
+}
+
+.qt-vault-unreg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--warning-text) 10%, var(--vl-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--warning-text) 30%, transparent);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.qt-vault-unreg__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.qt-vault-unreg__code {
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+.qt-vault-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 196px;
+  overflow-y: auto;
+}
+
+.qt-vault-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid transparent;
+  background: transparent;
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+
+.qt-vault-row:hover {
+  background: var(--hover-fill);
+}
+
+.qt-vault-row--active {
+  background: color-mix(in srgb, var(--accent) 9%, var(--vl-surface-raised));
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--vl-stroke));
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.qt-vault-row__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.qt-vault-row__head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.qt-vault-row__name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt-vault-row--active .qt-vault-row__name {
+  color: var(--accent);
+}
+
+.qt-vault-row__email {
+  font-size: 10px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt-vault-row__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.qt-vault-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.qt-vault-form .tp-field {
+  flex: 1;
+  min-width: 0;
+}
+
+.qt-vault-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.qt-vault-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 7px;
+  margin-top: 2px;
+  border-top: 1px solid var(--glass-inner-border, var(--vl-stroke));
+}
+
+/* Footer switch */
+.qt-pop-switch-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}

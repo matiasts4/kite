@@ -15,8 +15,11 @@ import { useAccountVault } from '../../lib/accounts/useAccountVault';
 import { AccountConfirmDialogs } from '../accounts/AccountVaultUI';
 import { MOTION_EXIT_MS } from '../../motion/contract';
 import { surfaceMotion } from '../../motion/standard/surfaces';
+import { ArrowRightIcon } from '../titlebar/TopbarPopoverIcons';
 import { QuotaPopoverHeader } from './popover/QuotaPopoverHeader';
 import { QuotaPopoverContent } from './popover/QuotaPopoverContent';
+import '../titlebar/topbar-popovers.css';
+import './quota-popover.css';
 
 export interface SubscriptionQuotaPopoverProps {
   allQuotas: Record<string, ProviderQuotaStatus>;
@@ -150,13 +153,13 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
 
   useEffect(() => {
     if (anchorRect) {
-      const top = anchorRect.bottom + 6;
-      const right = Math.max(12, window.innerWidth - anchorRect.right);
+      const top = Math.round(anchorRect.bottom + 6);
+      const right = Math.max(12, Math.round(window.innerWidth - anchorRect.right));
       setPosition({ top, right });
     }
   }, [anchorRect]);
 
-  // Close on outside click
+  // Close on outside click or Escape
   useEffect(() => {
     const handlePointerDown = (e: MouseEvent) => {
       if (hasSubDialogOpen) return;
@@ -173,8 +176,22 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
         }
       }
     };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (hasSubDialogOpen) return;
+      if (e.key === 'Escape') {
+        if (isAccountsExpanded) {
+          setIsAccountsExpanded(false);
+        } else {
+          onClose();
+        }
+      }
+    };
     window.addEventListener('pointerdown', handlePointerDown);
-    return () => window.removeEventListener('pointerdown', handlePointerDown);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
   }, [onClose, isAccountsExpanded, hasSubDialogOpen]);
 
   const popoverNode = (
@@ -183,28 +200,10 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
       ref={popoverRef}
       role="dialog"
       aria-label="Cuotas de suscripción IA"
-      className="subscription-quota-popover"
+      className="tp-popover subscription-quota-popover"
       style={{
-        position: 'fixed',
         top: `${position.top}px`,
         right: `${position.right}px`,
-        transformOrigin: 'top right',
-        width: '410px',
-        maxWidth: 'calc(100vw - 24px)',
-        maxHeight: 'calc(100vh - 60px)',
-        background: 'var(--glass-overlay-bg, var(--menu-glass, #121214))',
-        backdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
-        WebkitBackdropFilter: 'var(--glass-overlay-blur, var(--menu-backdrop, blur(20px)))',
-        border: '1px solid var(--glass-border, var(--block-stroke))',
-        borderRadius: 'var(--card-radius, 12px)',
-        boxShadow: 'var(--glass-shadow, 0 16px 40px rgba(0, 0, 0, 0.35))',
-        padding: '14px',
-        color: 'var(--text-primary)',
-        fontSize: '12px',
-        zIndex: 10001,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
       }}
       onClick={(e) => e.stopPropagation()}
     >
@@ -220,6 +219,7 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
         onScrollTabs={(d) => scrollTabs(d as -1 | 1)}
         onRefresh={onRefresh}
         isRefreshing={isRefreshing}
+        isAccountsExpanded={isAccountsExpanded}
         onOpenAccounts={toggleAccountsExpanded}
         onOpenSettings={handleOpenSettings}
         onClose={onClose}
@@ -264,18 +264,8 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
       />
 
       {/* Footer controls with official ui-switch and Token Heatmap link */}
-      <div
-        style={{
-          borderTop: '1px solid var(--block-stroke)',
-          marginTop: '12px',
-          paddingTop: '10px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '8px',
-        }}
-      >
-        <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+      <div className="tp-footer">
+        <div className="qt-pop-switch-row">
           <button
             type="button"
             role="switch"
@@ -285,39 +275,23 @@ export const SubscriptionQuotaPopover: React.FC<SubscriptionQuotaPopoverProps> =
             onClick={() => {
               saveQuotaPreferences({ autoDetectActive: !prefs.autoDetectActive });
             }}
-            style={{ cursor: 'pointer' }}
           >
             <span aria-hidden="true" className="ui-switch__knob" />
           </button>
-          <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Detección auto</span>
+          <span>Detección auto</span>
         </div>
 
         {onOpenTokenUsage && (
           <button
             type="button"
+            className="tp-btn tp-btn--sm tp-btn--secondary"
             onClick={() => {
               onClose();
               onOpenTokenUsage();
             }}
-            style={{
-              background: 'var(--glass-elevated-bg, var(--chip-fill))',
-              border: '1px solid var(--glass-border, var(--block-stroke))',
-              borderRadius: 'var(--control-radius, 8px)',
-              padding: '4px 9px',
-              fontSize: '11px',
-              fontWeight: 500,
-              color: 'var(--text-primary)',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '4px',
-            }}
           >
             <span>Mapa de tokens</span>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="5" y1="12" x2="19" y2="12" />
-              <polyline points="12 5 19 12 12 19" />
-            </svg>
+            <ArrowRightIcon size={11} />
           </button>
         )}
       </div>

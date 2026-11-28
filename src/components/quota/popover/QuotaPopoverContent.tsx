@@ -6,28 +6,15 @@ import { QuotaProgressRing } from '../QuotaProgressRing';
 import { QuotaAccountSwitcher } from '../QuotaAccountSwitcher';
 import { formatDetailedReset } from '../../../lib/quota/useResetCountdownClock';
 import { getQuotaRefreshNotice, type QuotaRefreshNotice } from '../../../lib/quota/providerState';
-
-const QuotaStaleBanner: React.FC<{ notice: QuotaRefreshNotice | null }> = ({ notice }) => {
-  if (!notice) return null;
-  return (
-    <div
-      data-testid="quota-stale-notice"
-      role="status"
-      title={notice.detail}
-      style={{
-        padding: '6px 10px',
-        borderRadius: 'var(--control-radius, 8px)',
-        backgroundColor: 'var(--warning-tint)',
-        border: '1px solid var(--warning-tint)',
-        color: 'var(--warning-text)',
-        fontSize: '11px',
-        lineHeight: 1.35,
-      }}
-    >
-      {notice.message}
-    </div>
-  );
-};
+import {
+  AlertTriangleIcon,
+  ArrowRightIcon,
+  ClockIcon,
+  LayersIcon,
+  PlusIcon,
+  SettingsGearIcon,
+  UserVaultIcon,
+} from '../../titlebar/TopbarPopoverIcons';
 import type {
   AntigravityAuthTelemetry,
   AutoSwitchPolicy,
@@ -37,6 +24,21 @@ import type {
 } from '../../../types';
 import type { FailedSwitchState } from '../../../lib/accounts/accountVaultStore';
 import { AutoSwitchStatusBanner } from '../../accounts/AutoSwitchSettingsPanel';
+
+const QuotaStaleBanner: React.FC<{ notice: QuotaRefreshNotice | null }> = ({ notice }) => {
+  if (!notice) return null;
+  return (
+    <div
+      data-testid="quota-stale-notice"
+      role="status"
+      title={notice.detail}
+      className="qt-stale-banner"
+    >
+      <AlertTriangleIcon size={13} />
+      <span>{notice.message}</span>
+    </div>
+  );
+};
 
 export interface QuotaPopoverContentProps {
   activeIdsCount: number;
@@ -127,42 +129,20 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
       pendingAutoSwitchConfirmations.length > 0
   );
 
+  const heroTone =
+    remPct != null && remPct < 20
+      ? 'danger'
+      : remPct != null && remPct < 45
+        ? 'warn'
+        : 'ok';
+
   const accountSwitcherBar = (
-    <div
-      style={{
-        position: 'relative',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '6px',
-        padding: '7px 10px',
-        borderRadius: 'var(--control-radius, 8px)',
-        backgroundColor: 'var(--block-fill)',
-        border: '1px solid var(--block-stroke)',
-        marginTop: '4px',
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '8px',
-          width: '100%',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, flex: 1 }}>
-          <span style={{ fontSize: '11px', color: 'var(--text-secondary)', flexShrink: 0 }}>Cuenta activa:</span>
-          <span
-            style={{
-              fontSize: '11px',
-              fontWeight: 600,
-              color: 'var(--text-primary)',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-            title={resolvedActiveEmail}
-          >
+    <div className="qt-account-bar">
+      <div className="qt-account-bar__row">
+        <div className="qt-account-bar__id">
+          <UserVaultIcon size={13} />
+          <span className="qt-account-bar__label">Cuenta activa:</span>
+          <span className="qt-account-bar__email" title={resolvedActiveEmail}>
             {resolvedActiveEmail}
           </span>
         </div>
@@ -193,23 +173,8 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
       </div>
 
       {hasAutoSwitchStrip ? (
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-            paddingTop: '6px',
-            borderTop: '1px solid var(--block-stroke)',
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '8px',
-            }}
-          >
+        <div className="qt-autoswitch-strip">
+          <div className="qt-autoswitch-strip__head">
             <span
               className="qt-chip"
               data-tone={
@@ -228,16 +193,8 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
             </span>
             <button
               type="button"
+              className="qt-text-link"
               onClick={() => onOpenSettings(selectedProvider)}
-              style={{
-                background: 'none',
-                border: 'none',
-                padding: 0,
-                color: 'var(--accent)',
-                fontSize: '11px',
-                fontWeight: 600,
-                cursor: 'pointer',
-              }}
             >
               Configurar
             </button>
@@ -257,43 +214,32 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
       ) : null}
     </div>
   );
+
+  const showHeroMeta = Boolean(
+    currentQuota?.metadata?.planType ||
+      currentQuota?.metadata?.email ||
+      resolvedActiveEmail !== 'Sesión nativa activa'
+  );
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', overflowY: 'auto' }}>
+    <div className="qt-pop-body scroll-quiet">
       {activeIdsCount === 0 ? (
-        <div
-          style={{
-            padding: '18px 14px',
-            backgroundColor: 'var(--block-fill)',
-            border: '1px dashed var(--block-stroke)',
-            borderRadius: 'var(--control-radius, 8px)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '8px',
-            alignItems: 'flex-start',
-          }}
-        >
-          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
-            No agregaste ningún proveedor
-          </div>
-          <p style={{ margin: 0, fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+        <div className="tp-empty">
+          <span className="tp-empty__halo" aria-hidden="true">
+            <LayersIcon size={18} />
+          </span>
+          <strong className="tp-empty__title">No agregaste ningún proveedor</strong>
+          <p className="tp-empty__desc">
             Elegí qué cuotas querés monitorear. Tus claves y sesiones existentes siguen
             guardadas; solo se muestran los proveedores que agregues manualmente.
           </p>
           <button
             type="button"
+            className="tp-btn tp-btn--primary"
             onClick={() => onOpenSettings()}
-            style={{
-              backgroundColor: 'var(--accent-tint)',
-              border: '1px solid var(--accent-tint-strong)',
-              borderRadius: 'var(--vl-radius-xs, 4px)',
-              padding: '6px 12px',
-              color: 'var(--accent)',
-              fontSize: '11px',
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
           >
-            Agregar proveedor
+            <PlusIcon size={13} />
+            <span>Agregar proveedor</span>
           </button>
         </div>
       ) : (
@@ -301,244 +247,117 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
           {/* Case 1: Active with real live quota windows */}
           {diagnostic.state === 'ok' && currentQuota && (
             <>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  backgroundColor: 'var(--block-fill)',
-                  border: '1px solid var(--block-stroke)',
-                  borderRadius: 'var(--control-radius, 8px)',
-                  padding: '10px 12px',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div
-                    style={{
-                      position: 'relative',
-                      width: 36,
-                      height: 36,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
-                    <QuotaProgressRing
-                      percentage={remPct ?? 100}
-                      size={36}
-                      strokeWidth={3}
-                    />
-                    <div
-                      style={{
-                        position: 'absolute',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        pointerEvents: 'none',
-                      }}
-                    >
-                      <BrandLogo engine={selectedProvider} size={16} />
+              <div className="qt-hero-card" data-tone={heroTone}>
+                <div className="qt-hero-card__top">
+                  <div className="qt-hero-identity">
+                    <div className="qt-hero-ring">
+                      <QuotaProgressRing
+                        percentage={remPct ?? 100}
+                        size={44}
+                        strokeWidth={3.5}
+                      />
+                      <div className="qt-hero-ring__logo">
+                        <BrandLogo engine={selectedProvider} size={17} />
+                      </div>
+                    </div>
+
+                    <div className="qt-hero-copy">
+                      <div className="qt-hero-title-row">
+                        <span className="qt-hero-name">{currentQuota.displayName}</span>
+                        <span
+                          className={`tp-pill ${
+                            staleNotice ? 'tp-pill--warning' : 'tp-pill--accent'
+                          }`}
+                        >
+                          {staleNotice ? 'Sin respuesta' : 'En línea'}
+                        </span>
+                      </div>
+                      <div className="qt-hero-reset">
+                        <ClockIcon size={11} />
+                        <span>
+                          {resetCountdown
+                            ? `Resetea en ${resetCountdown}`
+                            : formatDetailedReset(currentQuota.timeUntilResetMs)}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
-                  <div>
-                    <div
-                      style={{
-                        fontWeight: 600,
-                        fontSize: '13px',
-                        color: 'var(--text-primary)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                      }}
-                    >
-                      {currentQuota.displayName}
-                      <span
-                        style={{
-                          fontSize: '9px',
-                          fontWeight: 500,
-                          padding: '1px 5px',
-                          borderRadius: 'var(--vl-radius-xs, 4px)',
-                          backgroundColor: staleNotice ? 'var(--warning-tint)' : 'var(--accent-tint)',
-                          color: staleNotice ? 'var(--warning-text)' : 'var(--accent)',
-                          border: `1px solid ${staleNotice ? 'var(--warning-tint)' : 'var(--accent-tint-strong)'}`,
-                        }}
-                      >
-                        {staleNotice ? 'Sin respuesta' : 'En línea'}
+                  <div className="qt-hero-metric">
+                    <div className="qt-hero-pct">{remPct}%</div>
+                    <div className="qt-hero-window-label">
+                      {currentQuota.metadata?.primaryWindowLabel
+                        ? String(currentQuota.metadata.primaryWindowLabel)
+                        : currentQuota.metadata?.primaryWindow === '5h'
+                          ? 'Límite de 5 horas'
+                          : 'Restante'}
+                    </div>
+                  </div>
+                </div>
+
+                {showHeroMeta && (
+                  <div className="qt-hero-meta">
+                    {currentQuota.metadata?.planType && (
+                      <span className="tp-pill tp-pill--chip tp-pill--accent">
+                        Plan: {currentQuota.metadata.planType}
                       </span>
-                    </div>
-                    <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                      {resetCountdown
-                        ? `Resetea en ${resetCountdown}`
-                        : formatDetailedReset(currentQuota.timeUntilResetMs)}
-                    </div>
+                    )}
+                    {(currentQuota.metadata?.email || resolvedActiveEmail !== 'Sesión nativa activa') && (
+                      <span className="qt-hero-email">
+                        {resolvedActiveEmail !== 'Sesión nativa activa'
+                          ? resolvedActiveEmail
+                          : String(currentQuota.metadata?.email)}
+                      </span>
+                    )}
                   </div>
-                </div>
-
-                <div style={{ textAlign: 'right' }}>
-                  <div
-                    style={{
-                      fontSize: '18px',
-                      fontWeight: 700,
-                      lineHeight: 1,
-                      color:
-                        remPct != null && remPct < 20
-                          ? 'var(--status-failed)'
-                          : remPct != null && remPct < 45
-                          ? 'var(--warning-text)'
-                          : 'var(--accent)',
-                    }}
-                  >
-                    {remPct}%
-                  </div>
-                  <div style={{ fontSize: '9px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                    {currentQuota.metadata?.primaryWindowLabel
-                      ? String(currentQuota.metadata.primaryWindowLabel)
-                      : currentQuota.metadata?.primaryWindow === '5h'
-                        ? 'Límite de 5 horas'
-                        : 'Restante'}
-                  </div>
-                </div>
+                )}
               </div>
 
               <QuotaStaleBanner notice={staleNotice} />
-
-              {/* Badges / Metadata row */}
-              {(currentQuota.metadata?.planType ||
-                currentQuota.metadata?.email ||
-                resolvedActiveEmail !== 'Sesión nativa activa') && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
-                  {currentQuota.metadata?.planType && (
-                    <span
-                      style={{
-                        fontSize: '10px',
-                        padding: '2px 6px',
-                        borderRadius: 'var(--vl-radius-xs, 4px)',
-                        backgroundColor: 'var(--accent-tint)',
-                        color: 'var(--accent)',
-                        border: '1px solid var(--accent-tint-strong)',
-                      }}
-                    >
-                      Plan: {currentQuota.metadata.planType}
-                    </span>
-                  )}
-                  {(currentQuota.metadata?.email || resolvedActiveEmail !== 'Sesión nativa activa') && (
-                    <span
-                      style={{
-                        fontSize: '10px',
-                        padding: '2px 6px',
-                        borderRadius: 'var(--vl-radius-xs, 4px)',
-                        backgroundColor: 'var(--block-fill)',
-                        color: 'var(--text-secondary)',
-                        border: '1px solid var(--block-stroke)',
-                      }}
-                    >
-                      {resolvedActiveEmail !== 'Sesión nativa activa'
-                        ? resolvedActiveEmail
-                        : String(currentQuota.metadata?.email)}
-                    </span>
-                  )}
-                </div>
-              )}
 
               {/* Account Switcher Bar */}
               {accountSwitcherBar}
 
               {/* Individual windows breakdown */}
               {currentQuota.windows && currentQuota.windows.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <div
-                    style={{
-                      fontSize: '10px',
-                      fontWeight: 600,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      color: 'var(--text-secondary)',
-                      marginTop: '2px',
-                    }}
-                  >
-                    Ventanas y Límites de Modelos
-                  </div>
+                <div className="qt-windows">
+                  <div className="tp-eyebrow">Ventanas y Límites de Modelos</div>
 
                   {currentQuota.windows.map((win, idx) => {
                     const rem = Math.round(win.remainingFraction * 100);
                     const used = Math.round(win.usagePercent);
+                    const statClass =
+                      rem < 20
+                        ? 'qt-window-row__stat qt-window-row__stat--danger'
+                        : rem < 45
+                          ? 'qt-window-row__stat qt-window-row__stat--warn'
+                          : 'qt-window-row__stat';
+                    const fillClass =
+                      used > 80
+                        ? 'tp-meter__fill qt-window-fill--danger'
+                        : used > 55
+                          ? 'tp-meter__fill qt-window-fill--warn'
+                          : 'tp-meter__fill qt-window-fill--ok';
 
                     return (
-                      <div
-                        key={idx}
-                        style={{
-                          backgroundColor: 'var(--chip-fill)',
-                          border: '1px solid var(--block-stroke)',
-                          borderRadius: 'var(--control-radius, 8px)',
-                          padding: '7px 9px',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: '4px',
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'baseline',
-                            gap: '8px',
-                            fontSize: '11px',
-                          }}
-                        >
-                          <span
-                            style={{
-                              color: 'var(--text-primary)',
-                              fontWeight: 500,
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                            title={win.name}
-                          >
+                      <div key={idx} className="qt-window-row">
+                        <div className="qt-window-row__head">
+                          <span className="qt-window-row__name" title={win.name}>
                             {win.name}
                           </span>
-                          <span
-                            style={{
-                              fontSize: '10px',
-                              color: rem < 20 ? 'var(--status-failed)' : rem < 45 ? 'var(--warning-text)' : 'var(--text-secondary)',
-                              fontVariantNumeric: 'tabular-nums',
-                              whiteSpace: 'nowrap',
-                              flexShrink: 0,
-                            }}
-                          >
+                          <span className={statClass}>
                             {rem}% restante ({used}% usado)
                           </span>
                         </div>
 
-                        <div
-                          style={{
-                            height: '4px',
-                            width: '100%',
-                            backgroundColor: 'var(--block-stroke)',
-                            borderRadius: '9999px',
-                            overflow: 'hidden',
-                          }}
-                        >
-                          <div
-                            style={{
-                              height: '100%',
-                              width: `${used}%`,
-                              backgroundColor:
-                                used > 80
-                                  ? 'var(--status-failed)'
-                                  : used > 55
-                                  ? 'var(--warning-text)'
-                                  : 'var(--status-running)',
-                              borderRadius: '9999px',
-                              transition: 'width 300ms ease',
-                            }}
-                          />
+                        <div className="tp-meter">
+                          <div className={fillClass} style={{ width: `${used}%` }} />
                         </div>
 
                         {win.timeUntilResetMs != null && win.timeUntilResetMs > 0 && (
-                          <div style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>
-                            {formatDetailedReset(win.timeUntilResetMs)}
+                          <div className="qt-window-row__reset">
+                            <ClockIcon size={10} />
+                            <span>{formatDetailedReset(win.timeUntilResetMs)}</span>
                           </div>
                         )}
                       </div>
@@ -551,67 +370,27 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
 
           {/* Case 2: Detected locally */}
           {diagnostic.state === 'detected' && (
-            <div
-              style={{
-                padding: '16px 14px',
-                backgroundColor: 'var(--block-fill)',
-                borderRadius: 'var(--control-radius, 8px)',
-                border: '1px solid var(--block-stroke)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '10px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <div
-                  style={{
-                    width: '32px',
-                    height: '32px',
-                    borderRadius: 'var(--control-radius, 8px)',
-                    backgroundColor: 'var(--accent-tint)',
-                    border: '1px solid var(--accent-tint-strong)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                  }}
-                >
+            <div className="qt-diag-card" data-tone="info">
+              <div className="qt-diag-card__head">
+                <div className="qt-diag-card__pedestal">
                   <BrandLogo engine={selectedProvider} size={18} />
                 </div>
-                <div>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    {PROVIDER_LABELS[selectedProvider] || selectedProvider}
-                    <span
-                      style={{
-                        fontSize: '9px',
-                        fontWeight: 500,
-                        padding: '1px 5px',
-                        borderRadius: 'var(--vl-radius-xs, 4px)',
-                        backgroundColor: 'var(--accent-tint)',
-                        color: 'var(--accent)',
-                        border: '1px solid var(--accent-tint-strong)',
-                      }}
-                    >
-                      Sesión local activa
+                <div className="qt-diag-card__copy">
+                  <div className="qt-hero-title-row">
+                    <span className="qt-hero-name">
+                      {PROVIDER_LABELS[selectedProvider] || selectedProvider}
                     </span>
+                    <span className="tp-pill tp-pill--accent">Sesión local activa</span>
                   </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                    {currentQuota?.metadata?.source ? String(currentQuota.metadata.source) : 'Herramienta CLI detectada'}
+                  <div className="tp-popover__subtitle">
+                    {currentQuota?.metadata?.source
+                      ? String(currentQuota.metadata.source)
+                      : 'Herramienta CLI detectada'}
                   </div>
                 </div>
               </div>
 
-              <div
-                style={{
-                  fontSize: '11px',
-                  color: 'var(--text-secondary)',
-                  backgroundColor: 'var(--chip-fill)',
-                  padding: '8px 10px',
-                  borderRadius: 'var(--control-radius, 8px)',
-                  border: '1px solid var(--block-fill)',
-                  lineHeight: 1.4,
-                }}
-              >
+              <div className="qt-diag-card__callout">
                 Este proveedor no expone cuotas ni créditos mediante una API de facturación en vivo. Está listo para ser usado directamente por los agentes de Kite.
               </div>
 
@@ -619,136 +398,66 @@ export const QuotaPopoverContent: React.FC<QuotaPopoverContentProps> = ({
 
               <button
                 type="button"
+                className="qt-text-link"
                 onClick={() => onOpenSettings(selectedProvider)}
-                style={{
-                  alignSelf: 'flex-start',
-                  background: 'none',
-                  border: 'none',
-                  padding: 0,
-                  color: 'var(--accent)',
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                }}
               >
                 <span>Ver detalles de configuración</span>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="5" y1="12" x2="19" y2="12" />
-                  <polyline points="12 5 19 12 12 19" />
-                </svg>
+                <ArrowRightIcon size={12} />
               </button>
             </div>
           )}
 
           {/* Case 3: Error / Session Required / Not configured */}
-          {(diagnostic.state === 'signed_out' || diagnostic.state === 'error' || diagnostic.state === 'not_installed') && (
+          {(diagnostic.state === 'signed_out' ||
+            diagnostic.state === 'error' ||
+            diagnostic.state === 'not_installed') && (
             <div
-              style={{
-                padding: '16px 14px',
-                backgroundColor:
-                  diagnostic.state === 'error'
-                    ? 'var(--danger-fill)'
-                    : diagnostic.state === 'signed_out'
-                    ? 'var(--warning-tint)'
-                    : 'var(--block-fill)',
-                borderRadius: 'var(--control-radius, 8px)',
-                border: `1px solid ${
-                  diagnostic.state === 'error'
-                    ? 'var(--danger-fill)'
-                    : diagnostic.state === 'signed_out'
-                    ? 'var(--warning-tint)'
-                    : 'var(--block-stroke)'
-                }`,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '10px',
-              }}
+              className="qt-diag-card"
+              data-tone={
+                diagnostic.state === 'error'
+                  ? 'danger'
+                  : diagnostic.state === 'signed_out'
+                    ? 'warn'
+                    : 'neutral'
+              }
             >
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
-                <div
-                  style={{
-                    width: '32px',
-                    height: '32px',
-                    borderRadius: 'var(--control-radius, 8px)',
-                    backgroundColor: 'var(--block-fill)',
-                    border: '1px solid var(--block-stroke)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                  }}
-                >
+              <div className="qt-diag-card__head">
+                <div className="qt-diag-card__pedestal">
                   <BrandLogo engine={selectedProvider} size={18} />
                 </div>
 
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    {PROVIDER_LABELS[selectedProvider] || selectedProvider}
+                <div className="qt-diag-card__copy">
+                  <div className="qt-hero-title-row">
+                    <span className="qt-hero-name">
+                      {PROVIDER_LABELS[selectedProvider] || selectedProvider}
+                    </span>
                     <span
-                      style={{
-                        fontSize: '9px',
-                        fontWeight: 500,
-                        padding: '1px 5px',
-                        borderRadius: 'var(--vl-radius-xs, 4px)',
-                        backgroundColor:
-                          diagnostic.state === 'error'
-                            ? 'var(--danger-fill)'
-                            : diagnostic.state === 'signed_out'
-                            ? 'var(--warning-tint)'
-                            : 'var(--block-stroke)',
-                        color:
-                          diagnostic.state === 'error'
-                            ? 'var(--status-failed)'
-                            : diagnostic.state === 'signed_out'
-                            ? 'var(--warning-text)'
-                            : 'var(--text-secondary)',
-                        border: `1px solid ${
-                          diagnostic.state === 'error'
-                            ? 'var(--danger-fill)'
-                            : diagnostic.state === 'signed_out'
-                            ? 'var(--warning-tint)'
-                            : 'var(--block-stroke)'
-                        }`,
-                      }}
+                      className={`tp-pill ${
+                        diagnostic.state === 'error'
+                          ? 'tp-pill--danger'
+                          : diagnostic.state === 'signed_out'
+                            ? 'tp-pill--warning'
+                            : ''
+                      }`}
                     >
                       {diagnostic.statusLabel}
                     </span>
                   </div>
 
-                  <p style={{ margin: '4px 0 0', fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-                    {diagnostic.detail}
-                  </p>
+                  <p className="qt-diag-card__detail">{diagnostic.detail}</p>
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => onOpenSettings(selectedProvider)}
-                style={{
-                  marginTop: '2px',
-                  backgroundColor: 'var(--accent-tint)',
-                  border: '1px solid var(--accent-tint-strong)',
-                  borderRadius: 'var(--vl-radius-xs, 4px)',
-                  padding: '6px 12px',
-                  color: 'var(--accent)',
-                  fontSize: '11px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  alignSelf: 'flex-start',
-                }}
-              >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-                <span>Configurar {PROVIDER_LABELS[selectedProvider] || selectedProvider}</span>
-              </button>
+              <div>
+                <button
+                  type="button"
+                  className="tp-btn tp-btn--primary"
+                  onClick={() => onOpenSettings(selectedProvider)}
+                >
+                  <SettingsGearIcon size={12} />
+                  <span>Configurar {PROVIDER_LABELS[selectedProvider] || selectedProvider}</span>
+                </button>
+              </div>
             </div>
           )}
 

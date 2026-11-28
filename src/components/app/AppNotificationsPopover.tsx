@@ -7,26 +7,47 @@ import { writeKitePref } from '../../lib/kitePrefs';
 import type { WorkMode } from '../Sidebar';
 import type { NotificationsSnapshot } from '../../types';
 
+export type AgentViewSection =
+  | 'chats'
+  | 'settings'
+  | 'memory'
+  | 'skills'
+  | 'starters'
+  | 'playbooks'
+  | 'audit';
+
 export interface AppNotificationsPopoverProps {
   isOpen: boolean;
   anchor: DOMRect | null;
   notifSnapshot: NotificationsSnapshot | null;
+  agents?: Array<{ id: string; name: string }>;
+  threads?: Array<{ id: string; title?: string | null }>;
   onClose: () => void;
+  setSelectedWorkspaceId?: (id: string | null) => void;
   setSelectedAgentId: (id: string | null) => void;
+  setSelectedAgentThreadId?: (id: string | null) => void;
   setSelectedThreadId: (id: string | null) => void;
+  setAgentViewMode?: React.Dispatch<React.SetStateAction<AgentViewSection>>;
   setWorkMode: (mode: WorkMode) => void;
   setSettingsOpen: (open: boolean) => void;
+  setRoutinesOpen?: (open: boolean) => void;
 }
 
 export const AppNotificationsPopover: React.FC<AppNotificationsPopoverProps> = ({
   isOpen,
   anchor,
   notifSnapshot,
+  agents,
+  threads,
   onClose,
+  setSelectedWorkspaceId,
   setSelectedAgentId,
+  setSelectedAgentThreadId,
   setSelectedThreadId,
+  setAgentViewMode,
   setWorkMode,
   setSettingsOpen,
+  setRoutinesOpen,
 }) => {
   const popoverRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; right: number }>({
@@ -72,6 +93,12 @@ export const AppNotificationsPopover: React.FC<AppNotificationsPopoverProps> = (
     };
   }, [isOpen, onClose]);
 
+  const closeOverlaysAndPopover = () => {
+    setSettingsOpen(false);
+    setRoutinesOpen?.(false);
+    onClose();
+  };
+
   const popoverNode = (
     <motion.div
       {...surfaceMotion('popover')}
@@ -91,32 +118,56 @@ export const AppNotificationsPopover: React.FC<AppNotificationsPopoverProps> = (
       <NotificationsView
         embedded
         externalSnapshot={notifSnapshot}
+        agents={agents}
+        threads={threads}
         onClose={onClose}
         onNavigateAgent={(id) => {
           setSelectedAgentId(id);
+          setAgentViewMode?.('chats');
           setWorkMode('agent');
-          onClose();
+          closeOverlaysAndPopover();
         }}
         onNavigateThread={(threadId, agentId) => {
           if (agentId) {
             setSelectedAgentId(agentId);
+            setAgentViewMode?.('chats');
+            if (setSelectedAgentThreadId) {
+              setSelectedAgentThreadId(threadId);
+            } else {
+              setSelectedThreadId(threadId);
+            }
             setWorkMode('agent');
           } else {
-            setWorkMode('code');
+            setSelectedThreadId(threadId);
+            setWorkMode('chat');
           }
-          setSelectedThreadId(threadId);
-          onClose();
+          closeOverlaysAndPopover();
+        }}
+        onNavigateTerminal={(sessionId, workspaceId) => {
+          if (workspaceId) {
+            setSelectedWorkspaceId?.(workspaceId);
+          }
+          setWorkMode('code');
+          window.dispatchEvent(
+            new CustomEvent('kite:focus-terminal-session', {
+              detail: { sessionId, workspaceId },
+            })
+          );
+          closeOverlaysAndPopover();
         }}
         onNavigateMode={(m) => {
           setWorkMode(m);
-          onClose();
+          closeOverlaysAndPopover();
         }}
         onOpenSettings={() => {
           onClose();
+          setRoutinesOpen?.(false);
           setSettingsOpen(true);
           try {
             writeKitePref('settingsTab', 'notifications');
-          } catch (_) {}
+          } catch (err) {
+            console.warn('[AppNotificationsPopover] Failed to persist settingsTab:', err);
+          }
         }}
       />
     </motion.div>

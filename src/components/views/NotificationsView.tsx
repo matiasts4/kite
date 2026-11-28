@@ -2,12 +2,18 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import type {
   NotificationsSnapshot,
   NotificationRecord,
-  PendingAutoSwitchConfirmation,
 } from '../../types';
 import * as ipc from '../../lib/ipc';
 import { invokeCommand } from '../../lib/ipc';
 import { accountVaultStore } from '../../lib/accounts/accountVaultStore';
 import { openSettingsTab } from '../../lib/settingsNav';
+import {
+  getNotificationActor,
+  getNotificationDetail,
+  resolveNotificationModule,
+} from '../../lib/notifications/presentation';
+import { CheckCheckIcon, ChevronRightIcon } from '../titlebar/TopbarPopoverIcons';
+import '../titlebar/topbar-popovers.css';
 import './notifications.css';
 
 export type { NotificationRecord };
@@ -16,11 +22,14 @@ export interface NotificationsViewProps {
   onUnreadCountChange?: (count: number) => void;
   onNavigateAgent?: (agentId: string) => void;
   onNavigateThread?: (threadId: string, agentId?: string | null) => void;
+  onNavigateTerminal?: (sessionId: string, workspaceId?: string | null) => void;
   onNavigateMode?: (mode: 'agent' | 'code' | 'chat') => void;
   onClose?: () => void;
   onOpenSettings?: () => void;
   externalSnapshot?: NotificationsSnapshot | null;
   embedded?: boolean;
+  agents?: Array<{ id: string; name: string }>;
+  threads?: Array<{ id: string; title?: string | null }>;
 }
 
 const DISMISSED_STORAGE_KEY = 'kite_dismissed_notifications';
@@ -32,7 +41,9 @@ function getDismissedSet(): Set<string> {
       const arr = JSON.parse(raw);
       if (Array.isArray(arr)) return new Set(arr);
     }
-  } catch (_) {}
+  } catch (err) {
+    console.warn('[NotificationsView] Failed to read dismissed notifications:', err);
+  }
   return new Set();
 }
 
@@ -55,69 +66,6 @@ function formatRelativeTime(timestampMs: number, nowMs = Date.now()): string {
   const diffDays = Math.floor(diffHr / 24);
   const remHr = diffHr % 24;
   return remHr > 0 ? `${formatPlural(diffDays, 'day', 'days')}, ${remHr} hr` : formatPlural(diffDays, 'day', 'days');
-}
-
-function getActorName(rec: NotificationRecord): string {
-  if (rec.kind?.kind === 'autoSwitchConfirm') {
-    return rec.title || 'Cambio automático de cuenta';
-  }
-  if (rec.kind?.kind === 'modelQuotaExhausted') {
-    return rec.title || 'Cuota de modelo agotada';
-  }
-  if (rec.routineId) return 'Routine Automation';
-  if (rec.target?.source === 'agentChat') return 'Agent chat';
-  if (rec.target?.source === 'codeThread') return 'Code thread';
-  if (rec.target?.source === 'codeTerminal') return 'Terminal runner';
-  if (rec.target?.source === 'task') return 'Background task';
-  return 'Kite';
-}
-
-function formatAutoSwitchSummary(confirm: PendingAutoSwitchConfirmation): string {
-  const from = confirm.fromAccountLabel || confirm.fromEmail || 'cuenta actual';
-  const to = confirm.toAccountLabel || confirm.toEmail || 'otra cuenta';
-  const plan = confirm.toPlanName ? ` (${confirm.toPlanName})` : '';
-  if (confirm.reason === 'busy_terminals_ask' || confirm.busySessions.length > 0) {
-    const busyCount = confirm.busySessions.length;
-    return `Cambio de ${from} a ${to}${plan}. ${busyCount} ${busyCount === 1 ? 'terminal activa' : 'terminales activas'}.`;
-  }
-  if (confirm.requestedModel && confirm.suggestedFallbackModel) {
-    return `Cambio de ${from} a ${to}${plan}. Modelo «${confirm.requestedModel}» no disponible; sugerido: «${confirm.suggestedFallbackModel}».`;
-  }
-  return `Confirma el cambio de ${from} a ${to}${plan}.`;
-}
-
-function getDetailMessage(rec: NotificationRecord): string {
-  const kind = rec.kind;
-  if (!kind) return 'System notice updated.';
-  if (kind.kind === 'autoSwitchConfirm') {
-    if (rec.body) return rec.body;
-    if (rec.autoSwitchConfirm) return formatAutoSwitchSummary(rec.autoSwitchConfirm);
-    if (rec.resolution === 'attended') return 'Cambio automático confirmado.';
-    if (rec.resolution === 'abandoned') return 'Confirmación descartada o expirada.';
-    return 'Confirma el cambio automático de cuenta.';
-  }
-  if (kind.kind === 'modelQuotaExhausted') {
-    return rec.body || 'Este modelo alcanzó el 0% de cuota.';
-  }
-  if (kind.kind === 'needsInput') {
-    const isWaiting = rec.isWaitingForInput ?? !rec.isRead;
-    switch (kind.requestKind) {
-      case 'toolApproval':
-        return isWaiting ? 'Waiting for your approval' : 'Asked for your approval';
-      case 'question':
-        return isWaiting ? 'Waiting on your answer' : 'Asked you a question';
-      case 'unknown':
-      default:
-        return isWaiting ? 'Waiting for your input' : 'Asked for your input';
-    }
-  }
-  if (kind.kind === 'settled') {
-    if (kind.outcome === 'failed') return 'needs attention';
-    if (kind.outcome === 'cancelled') return 'cancelled';
-    if (rec.target?.source === 'codeThread') return 'Code thread closed';
-    return 'finished';
-  }
-  return 'System notification record.';
 }
 
 function isWaitingForInput(rec: NotificationRecord): boolean {
@@ -222,14 +170,18 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   onUnreadCountChange,
   onNavigateAgent,
   onNavigateThread,
+  onNavigateTerminal,
   onNavigateMode,
   onClose,
   onOpenSettings,
   externalSnapshot,
   embedded = false,
+  agents,
+  threads,
 }) => {
   const [snapshot, setSnapshot] = useState<NotificationsSnapshot | null>(null);
   const [dismissedIds] = useState<Set<string>>(() => getDismissedSet());
+  const lookups = useMemo(() => ({ agents, threads }), [agents, threads]);
 
   const syncSnapshot = useCallback(
     (snap: NotificationsSnapshot) => {
@@ -265,13 +217,22 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   }, [syncSnapshot]);
 
   useEffect(() => {
-    loadSnapshot();
+    if (externalSnapshot !== undefined) {
+      if (externalSnapshot) {
+        syncSnapshot(externalSnapshot);
+      }
+      return;
+    }
+
+    void loadSnapshot();
     const interval = setInterval(() => {
       void invokeCommand<NotificationsSnapshot>('notifications_poll')
         .then((res) => {
           if (res) syncSnapshot(res);
         })
-        .catch(() => {});
+        .catch((err) => {
+          console.warn('[NotificationsView] Poll error:', err);
+        });
     }, 15000);
     const handleExternalRefresh = () => {
       void loadSnapshot();
@@ -281,13 +242,17 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       clearInterval(interval);
       window.removeEventListener('kite:notifications-refresh', handleExternalRefresh);
     };
-  }, [loadSnapshot, syncSnapshot]);
+  }, [externalSnapshot, loadSnapshot, syncSnapshot]);
 
   const handleMarkRead = async (recordId: string) => {
     try {
       const res = await invokeCommand<NotificationsSnapshot>('notifications_mark_read', { recordId });
       if (res) syncSnapshot(res);
-    } catch {
+      if (externalSnapshot !== undefined) {
+        window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+      }
+    } catch (err) {
+      console.warn('[NotificationsView] Failed to mark notification read:', err);
       // Optimistic fallback
       setSnapshot((prev) => {
         if (!prev) return null;
@@ -305,7 +270,11 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     try {
       const res = await invokeCommand<NotificationsSnapshot>('notifications_mark_all_read');
       if (res) syncSnapshot(res);
-    } catch {
+      if (externalSnapshot !== undefined) {
+        window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+      }
+    } catch (err) {
+      console.warn('[NotificationsView] Failed to mark all notifications read:', err);
       // Optimistic fallback
       setSnapshot((prev) => {
         if (!prev) return null;
@@ -316,31 +285,36 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (externalSnapshot) {
-      syncSnapshot(externalSnapshot);
-    }
-  }, [externalSnapshot, syncSnapshot]);
-
   const handleRowClick = (rec: NotificationRecord) => {
     if (!rec.isRead) {
-      handleMarkRead(rec.id);
+      void handleMarkRead(rec.id);
     }
     if (rec.kind?.kind === 'modelQuotaExhausted' || rec.target?.source === 'accountVault') {
       openSettingsTab('quotas', rec.target?.id || undefined);
       onClose?.();
       return;
     }
-    const targetThreadId = rec.target?.id;
-    if (onNavigateThread && targetThreadId) {
-      onNavigateThread(targetThreadId, rec.profileId);
-    } else if (rec.target?.source === 'agentChat' && rec.profileId && onNavigateAgent) {
+    const source = rec.target?.source;
+    const targetId = rec.target?.id;
+    if (source === 'terminal' || source === 'codeTerminal') {
+      if (onNavigateTerminal && targetId) {
+        onNavigateTerminal(targetId, rec.workspaceId);
+      } else if (onNavigateMode) {
+        onNavigateMode('code');
+      }
+      return;
+    }
+    if (onNavigateThread && targetId) {
+      onNavigateThread(targetId, rec.profileId);
+    } else if (source === 'agentChat' && rec.profileId && onNavigateAgent) {
       onNavigateAgent(rec.profileId);
-    } else if (
-      (rec.target?.source === 'codeThread' || rec.target?.source === 'codeTerminal') &&
-      onNavigateMode
-    ) {
+    } else if (source === 'codeThread' && onNavigateMode) {
       onNavigateMode('code');
+    } else if (onNavigateMode) {
+      const mod = resolveNotificationModule(rec);
+      if (mod) {
+        onNavigateMode(mod);
+      }
     }
   };
 
@@ -489,8 +463,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       }
     };
 
-    const title = getActorName(rec);
-    const detail = getDetailMessage(rec);
+    const title = getNotificationActor(rec, lookups);
+    const detail = getNotificationDetail(rec, lookups);
 
     return (
       <div
@@ -527,6 +501,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
             {models.length > 0 ? (
               <label className="notification-confirm-card__field" onClick={stopBubble}>
                 <span>Modelo destino</span>
+                {/* kite-design-ok: native select required by AutoSwitchConfirmCard model picker test contract */}
                 <select
                   aria-label="Modelo destino"
                   className="notification-confirm-card__select"
@@ -662,7 +637,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
             onClick={handleMarkAllRead}
             className="notification-center__mark-read"
           >
-            Mark all read
+            <CheckCheckIcon size={12} strokeWidth={2} />
+            <span>Mark all read</span>
           </button>
         )}
       </header>
@@ -687,7 +663,10 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                   group.isNeedsYou ? ' notification-center__section--needs-you' : ''
                 }`}
               >
-                {group.title}
+                {group.isNeedsYou && (
+                  <span className="notification-center__section-dot" aria-hidden="true" />
+                )}
+                <span>{group.title}</span>
               </h2>
 
               {group.records.map((rec) => {
@@ -699,8 +678,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                   return <AutoSwitchConfirmCard key={rec.id} rec={rec} />;
                 }
 
-                const actor = getActorName(rec);
-                const detail = getDetailMessage(rec);
+                const actor = getNotificationActor(rec, lookups);
+                const detail = getNotificationDetail(rec, lookups);
                 const statusStr = isWaitingForInput(rec) ? 'unanswered' : rec.isRead ? 'read' : 'unread';
 
                 return (
@@ -751,8 +730,11 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           onClick={handleSettingsClick}
           type="button"
         >
-          <SettingsIcon aria-hidden="true" size={13} strokeWidth={1.8} />
-          Notification settings…
+          <span className="notification-center__settings-main">
+            <SettingsIcon aria-hidden="true" size={13} strokeWidth={1.8} />
+            <span>Notification settings…</span>
+          </span>
+          <ChevronRightIcon size={12} className="notification-center__settings-chevron" />
         </button>
       </div>
     </>

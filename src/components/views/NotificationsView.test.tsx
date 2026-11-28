@@ -347,4 +347,171 @@ describe('NotificationsView Component', () => {
       host.remove();
     }
   });
+
+  it('displays characteristic agent/terminal names and skips internal polling when externalSnapshot is provided', async () => {
+    const user = userEvent.setup();
+    const onNavigateThread = vi.fn();
+    const onNavigateTerminal = vi.fn();
+    const externalSnapshot = {
+      schemaVersion: 2,
+      revision: 4,
+      records: [
+        {
+          id: 'agent-done-1',
+          createdAtUnixMs: Date.now(),
+          isRead: true,
+          profileId: 'agent-chip',
+          target: { source: 'agentChat', id: 'at-10' },
+          kind: { kind: 'settled', outcome: 'completed' },
+        },
+        {
+          id: 'term-done-1',
+          createdAtUnixMs: Date.now(),
+          isRead: true,
+          actorName: 'Orion · Codex',
+          body: 'All checks passed',
+          workspaceId: 'ws-kite',
+          target: { source: 'terminal', id: 'sess-55' },
+          kind: { kind: 'settled', outcome: 'completed' },
+        },
+      ],
+      unreadCount: 0,
+      openInputRequestCount: 0,
+      authorization: 'authorized',
+      preferences: {
+        schemaVersion: 2,
+        osNotificationsEnabled: true,
+        finishSoundEnabled: true,
+        inputRequestsEnabled: true,
+      },
+      archiveReadOnly: false,
+      openRecordId: null,
+    };
+
+    render(
+      <NotificationsView
+        externalSnapshot={externalSnapshot}
+        agents={[{ id: 'agent-chip', name: 'Chip Worker' }]}
+        threads={[{ id: 'at-10', title: 'Refactor auth' }]}
+        onNavigateThread={onNavigateThread}
+        onNavigateTerminal={onNavigateTerminal}
+      />
+    );
+
+    expect(screen.getByText('Chip Worker')).toBeInTheDocument();
+    expect(screen.getByText('Finished · Refactor auth')).toBeInTheDocument();
+    expect(screen.getByText('Orion · Codex')).toBeInTheDocument();
+    expect(screen.getByText('All checks passed')).toBeInTheDocument();
+    expect(invokeCommand).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: /Chip Worker, Finished · Refactor auth/i }));
+    expect(onNavigateThread).toHaveBeenCalledWith('at-10', 'agent-chip');
+
+    await user.click(screen.getByRole('button', { name: /Orion · Codex, All checks passed/i }));
+    expect(onNavigateTerminal).toHaveBeenCalledWith('sess-55', 'ws-kite');
+  });
+
+  it('routes AppNotificationsPopover clicks across agentChat, codeThread (chat), and terminal targets', async () => {
+    const user = userEvent.setup();
+    const { AppNotificationsPopover } = await import('../app/AppNotificationsPopover');
+    const setSelectedWorkspaceId = vi.fn();
+    const setSelectedAgentId = vi.fn();
+    const setSelectedAgentThreadId = vi.fn();
+    const setSelectedThreadId = vi.fn();
+    const setAgentViewMode = vi.fn();
+    const setWorkMode = vi.fn();
+    const setSettingsOpen = vi.fn();
+    const setRoutinesOpen = vi.fn();
+    const onClose = vi.fn();
+    const focusEvents: CustomEvent[] = [];
+    const onFocusTerm = (e: Event) => focusEvents.push(e as CustomEvent);
+    window.addEventListener('kite:focus-terminal-session', onFocusTerm);
+
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    try {
+      render(
+        <AppNotificationsPopover
+          isOpen={true}
+          anchor={new DOMRect(900, 10, 28, 28)}
+          agents={[{ id: 'agent-chip', name: 'Chip Worker' }]}
+          threads={[{ id: 'chat-t1', title: 'Build notifications' }]}
+          notifSnapshot={{
+            schemaVersion: 2,
+            revision: 1,
+            records: [
+              {
+                id: 'n-agent',
+                createdAtUnixMs: Date.now(),
+                isRead: true,
+                profileId: 'agent-chip',
+                threadTitle: 'Audit IPC',
+                target: { source: 'agentChat', id: 'agent-t1' },
+                kind: { kind: 'settled', outcome: 'completed' },
+              },
+              {
+                id: 'n-chat',
+                createdAtUnixMs: Date.now(),
+                isRead: true,
+                target: { source: 'codeThread', id: 'chat-t1' },
+                kind: { kind: 'settled', outcome: 'completed' },
+              },
+              {
+                id: 'n-term',
+                createdAtUnixMs: Date.now(),
+                isRead: true,
+                actorName: 'Orion · Codex',
+                workspaceId: 'ws-alpha',
+                body: 'Finished build',
+                target: { source: 'terminal', id: 'term-9' },
+                kind: { kind: 'settled', outcome: 'completed' },
+              },
+            ],
+            unreadCount: 0,
+            openInputRequestCount: 0,
+            authorization: 'authorized',
+            preferences: {
+              schemaVersion: 2,
+              osNotificationsEnabled: true,
+              finishSoundEnabled: true,
+              inputRequestsEnabled: true,
+            },
+            archiveReadOnly: false,
+            openRecordId: null,
+          }}
+          onClose={onClose}
+          setSelectedWorkspaceId={setSelectedWorkspaceId}
+          setSelectedAgentId={setSelectedAgentId}
+          setSelectedAgentThreadId={setSelectedAgentThreadId}
+          setSelectedThreadId={setSelectedThreadId}
+          setAgentViewMode={setAgentViewMode}
+          setWorkMode={setWorkMode}
+          setSettingsOpen={setSettingsOpen}
+          setRoutinesOpen={setRoutinesOpen}
+        />,
+        { container: host }
+      );
+
+      await user.click(screen.getByRole('button', { name: /Chip Worker, Finished · Audit IPC/i }));
+      expect(setSelectedAgentId).toHaveBeenCalledWith('agent-chip');
+      expect(setAgentViewMode).toHaveBeenCalledWith('chats');
+      expect(setSelectedAgentThreadId).toHaveBeenCalledWith('agent-t1');
+      expect(setWorkMode).toHaveBeenCalledWith('agent');
+      expect(setSettingsOpen).toHaveBeenCalledWith(false);
+      expect(setRoutinesOpen).toHaveBeenCalledWith(false);
+
+      await user.click(screen.getByRole('button', { name: /Build notifications, finished/i }));
+      expect(setSelectedThreadId).toHaveBeenCalledWith('chat-t1');
+      expect(setWorkMode).toHaveBeenCalledWith('chat');
+
+      await user.click(screen.getByRole('button', { name: /Orion · Codex, Finished build/i }));
+      expect(setSelectedWorkspaceId).toHaveBeenCalledWith('ws-alpha');
+      expect(setWorkMode).toHaveBeenCalledWith('code');
+      expect(focusEvents).toHaveLength(1);
+      expect(focusEvents[0].detail).toEqual({ sessionId: 'term-9', workspaceId: 'ws-alpha' });
+    } finally {
+      window.removeEventListener('kite:focus-terminal-session', onFocusTerm);
+      host.remove();
+    }
+  });
 });

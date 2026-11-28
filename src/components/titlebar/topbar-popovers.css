@@ -1,0 +1,626 @@
+/* Shared Kite Studio Top-Bar Popover System
+   Design tokens anchored to docs/visual-language.md & AGENTS.md §1–§2.
+   Zero hardcoded hex values, zero arbitrary pixel radii/heights. */
+
+@keyframes tp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tp-spin {
+  animation: tp-spin 850ms linear infinite;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Overlay Popover Shell                                                      */
+/* -------------------------------------------------------------------------- */
+
+.tp-popover {
+  position: fixed;
+  transform-origin: top right;
+  max-width: calc(100vw - 24px);
+  max-height: min(560px, calc(100vh - 60px));
+  border-radius: var(--dialog-radius, 14px);
+  background: var(--glass-overlay-bg, var(--menu-plate, var(--vl-surface-overlay)));
+  -webkit-backdrop-filter: var(--glass-overlay-blur);
+  backdrop-filter: var(--glass-overlay-blur);
+  border: 1px solid var(--glass-border, var(--vl-stroke));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary) 9%, transparent),
+    0 24px 56px -18px rgba(0, 0, 0, 0.72),
+    0 8px 20px -10px rgba(0, 0, 0, 0.45);
+  color: var(--text-primary);
+  font-size: 12px;
+  z-index: 10001;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+  user-select: none;
+}
+
+.tp-popover--opaque {
+  background: var(--menu-plate, var(--pane));
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: var(--control-stroke, var(--vl-stroke));
+}
+
+html[data-theme='light'] .tp-popover {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 20px 44px -18px rgba(15, 23, 42, 0.22),
+    0 6px 16px -8px rgba(15, 23, 42, 0.12);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Popover Header & Emblem                                                    */
+/* -------------------------------------------------------------------------- */
+
+.tp-popover__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--text-primary) 4%, transparent) 0%,
+    transparent 100%
+  );
+  border-bottom: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  flex-shrink: 0;
+}
+
+.tp-popover__identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.tp-popover__emblem {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--control-radius, 8px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: color-mix(in srgb, var(--accent) 12%, var(--vl-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--vl-stroke));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-primary) 10%, transparent);
+  color: var(--accent);
+}
+
+.tp-popover__title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tp-popover__title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.tp-popover__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tp-popover__subtitle {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tp-popover__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tactile Icon & Action Buttons                                              */
+/* -------------------------------------------------------------------------- */
+
+.tp-icon-btn {
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tp-icon-btn:hover:not(:disabled) {
+  background: var(--hover-fill);
+  border-color: var(--vl-stroke);
+  color: var(--text-primary);
+}
+
+.tp-icon-btn:active:not(:disabled) {
+  transform: scale(0.95);
+  background: var(--selected-fill);
+}
+
+.tp-icon-btn--active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  color: var(--accent);
+}
+
+.tp-icon-btn--active:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 44%, transparent);
+  color: var(--accent);
+}
+
+.tp-icon-btn:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 2px;
+}
+
+.tp-icon-btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.tp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: var(--control-row, 28px);
+  padding: 0 11px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--vl-stroke);
+  background: var(--vl-surface-raised);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 120ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tp-btn--sm {
+  height: var(--vl-control-sm, 26px);
+  padding: 0 9px;
+  font-size: 11px;
+}
+
+.tp-btn--md {
+  height: var(--vl-control-md, 32px);
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.tp-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: var(--vl-stroke-strong);
+}
+
+.tp-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.tp-btn:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 2px;
+}
+
+.tp-btn:disabled {
+  opacity: 0.48;
+  cursor: default;
+  transform: none;
+}
+
+.tp-btn--primary {
+  background: linear-gradient(180deg, var(--vl-primary-top), var(--vl-primary-bottom) 78%);
+  border-color: var(--vl-primary-border);
+  color: var(--vl-primary-ink);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text-primary) 14%, transparent),
+    0 2px 6px -2px rgba(0, 0, 0, 0.48);
+}
+
+.tp-btn--primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--vl-primary-top-hover), var(--vl-primary-bottom-hover) 78%);
+  border-color: var(--vl-primary-border-hover);
+}
+
+.tp-btn--secondary {
+  background: var(--vl-surface-raised);
+  border-color: var(--vl-stroke-strong);
+  color: var(--text-primary);
+  box-shadow: var(--vl-inset);
+}
+
+.tp-btn--secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vl-surface-raised) 86%, var(--text-primary) 14%);
+}
+
+.tp-btn--accent {
+  background: color-mix(in srgb, var(--accent) 13%, var(--vl-surface-raised));
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  color: var(--accent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.tp-btn--accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 20%, var(--vl-surface-raised));
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.tp-btn--danger {
+  background: color-mix(in srgb, var(--status-failed) 12%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed) 38%, transparent);
+  color: var(--danger-ink, var(--status-failed));
+}
+
+.tp-btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--status-failed) 18%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed) 55%, transparent);
+}
+
+.tp-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.tp-btn--ghost:hover:not(:disabled) {
+  background: var(--hover-fill);
+  border-color: transparent;
+  color: var(--text-primary);
+  transform: none;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Semantic Pills, Section Eyebrows, Cards & Segmented Rails                  */
+/* -------------------------------------------------------------------------- */
+
+.tp-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--pill-radius, 9999px);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--vl-stroke);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-secondary);
+}
+
+.tp-pill--chip {
+  border-radius: var(--vl-radius-sm, 6px);
+}
+
+.tp-pill--accent {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  color: var(--accent);
+}
+
+.tp-pill--success {
+  background: color-mix(in srgb, var(--status-running) 14%, transparent);
+  border-color: color-mix(in srgb, var(--status-running) 34%, transparent);
+  color: var(--status-running);
+}
+
+.tp-pill--warning {
+  background: color-mix(in srgb, var(--warning-text) 14%, transparent);
+  border-color: color-mix(in srgb, var(--warning-text) 34%, transparent);
+  color: var(--warning-text);
+}
+
+.tp-pill--danger {
+  background: color-mix(in srgb, var(--status-failed) 14%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed) 36%, transparent);
+  color: var(--danger-ink, var(--status-failed));
+}
+
+.tp-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-faint, var(--text-secondary));
+  margin: 0;
+}
+
+.tp-eyebrow::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--glass-inner-border, var(--vl-stroke));
+}
+
+.tp-card {
+  background: color-mix(in srgb, var(--vl-surface-raised) 86%, transparent);
+  border: 1px solid var(--glass-card-border, var(--vl-stroke));
+  border-radius: var(--card-radius, 12px);
+  box-shadow: var(--vl-inset);
+}
+
+.tp-segmented {
+  display: grid;
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--background) 56%, var(--vl-surface-raised));
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  box-shadow: var(--vl-inset-field);
+}
+
+.tp-segmented--inline {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tp-segmented__item {
+  height: var(--vl-control-sm, 26px);
+  padding: 0 8px;
+  border-radius: calc(var(--control-radius, 8px) - 1px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.tp-segmented__item:hover:not([aria-selected='true']):not(.tp-segmented__item--active) {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+.tp-segmented__item[aria-selected='true'],
+.tp-segmented__item--active {
+  background: var(--vl-surface-raised);
+  border-color: var(--vl-stroke-strong);
+  color: var(--text-primary);
+  font-weight: 600;
+  box-shadow:
+    var(--vl-inset),
+    0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.tp-segmented__item:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 1px;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Recessed Input Field, Meter Bar, Empty State & Footer                      */
+/* -------------------------------------------------------------------------- */
+
+.tp-field {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: var(--control-row, 28px);
+  padding: 0 9px;
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-field-bg, var(--vl-surface-canvas));
+  border: 1px solid var(--vl-stroke);
+  box-shadow: var(--vl-inset-field);
+  color: var(--text-secondary);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.tp-field--md {
+  height: var(--vl-control-md, 32px);
+  padding: 0 10px;
+}
+
+.tp-field:focus-within {
+  border-color: var(--vl-focus, var(--accent));
+  box-shadow:
+    var(--vl-inset-field),
+    0 0 0 2px color-mix(in srgb, var(--vl-focus, var(--accent)) 24%, transparent);
+}
+
+.tp-field__input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+.tp-field__input::placeholder {
+  color: var(--text-faint, var(--text-secondary));
+}
+
+.tp-meter {
+  height: 4px;
+  width: 100%;
+  border-radius: var(--pill-radius, 9999px);
+  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  overflow: hidden;
+}
+
+.tp-meter--md {
+  height: 6px;
+}
+
+.tp-meter__fill {
+  height: 100%;
+  border-radius: var(--pill-radius, 9999px);
+  transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1), background-color 200ms ease;
+}
+
+.tp-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  padding: 26px 18px;
+  border-radius: var(--card-radius, 12px);
+  background: color-mix(in srgb, var(--vl-surface-raised) 55%, transparent);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+}
+
+.tp-empty__halo {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--card-radius, 12px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(
+    circle at 50% 30%,
+    color-mix(in srgb, var(--accent) 22%, transparent),
+    color-mix(in srgb, var(--accent) 7%, transparent)
+  );
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--vl-stroke));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text-primary) 12%, transparent);
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+.tp-empty__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.tp-empty__desc {
+  margin: 0;
+  max-width: 260px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.tp-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  background: color-mix(in srgb, var(--background) 24%, transparent);
+  flex-shrink: 0;
+}
+
+.tp-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: var(--vl-control-sm, 26px);
+  padding: 0 8px;
+  margin-left: -8px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.tp-footer-link:hover {
+  background: var(--hover-fill);
+  color: var(--text-primary);
+}
+
+.tp-footer-link:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 2px;
+}
+
+.tp-footer-link svg {
+  transition: transform 140ms ease;
+}
+
+.tp-footer-link:hover svg {
+  transform: translateX(2px);
+}
+
+.tp-footer-meta {
+  font-size: 10.5px;
+  color: var(--text-faint, var(--text-secondary));
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .tp-btn:hover:not(:disabled),
+  .tp-btn:active:not(:disabled),
+  .tp-icon-btn:active:not(:disabled),
+  .tp-footer-link:hover svg {
+    transform: none;
+  }
+}

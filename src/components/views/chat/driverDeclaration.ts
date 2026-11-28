@@ -105,6 +105,65 @@ export function resolveEffortChoicesForModel(
   return { choices, defaultEffort };
 }
 
+const EFFORT_LEVEL_RANK: Record<string, number> = {
+  none: 0,
+  off: 0,
+  minimal: 1,
+  min: 1,
+  low: 2,
+  medium: 3,
+  med: 3,
+  high: 4,
+  xhigh: 5,
+  'x-high': 5,
+  'extra-high': 5,
+  extra_high: 5,
+  'very-high': 5,
+  extra: 5,
+  max: 6,
+  maximum: 6,
+  ultra: 7,
+};
+
+/**
+ * Reconciles a candidate effort level against a model's advertised capabilities.
+ * Returns `null` when the model does not support reasoning effort, preserves exact
+ * supported levels, and clamps out-of-range levels to the nearest advertised tier.
+ */
+export function reconcileEffortForModel(
+  model: ModelEffortInput | undefined | null,
+  effort: string | null | undefined
+): string | null {
+  const resolved = resolveEffortChoicesForModel(model);
+  if (!resolved || resolved.choices.length < 2) {
+    return null;
+  }
+  const trimmed = typeof effort === 'string' ? effort.trim() : '';
+  if (!trimmed) {
+    return null;
+  }
+  const lower = trimmed.toLowerCase();
+  const exact = resolved.choices.find((choice) => choice.id.toLowerCase() === lower);
+  if (exact) {
+    return exact.id;
+  }
+  const targetRank = EFFORT_LEVEL_RANK[lower];
+  if (targetRank === undefined) {
+    return resolved.defaultEffort;
+  }
+  let best = resolved.choices[0];
+  let bestDist = Math.abs((EFFORT_LEVEL_RANK[best.id.toLowerCase()] ?? 3) - targetRank);
+  for (let i = 1; i < resolved.choices.length; i += 1) {
+    const candidate = resolved.choices[i];
+    const dist = Math.abs((EFFORT_LEVEL_RANK[candidate.id.toLowerCase()] ?? 3) - targetRank);
+    if (dist < bestDist) {
+      best = candidate;
+      bestDist = dist;
+    }
+  }
+  return best.id;
+}
+
 /**
  * Transitional declaration built from the static provider catalog the app
  * already ships. The composer no longer reads that catalog: it renders this

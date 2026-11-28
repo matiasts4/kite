@@ -1,6 +1,11 @@
 import type { ChatItem } from '../../../types';
 import { liveThoughtLine } from './activityPresentation';
-import { dedupeSubagentItems } from './subagentRunHelpers';
+import {
+  dedupeSubagentItems,
+  isHookBlockedInvokeNoise,
+  isItemFailed,
+  isZeroStepUnbackedFailedItem,
+} from './subagentRunHelpers';
 
 export { liveThoughtLine };
 
@@ -281,10 +286,86 @@ function isNonRenderedTranscriptItem(item: ChatItem): boolean {
     return true;
   }
   if (item.kind === 'quotaHandoff' && !item.handoffOffer) return true;
+  if (isSubagentItem(item) && isHookBlockedInvokeNoise(item)) return true;
   return false;
 }
 
+const MAX_CACHED_GROUPED_ROWS = 1024;
+const lastGroupedRowsById = new Map<string, TranscriptRow>();
+
+function areItemRefsEqual(a: readonly ChatItem[], b: readonly ChatItem[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function stabilizeTranscriptRows(rows: TranscriptRow[]): TranscriptRow[] {
+  if (lastGroupedRowsById.size > MAX_CACHED_GROUPED_ROWS) {
+    lastGroupedRowsById.clear();
+  }
+  return rows.map((row) => {
+    const key = row.kind === 'item' ? `item:${row.item.id}` : row.id;
+    const prev = lastGroupedRowsById.get(key);
+    let chosen: TranscriptRow = row;
+    if (prev && prev.kind === row.kind) {
+      if (row.kind === 'item' && prev.kind === 'item' && prev.item === row.item) {
+        chosen = prev;
+      } else if (
+        (row.kind === 'work' && prev.kind === 'work' && areItemRefsEqual(prev.items, row.items)) ||
+        (row.kind === 'subagentGroup' &&
+          prev.kind === 'subagentGroup' &&
+          areItemRefsEqual(prev.items, row.items))
+      ) {
+        chosen = prev;
+      }
+    }
+    lastGroupedRowsById.set(key, chosen);
+    return chosen;
+  });
+}
+
+/**
+ * Identifies 0-step unbacked failed subagent attempts in a turn that are superseded by
+ * another non-failed or step-bearing subagent in the same user-to-user turn.
+ */
+function findSupersededTurnNoiseIds(items: readonly ChatItem[]): Set<string> {
+  const suppressed = new Set<string>();
+  let turnSubagents: ChatItem[] = [];
+
+  const flushTurn = () => {
+    if (turnSubagents.length > 1) {
+      const hasRealSubagent = turnSubagents.some(
+        (it) => !isItemFailed(it) || (it.subagentMeta?.stepCount ?? 0) > 0,
+      );
+      if (hasRealSubagent) {
+        for (const it of turnSubagents) {
+          if (isZeroStepUnbackedFailedItem(it)) {
+            suppressed.add(it.id);
+          }
+        }
+      }
+    }
+    turnSubagents = [];
+  };
+
+  for (const item of items) {
+    if (item.kind === 'user' && !isInternalDispatchItem(item)) {
+      flushTurn();
+      continue;
+    }
+    if (isSubagentItem(item) && !isHookBlockedInvokeNoise(item)) {
+      turnSubagents.push(item);
+    }
+  }
+  flushTurn();
+  return suppressed;
+}
+
 export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
+  const supersededNoiseIds = findSupersededTurnNoiseIds(items);
   const result: TranscriptRow[] = [];
   let currentWork: ChatItem[] = [];
   let currentSubagents: ChatItem[] = [];
@@ -323,8 +404,8 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
   };
 
   for (const item of items) {
-    // Non-rendered items (notices, hidden quiet notes, empty/protocol assistant chunks) must not split active or settled bursts.
-    if (isNonRenderedTranscriptItem(item)) {
+    // Non-rendered items (notices, hidden quiet notes, empty/protocol assistant chunks, suppressed noise) must not split active or settled bursts.
+    if (isNonRenderedTranscriptItem(item) || supersededNoiseIds.has(item.id)) {
       continue;
     }
     if (isSubagentItem(item)) {
@@ -351,7 +432,7 @@ export function groupTranscriptRows(items: ChatItem[]): TranscriptRow[] {
   }
   flushSubagents();
   flushWork();
-  return result;
+  return stabilizeTranscriptRows(result);
 }
 
 /** Index of the trailing action group, so the working caption sits above it. */

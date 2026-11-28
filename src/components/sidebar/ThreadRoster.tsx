@@ -26,6 +26,7 @@ import {
   shelfFor,
   shelfPlacement,
   SHELF_UNDO_MS,
+  sortThreadsChronologically,
   undoShelf,
   visibleRosterThreads,
   type Shelf,
@@ -33,6 +34,8 @@ import {
   type ShelfThread,
   type ShelfUndo,
 } from '../views/chat/threadInteraction';
+
+export const MAX_COLLAPSED_WORKSPACE_THREADS = 6;
 
 export type RosterThread = ChatThreadSummary & {
   sideChat?: boolean;
@@ -124,7 +127,7 @@ function getTrailingModifier(status?: string): string {
   return '';
 }
 
-export const ThreadRoster: React.FC<ThreadRosterProps> = ({
+const ThreadRosterInner: React.FC<ThreadRosterProps> = ({
   threads,
   workspaces = [],
   selectedThreadId,
@@ -156,7 +159,25 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(
     () => new Set(workspaces.map((w) => w.id))
   );
+  const [expandedWorkspaceThreadLists, setExpandedWorkspaceThreadLists] = useState<Set<string>>(
+    () => new Set()
+  );
   const [collapsedChildGroups, setCollapsedChildGroups] = useState<Set<string>>(() => new Set());
+  const workingAnchorRef = useRef<Map<string, number>>(new Map());
+  const activeChildrenByParent = React.useMemo(
+    () => groupActiveChildrenByParent(threads),
+    [threads]
+  );
+  const effectiveThreadForShelf = (thread: RosterThread): RosterThread => {
+    const activeChildren = activeChildrenByParent.get(thread.id) ?? [];
+    if (activeChildren.length === 0) return thread;
+    const rollup = parentThreadRollupStatus(thread, activeChildren);
+    return {
+      ...thread,
+      status: (rollup.effectiveStatus as RosterThread['status']) ?? thread.status,
+      isSettled: false,
+    };
+  };
 
   useEffect(() => {
     setExpandedWorkspaces((prev) => {
@@ -217,6 +238,24 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       next.add(nextWsId);
       return next;
     });
+    const nowTs = Date.now();
+    const siblingsInWs = sortThreadsChronologically(
+      visibleRosterThreads(threads).filter((t) => {
+        if (t.workspaceId !== nextWsId) return false;
+        const shelf = rosterShelf(effectiveThreadForShelf(t), nowTs);
+        return shelf !== 'pinned' && shelf !== 'snoozed';
+      }),
+      (id) => workingAnchorRef.current.get(id),
+    );
+    const selectedIndex = siblingsInWs.findIndex((t) => t.id === selectedThreadId);
+    if (selectedIndex >= MAX_COLLAPSED_WORKSPACE_THREADS) {
+      setExpandedWorkspaceThreadLists((prev) => {
+        if (prev.has(nextWsId)) return prev;
+        const next = new Set(prev);
+        next.add(nextWsId);
+        return next;
+      });
+    }
   }, [selectedThreadId, threads]);
 
   useEffect(() => {
@@ -228,40 +267,82 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
 
   const openMenu = onOpenMenu ?? onOpenContextMenu;
   const menuTargetId = contextMenuTargetId ?? activeContextMenuTargetId;
-  const now = Date.now();
   const query = searchQuery.trim().toLowerCase();
-  const activeChildrenByParent = React.useMemo(
-    () => groupActiveChildrenByParent(threads),
-    [threads]
-  );
-  const effectiveThreadForShelf = (thread: RosterThread): RosterThread => {
-    const activeChildren = activeChildrenByParent.get(thread.id) ?? [];
-    if (activeChildren.length === 0) return thread;
-    const rollup = parentThreadRollupStatus(thread, activeChildren);
+  const listedThreads = React.useMemo(() => visibleRosterThreads(threads), [threads]);
+  const {
+    pinnedThreads,
+    snoozedThreads,
+    activeOtherThreads,
+    settledOtherThreads,
+    workspaceThreadsById,
+  } = React.useMemo(() => {
+    const now = Date.now();
+    const visibleThreads = listedThreads.filter((thread) => matchesThreadSearch(thread, query));
+    const shelfOf = (thread: RosterThread) => rosterShelf(effectiveThreadForShelf(thread), now);
+
+    const nextWorkingIds = new Set<string>();
+    for (const thread of visibleThreads) {
+      const eff = effectiveThreadForShelf(thread);
+      const isWorking = eff.status === 'running' || eff.status === 'waiting';
+      if (isWorking && thread.lastTurnAtUnixMs == null) {
+        nextWorkingIds.add(thread.id);
+        if (!workingAnchorRef.current.has(thread.id)) {
+          workingAnchorRef.current.set(
+            thread.id,
+            thread.updatedAtUnixMs ?? thread.createdAtUnixMs ?? now,
+          );
+        }
+      }
+    }
+    for (const existingId of Array.from(workingAnchorRef.current.keys())) {
+      if (!nextWorkingIds.has(existingId)) {
+        workingAnchorRef.current.delete(existingId);
+      }
+    }
+    const getWorkingAnchor = (id: string) => workingAnchorRef.current.get(id);
+
+    const workspaceIds = new Set(workspaces.map((w) => w.id));
+    const pinnedRaw: RosterThread[] = [];
+    const snoozedRaw: RosterThread[] = [];
+    const activeOtherRaw: RosterThread[] = [];
+    const settledOtherRaw: RosterThread[] = [];
+    const byWsRaw = new Map<string, RosterThread[]>();
+    for (const ws of workspaces) {
+      byWsRaw.set(ws.id, []);
+    }
+
+    for (const thread of visibleThreads) {
+      const shelf = shelfOf(thread);
+      if (shelf === 'pinned') {
+        pinnedRaw.push(thread);
+        continue;
+      }
+      if (shelf === 'snoozed') {
+        snoozedRaw.push(thread);
+        continue;
+      }
+      if (thread.workspaceId && workspaceIds.has(thread.workspaceId)) {
+        byWsRaw.get(thread.workspaceId)!.push(thread);
+      } else if (shelf === 'active' || shelf === 'working') {
+        activeOtherRaw.push(thread);
+      } else if (shelf === 'settled') {
+        settledOtherRaw.push(thread);
+      }
+    }
+
+    const byWsSorted = new Map<string, RosterThread[]>();
+    for (const [wsId, list] of byWsRaw.entries()) {
+      byWsSorted.set(wsId, sortThreadsChronologically(list, getWorkingAnchor));
+    }
+
     return {
-      ...thread,
-      status: (rollup.effectiveStatus as RosterThread['status']) ?? thread.status,
-      isSettled: false,
+      pinnedThreads: sortThreadsChronologically(pinnedRaw, getWorkingAnchor),
+      snoozedThreads: sortThreadsChronologically(snoozedRaw, getWorkingAnchor),
+      activeOtherThreads: sortThreadsChronologically(activeOtherRaw, getWorkingAnchor),
+      settledOtherThreads: sortThreadsChronologically(settledOtherRaw, getWorkingAnchor),
+      workspaceThreadsById: byWsSorted,
     };
-  };
-  const visibleThreads = visibleRosterThreads(threads).filter((thread) => matchesThreadSearch(thread, query));
-  const shelfOf = (thread: RosterThread) => rosterShelf(effectiveThreadForShelf(thread), now);
-
-  const pinnedThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'pinned');
-  const workingThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'working');
-  const snoozedThreads = visibleThreads.filter((thread) => shelfOf(thread) === 'snoozed');
-  const workspaceIds = new Set(workspaces.map((w) => w.id));
-  const listedThreads = visibleRosterThreads(threads);
-  const otherThreads = visibleThreads.filter((thread) => {
-    const shelf = shelfOf(thread);
-    return (
-      (shelf === 'active' || shelf === 'settled') &&
-      (!thread.workspaceId || !workspaceIds.has(thread.workspaceId))
-    );
-  });
-
-  const activeOtherThreads = otherThreads.filter((thread) => shelfOf(thread) === 'active');
-  const settledOtherThreads = otherThreads.filter((thread) => shelfOf(thread) === 'settled');
+  }, [listedThreads, workspaces, query]);
 
   const [settledOpen, setSettledOpen] = useState<boolean | null>(null);
   const isSelectedInSettled = selectedThreadId
@@ -281,7 +362,17 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
     });
   };
 
+  const toggleWorkspaceThreadList = (wsId: string) => {
+    setExpandedWorkspaceThreadLists((prev) => {
+      const next = new Set(prev);
+      if (next.has(wsId)) next.delete(wsId);
+      else next.add(wsId);
+      return next;
+    });
+  };
+
   const rememberUndo = (action: ShelfAction, thread: RosterThread) => {
+    const now = Date.now();
     const placement = shelfPlacement(
       listedThreads.map((item) => asShelfThread(item, now)),
       thread.id,
@@ -622,35 +713,23 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
 
   return (
     <nav aria-label="Threads" className="chat-rail">
-      <div
-        className="chat-rail__search"
-        style={{
-          padding: '6px 8px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-          borderBottom: '1px solid var(--separator)',
-        }}
-      >
+      <div className="chat-rail__search">
         <SearchIcon size={12} />
         <input
           type="text"
           aria-label="Search threads"
+          className="chat-rail__search-input"
           value={searchQuery}
           onChange={(event) => setSearchQuery(event.currentTarget.value)}
           placeholder="Search threads…"
-          style={{
-            width: '100%',
-            background: 'transparent',
-            border: 0,
-            outline: 'none',
-            fontSize: 'var(--text-caption)',
-            color: 'var(--text-primary)',
-            padding: '2px 0',
-          }}
         />
         {searchQuery ? (
-          <button type="button" aria-label="Clear search" onClick={() => setSearchQuery('')}>
+          <button
+            type="button"
+            className="chat-rail__search-clear"
+            aria-label="Clear search"
+            onClick={() => setSearchQuery('')}
+          >
             <CloseIcon size={11} />
           </button>
         ) : null}
@@ -662,15 +741,6 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
           <h3 className="chat-rail__band-title">Pinned threads</h3>
           <section aria-label="Pinned threads" className="chat-thread-list">
             {pinnedThreads.map((t) => renderRow(t, false))}
-          </section>
-        </section>
-      )}
-
-      {workingThreads.length > 0 && (
-        <section className="chat-rail__band" aria-label="Working">
-          <h3 className="chat-rail__band-title">Working</h3>
-          <section aria-label="Working threads" className="chat-thread-list">
-            {workingThreads.map((thread) => renderRow(thread, false))}
           </section>
         </section>
       )}
@@ -703,54 +773,32 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
 
       {/* 3. Folder list with nested threads */}
       {workspaces.map((ws) => {
-        const wsThreads = visibleThreads.filter((thread) => {
-          const shelf = shelfOf(thread);
-          return thread.workspaceId === ws.id && (shelf === 'active' || shelf === 'settled');
-        });
+        const wsThreads = workspaceThreadsById.get(ws.id) ?? [];
         const isExpanded = expandedWorkspaces.has(ws.id);
+        const isThreadListExpanded = expandedWorkspaceThreadLists.has(ws.id);
+        const hasOverflow = !query && wsThreads.length > MAX_COLLAPSED_WORKSPACE_THREADS;
+        const visibleWsThreads =
+          hasOverflow && !isThreadListExpanded
+            ? wsThreads.slice(0, MAX_COLLAPSED_WORKSPACE_THREADS)
+            : wsThreads;
+        const hiddenCount = wsThreads.length - visibleWsThreads.length;
         const hasSelected = selectedThreadId ? wsThreads.some((t) => t.id === selectedThreadId) : false;
 
         return (
           <div key={ws.id} className="chat-rail__workspace-branch">
-            <div
-              className={`workspace-item${hasSelected ? ' workspace-item--dimmed' : ''}`}
-              style={{ display: 'flex', alignItems: 'center', width: '100%', minHeight: '27px', padding: '0 8px' }}
-            >
+            <div className={`workspace-item${hasSelected ? ' workspace-item--dimmed' : ''}`}>
               <button
                 type="button"
                 className="workspace-item__toggle"
                 onClick={() => toggleWorkspace(ws.id)}
                 aria-expanded={isExpanded}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  flex: 1,
-                  textAlign: 'left',
-                  fontSize: '12px',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  padding: 0,
-                }}
               >
                 <ChevronRightIcon
                   size={10}
-                  className={`chat-chevron${isExpanded ? ' chat-chevron--expanded' : ''}`}
-                  style={{
-                    transform: isExpanded ? 'rotate(90deg)' : 'none',
-                    transition: 'transform 120ms ease',
-                    flexShrink: 0,
-                  }}
+                  className={`chat-chevron workspace-item__chevron${isExpanded ? ' chat-chevron--expanded' : ''}`}
                 />
-                <FolderOpenIcon size={13} style={{ flexShrink: 0, opacity: 0.8 }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {ws.displayName}
-                </span>
+                <FolderOpenIcon size={13} className="workspace-item__folder-icon" />
+                <span className="workspace-item__label">{ws.displayName}</span>
               </button>
               <button
                 type="button"
@@ -758,17 +806,6 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
                 onClick={() => (onNewChatInWorkspace ? onNewChatInWorkspace(ws.id) : onNewChat?.())}
                 title={`New thread in ${ws.displayName}`}
                 aria-label={`New thread in ${ws.displayName}`}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: 'var(--text-muted)',
-                  cursor: 'pointer',
-                  padding: '2px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  borderRadius: '3px',
-                }}
               >
                 <PlusIcon size={12} />
               </button>
@@ -779,7 +816,17 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
                 aria-label={`${ws.displayName} threads`}
                 className="chat-thread-list chat-thread-list--nested"
               >
-                {wsThreads.map((t) => renderRow(t, true, ws.displayName))}
+                {visibleWsThreads.map((t) => renderRow(t, true, ws.displayName))}
+                {hasOverflow && (
+                  <button
+                    type="button"
+                    className="chat-thread-workspace__more"
+                    aria-expanded={isThreadListExpanded}
+                    onClick={() => toggleWorkspaceThreadList(ws.id)}
+                  >
+                    {isThreadListExpanded ? 'Show less' : `+${hiddenCount} more`}
+                  </button>
+                )}
               </section>
             )}
           </div>
@@ -805,27 +852,9 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
             onClick={() => setSettledOpen(!isSettledExpanded)}
             aria-expanded={isSettledExpanded}
           >
-            <ChevronRightIcon
-              size={10}
-              style={{
-                transform: isSettledExpanded ? 'rotate(90deg)' : 'none',
-                transition: 'transform 120ms ease',
-                flexShrink: 0,
-              }}
-            />
-            <span className="chat-rail__band-title" style={{ margin: 0, textTransform: 'none' }}>Settled</span>
-            <span
-              style={{
-                marginLeft: 'auto',
-                fontSize: 'var(--text-badge)',
-                color: 'var(--text-faint)',
-                padding: '0 4px',
-                borderRadius: 'var(--radius-chip)',
-                background: 'var(--chip-fill)',
-              }}
-            >
-              {settledOtherThreads.length}
-            </span>
+            <ChevronRightIcon size={10} className="chat-rail__settled-chevron" />
+            <span className="chat-rail__band-title chat-rail__settled-title">Settled</span>
+            <span className="chat-rail__settled-count">{settledOtherThreads.length}</span>
           </button>
           {isSettledExpanded && (
             <section aria-label="Settled threads" className="chat-thread-list">
@@ -836,19 +865,7 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
       )}
 
       {shelfUndo ? (
-        <div
-          className="chat-rail__undo rounded-card"
-          role="status"
-          style={{
-            margin: '8px',
-            padding: '8px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '8px',
-            border: '1px solid var(--separator)',
-          }}
-        >
+        <div className="chat-rail__undo rounded-card" role="status">
           <span>{shelfUndo.action}</span>
           <button type="button" className="chrome-button" onClick={runUndo}>
             Undo
@@ -878,3 +895,5 @@ export const ThreadRoster: React.FC<ThreadRosterProps> = ({
     </nav>
   );
 };
+
+export const ThreadRoster = React.memo(ThreadRosterInner);

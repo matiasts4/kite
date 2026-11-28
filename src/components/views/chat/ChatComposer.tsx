@@ -9,7 +9,6 @@ import {
   ChatMode,
   ChatAttachment,
   ApprovalRequest,
-  formatTokens,
 } from './types';
 import type { ChatItem } from '../../../types';
 import { insertQuoteAtCaret } from './citeDraft';
@@ -36,8 +35,8 @@ import {
   deleteComposerChipKey,
 } from './mentionChip';
 import type { DriverDeclaration } from '../../../lib/session/types';
-import { ChatApprovalCard } from './ChatApprovalCard';
-import { listConnections } from '../../../lib/ipc';
+import { ChatApprovalCard, type ApprovalDecision } from './ChatApprovalCard';
+import { invokeCommand, listConnections } from '../../../lib/ipc';
 import {
   verifiedSpawnConnections,
   type ConnectionCandidate,
@@ -47,6 +46,14 @@ import { ComposerCommandMenu } from './ComposerCommandMenu';
 import { useVoiceSession } from '../../../lib/operator/voice/voiceSessionStore';
 import { composerTextWithLiveSpeech, typedDraftFromComposer } from './liveTranscriptDraft';
 import { VoiceModeFooterBar } from './composer/VoiceModeFooterBar';
+import { ComposerVoiceGlow } from './composer/ComposerVoiceGlow';
+import { getVoicePalette, normalizeVoiceRgb } from '../../../lib/operator/config/voicePalettes';
+import {
+  clampVoicePlaybackSpeed,
+  nextVoicePlaybackSpeed,
+} from '../../../lib/operator/voice/callResilience';
+import { InCallTextSyncBatcher } from '../../../lib/operator/voice/pttController';
+import { loadOperatorConfig, saveOperatorConfig } from '../../../lib/operator/operatorConfig';
 import {
   restoreStash,
   slashIntent,
@@ -101,7 +108,7 @@ export interface ChatComposerProps {
   paused?: boolean;
   prompt: string;
   attachments: ChatAttachment[];
-  totalTokens: number;
+  totalTokens?: number;
   isRefreshingModels?: boolean;
   catalogState?: 'missing-binary' | 'signed-out' | 'loading' | 'empty' | null;
   onRefreshModels?: (provider: ChatProvider) => void;
@@ -139,18 +146,18 @@ export interface ChatComposerProps {
   files?: string[];
   threads?: Array<{ id: string; title?: string }>;
   models?: string[];
+  agents?: Array<{ id: string; name?: string; engine?: string }>;
   skills?: string[];
   goal?: string | null;
   onGoalStop?: (result: { goal: string | null; paused: boolean; turnEnded: boolean }) => void;
   initialStashes?: StashEntry[];
   stashEnvironment?: string;
-  onApprovalDecision?: (
-    decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
-    requestId: string
-  ) => void;
+  onApprovalDecision?(decision: ApprovalDecision, requestId: string): void;
   onSendVoiceTurn?: (text: string) => void;
   /** Opens Voice Mode in its own conversation. Falls back to binding the current thread. */
   onStartVoiceMode?: () => void;
+  /** Hides the footer speed cycle control when an outer VoiceTeleprompterDock already displays VoiceSpeedPopover. */
+  hideVoiceFooterSpeedControl?: boolean;
   /** True once the conversation has started so the pre-chat folder/branch strip collapses away. */
   conversationStarted?: boolean;
   /** Changed workspace files for the current turn, docked flush atop the composer. */
@@ -187,7 +194,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   paused = false,
   prompt,
   attachments,
-  totalTokens,
   catalogState = null,
   ensureDynamicModels,
   ensureDynamicAgents,
@@ -212,6 +218,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   files = [],
   threads = [],
   models = [],
+  agents = [],
   skills = [],
   goal = null,
   onGoalStop,
@@ -219,6 +226,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   stashEnvironment = '',
   onSendVoiceTurn,
   onStartVoiceMode,
+  hideVoiceFooterSpeedControl = false,
   conversationStarted,
   changedFiles = [],
   changedFilesWorkspaceName,
@@ -261,6 +269,56 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const [sideQuestion, setSideQuestion] = useState<string | null>(null);
   const [newSessionArmed, setNewSessionArmed] = useState(false);
   const [compactNotice, setCompactNotice] = useState<string | null>(null);
+  const [voicePlaybackSpeed, setVoicePlaybackSpeed] = useState<number>(() =>
+    clampVoicePlaybackSpeed(loadOperatorConfig().ttsRate || 1)
+  );
+  const [voiceGlowPalette, setVoiceGlowPalette] = useState(() =>
+    normalizeVoiceRgb(getVoicePalette(loadOperatorConfig().persona?.voice).palette)
+  );
+
+  useEffect(() => {
+    const syncPalette = () => {
+      setVoiceGlowPalette(
+        normalizeVoiceRgb(getVoicePalette(loadOperatorConfig().persona?.voice).palette)
+      );
+    };
+    syncPalette();
+    window.addEventListener('kite:operator-config-updated', syncPalette);
+    return () => window.removeEventListener('kite:operator-config-updated', syncPalette);
+  }, [voice.phase]);
+  const onSendVoiceTurnRef = useRef(onSendVoiceTurn);
+  onSendVoiceTurnRef.current = onSendVoiceTurn;
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
+  const lastVoiceSubmitAtRef = useRef(0);
+  const inCallTextBatcherRef = useRef<InCallTextSyncBatcher | null>(null);
+
+  useEffect(() => {
+    const batcher = new InCallTextSyncBatcher({
+      onFlush: (payload) => {
+        const mergedText = payload.text.trim();
+        if (!mergedText) return;
+        if (onSendVoiceTurnRef.current) {
+          onSendVoiceTurnRef.current(mergedText);
+        } else {
+          onSendRef.current();
+        }
+      },
+    });
+    inCallTextBatcherRef.current = batcher;
+    return () => {
+      batcher.dispose();
+      if (inCallTextBatcherRef.current === batcher) {
+        inCallTextBatcherRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleCycleVoiceSpeed = () => {
+    const next = nextVoicePlaybackSpeed(voicePlaybackSpeed);
+    setVoicePlaybackSpeed(next);
+    saveOperatorConfig({ ttsRate: next });
+  };
 
   useEffect(() => {
     setNewSessionArmed(false);
@@ -356,6 +414,34 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     return () => window.removeEventListener('kite:terminal-excerpt', onExcerpt);
   }, []);
 
+  useEffect(() => {
+    const onBrowserScreenshot = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          dataBase64?: string;
+          mimeType?: string;
+          fileName?: string;
+        }>
+      ).detail;
+      if (!detail?.dataBase64) return;
+      try {
+        const binary = window.atob(detail.dataBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        const mime = detail.mimeType || 'image/png';
+        const fileName = detail.fileName || 'browser-screenshot.png';
+        const file = new File([bytes], fileName, { type: mime });
+        onStageFiles([file]);
+      } catch (err) {
+        console.warn('[ChatComposer] Failed to stage browser screenshot attachment:', err);
+      }
+    };
+    window.addEventListener('kite:attach-browser-screenshot', onBrowserScreenshot);
+    return () => window.removeEventListener('kite:attach-browser-screenshot', onBrowserScreenshot);
+  }, [onStageFiles]);
+
   useLayoutEffect(() => {
     if (draftHasCitation(prompt) || draftHasMention(prompt) || pendingCaret === null) return;
     const field = textareaRef.current;
@@ -371,6 +457,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    if (!composerValue && el.value.length === 0) {
+      const prevH = prevTextareaHeightRef.current;
+      if (prevH !== null && prevH !== 52) {
+        el.style.height = '';
+        onHeightChangeRef.current?.();
+      }
+      prevTextareaHeightRef.current = 52;
+      return;
+    }
     const prevScrollTop = el.scrollTop;
     const computed = typeof window !== 'undefined' ? window.getComputedStyle(el) : null;
     const minH = Math.max(52, Number.parseFloat(computed?.minHeight ?? '') || 52);
@@ -398,8 +493,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       measuredHeight = el.scrollHeight;
       nextHeight = Math.min(maxH, Math.max(minH, measuredHeight));
       el.style.height = `${nextHeight}px`;
-      if (prevScrollTop > 0 && measuredHeight > nextHeight) {
-        el.scrollTop = prevScrollTop;
+      if (measuredHeight > nextHeight) {
+        const atLiveEdge =
+          document.activeElement !== el ||
+          (el.selectionStart ?? el.value.length) >= Math.max(0, el.value.length - 1);
+        if (showLiveSpeech && atLiveEdge) {
+          el.scrollTop = el.scrollHeight;
+        } else if (prevScrollTop > 0) {
+          el.scrollTop = prevScrollTop;
+        }
       }
     } finally {
       if (host && lockedHostHeight > 0) {
@@ -411,7 +513,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       onHeightChangeRef.current?.();
     }
     prevTextareaHeightRef.current = nextHeight;
-  }, [prompt, composerValue]);
+  }, [prompt, composerValue, showLiveSpeech]);
 
   const insertAtCursor = (insertion: string, isMention: boolean = false) => {
     const target = textareaRef.current;
@@ -564,7 +666,21 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const deliverDraft = (mode: 'send' | 'queue' | 'steer') => {
     if (isVoiceModeActive && prompt.trim()) {
       const text = expandMentions(expandCitations(prompt)).trim();
+      const mappedAttachments = attachments.map((att) => ({
+        id: att.resourceId,
+        name: att.path ?? att.resourceId,
+        path: att.path ?? undefined,
+        kind: att.mimeType ?? undefined,
+      }));
       onChangePrompt('');
+      const now = Date.now();
+      const batcher = inCallTextBatcherRef.current;
+      if (batcher && (batcher.hasPending() || now - lastVoiceSubmitAtRef.current < 250)) {
+        lastVoiceSubmitAtRef.current = now;
+        batcher.enqueue(text, mappedAttachments, now);
+        return;
+      }
+      lastVoiceSubmitAtRef.current = now;
       if (onSendVoiceTurn) {
         onSendVoiceTurn(text);
       } else {
@@ -620,6 +736,40 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     onSend();
   };
 
+  const [mentionActiveIdx, setMentionActiveIdx] = useState(0);
+  const [dismissedMentionKey, setDismissedMentionKey] = useState<string | null>(null);
+
+  const mentionQuery = mentionQueryAt(prompt, draftCaret);
+  const mentionKey = mentionQuery ? `${mentionQuery.start}:${mentionQuery.query}` : null;
+  const mentionRows = mentionQuery
+    ? filterMentionMenu(mentionQuery.query, { files, threads, models, agents })
+    : [];
+  const mentionOpen = Boolean(
+    mentionQuery && mentionRows.length > 0 && dismissedMentionKey !== mentionKey
+  );
+  const clampedMentionIdx =
+    mentionRows.length > 0 ? Math.min(mentionActiveIdx, mentionRows.length - 1) : 0;
+
+  useEffect(() => {
+    setMentionActiveIdx(0);
+    setDismissedMentionKey(null);
+  }, [mentionKey]);
+
+  const pickMention = (row: (typeof mentionRows)[number]) => {
+    if (!mentionQuery) return;
+    const next = insertMentionAtCaret(prompt, mentionQuery.start, draftCaret, {
+      kind: row.kind,
+      id: row.id,
+      label: row.label,
+    });
+    caretRef.current = { start: next.caret, end: next.caret };
+    setDraftCaret(next.caret);
+    setPendingCaret(next.caret);
+    setMentionActiveIdx(0);
+    setDismissedMentionKey(null);
+    onChangePrompt(next.text);
+  };
+
   const onComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((event.nativeEvent as { isComposing?: boolean }).isComposing) return;
     const field = event.currentTarget;
@@ -660,6 +810,35 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       event.preventDefault();
       onCancelQueueEdit();
       return;
+    }
+    if (mentionOpen) {
+      if (event.key === 'ArrowDown' && isPlainKey(event)) {
+        event.preventDefault();
+        setMentionActiveIdx((prev) => (prev + 1) % mentionRows.length);
+        return;
+      }
+      if (event.key === 'ArrowUp' && isPlainKey(event)) {
+        event.preventDefault();
+        setMentionActiveIdx((prev) => (prev - 1 + mentionRows.length) % mentionRows.length);
+        return;
+      }
+      if (
+        (event.key === 'Enter' || event.key === 'Tab') &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        event.preventDefault();
+        const chosen = mentionRows[clampedMentionIdx];
+        if (chosen) pickMention(chosen);
+        return;
+      }
+      if (event.key === 'Escape' && isPlainKey(event)) {
+        event.preventDefault();
+        setDismissedMentionKey(mentionKey);
+        return;
+      }
     }
     if (
       event.altKey &&
@@ -714,21 +893,6 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           : 'send'
       );
     }
-  };
-
-  const mentionQuery = mentionQueryAt(prompt, draftCaret);
-  const mentionRows = mentionQuery ? filterMentionMenu(mentionQuery.query, { files, threads, models }) : [];
-  const pickMention = (row: (typeof mentionRows)[number]) => {
-    if (!mentionQuery) return;
-    const next = insertMentionAtCaret(prompt, mentionQuery.start, draftCaret, {
-      kind: row.kind,
-      id: row.id,
-      label: row.label,
-    });
-    caretRef.current = { start: next.caret, end: next.caret };
-    setDraftCaret(next.caret);
-    setPendingCaret(next.caret);
-    onChangePrompt(next.text);
   };
 
   return (
@@ -795,8 +959,43 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         )}
       </AnimatePresence>
 
-      {/* Tier 1: Main Floating Glass Card */}
-      <ComposerSurface.Main
+      {/* Tier 1: Main Floating Glass Card + Ambient Voice Horizon Glow */}
+      <div
+        className="kite-composer-glow-stage"
+        data-voice-active={isVoiceModeActive ? 'true' : undefined}
+        data-voice-state={
+          !isVoiceModeActive
+            ? undefined
+            : voice.micMuted || voice.isPausedForDictation
+              ? 'muted'
+              : (voice.speakerAudioLevel ?? 0) > 0.05
+                ? 'speaking'
+                : (voice.liveAudioLevel ?? 0) > 0.05
+                  ? 'listening'
+                  : 'idle'
+        }
+        style={
+          isVoiceModeActive
+            ? ({
+                '--voice-deep-rgb': `${Math.round(voiceGlowPalette.deep[0] * 255)}, ${Math.round(voiceGlowPalette.deep[1] * 255)}, ${Math.round(voiceGlowPalette.deep[2] * 255)}`,
+                '--voice-core-rgb': `${Math.round(voiceGlowPalette.core[0] * 255)}, ${Math.round(voiceGlowPalette.core[1] * 255)}, ${Math.round(voiceGlowPalette.core[2] * 255)}`,
+                '--voice-glint-rgb': `${Math.round(voiceGlowPalette.glint[0] * 255)}, ${Math.round(voiceGlowPalette.glint[1] * 255)}, ${Math.round(voiceGlowPalette.glint[2] * 255)}`,
+                '--voice-energy': String(
+                  Math.max(voice.liveAudioLevel ?? 0, voice.speakerAudioLevel ?? 0),
+                ),
+              } as React.CSSProperties)
+            : undefined
+        }
+      >
+        <ComposerVoiceGlow
+          active={isVoiceModeActive}
+          muted={Boolean(voice.micMuted || voice.isPausedForDictation)}
+          micLevel={voice.liveAudioLevel ?? 0}
+          speakerLevel={voice.speakerAudioLevel ?? 0}
+          palette={voiceGlowPalette}
+        />
+        <ComposerSurface.Main
+        className={isVoiceModeActive ? 'kite-composer-main--voice-active' : undefined}
         onDragOver={(event) => {
           const kind = getDropKind(event);
           if (kind !== null) {
@@ -825,19 +1024,29 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             onPick={(value) => onChangePrompt(value.startsWith('/') ? `${value} ` : value)}
           />
         ) : null}
-        {mentionQuery ? (
+        {mentionOpen ? (
           <div className="composer-command-menu rounded-card" role="listbox" aria-label="Mentions">
-            {mentionRows.map((row) => (
-              <button
-                key={`${row.kind}:${row.id}`}
-                type="button"
-                role="option"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => pickMention(row)}
-              >
-                {row.menuLabel}
-              </button>
-            ))}
+            {mentionRows.map((row, idx) => {
+              const isSelected = idx === clampedMentionIdx;
+              return (
+                <button
+                  key={`${row.kind}:${row.id}`}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  className={
+                    isSelected
+                      ? 'composer-command-menu__option composer-command-menu__option--active'
+                      : 'composer-command-menu__option'
+                  }
+                  onMouseEnter={() => setMentionActiveIdx(idx)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => pickMention(row)}
+                >
+                  {row.menuLabel}
+                </button>
+              );
+            })}
           </div>
         ) : null}
         {stashFileNotice === 'attach-again' ? (
@@ -919,6 +1128,13 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             hasDraftText={Boolean(prompt.trim())}
             onSendDraft={() => deliverDraft('send')}
             onEndSession={() => voice.stopSession()}
+            playbackSpeed={hideVoiceFooterSpeedControl ? undefined : voicePlaybackSpeed}
+            onCyclePlaybackSpeed={hideVoiceFooterSpeedControl ? undefined : handleCycleVoiceSpeed}
+            micFlatlined={Boolean((voice as any).micFlatlined)}
+            onReconnectMic={() => {
+              voice.setMicMuted(true);
+              setTimeout(() => voice.setMicMuted(false), 60);
+            }}
           />
         ) : (
           <div ref={footerRef} className="kite-composer-footer">
@@ -954,19 +1170,55 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
               />
 
               {/* Voice Mode Button (S1, S7) */}
-              <button
-                type="button"
-                onClick={() => {
-                  if (onStartVoiceMode) {
-                    onStartVoiceMode();
-                    return;
-                  }
-                  voice.startSession(threadId, 'thread');
-                }}
-                title="Iniciar sesión de voz"
-                aria-label="Iniciar sesión de voz"
-                className="chat-voice-mode-control size-8 rounded-control"
-              >
+              <div className="kite-voice-trigger-wrap">
+                {voice.voiceError ? (
+                  <div
+                    data-testid="voice-error-tip"
+                    role="alert"
+                    className="kite-voice-error-tip rounded-control"
+                  >
+                    <p className="kite-voice-error-tip__msg">{voice.voiceError.message}</p>
+                    <div className="kite-voice-error-tip__actions">
+                      {voice.voiceError.openPrivacySettings ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void invokeCommand('request_dictation_permission').catch((err) => {
+                              console.warn('[ChatComposer] request_dictation_permission failed:', err);
+                            });
+                          }}
+                          className="kite-voice-error-tip__btn rounded-xs"
+                        >
+                          Permiso de micrófono
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => voice.setVoiceError(null)}
+                        aria-label="Cerrar aviso de micrófono"
+                        className="kite-voice-error-tip__close rounded-xs"
+                      >
+                        Cerrar
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    voice.setVoiceError(null);
+                    if (onStartVoiceMode) {
+                      onStartVoiceMode();
+                      return;
+                    }
+                    voice.startSession(threadId, 'thread');
+                  }}
+                  data-voice-starting={voice.phase === 'starting' || undefined}
+                  data-voice-error={Boolean(voice.voiceError) || undefined}
+                  title="Iniciar sesión de voz"
+                  aria-label="Iniciar sesión de voz"
+                  className="chat-voice-mode-control size-8 rounded-control"
+                >
                 <svg
                   width="14"
                   height="14"
@@ -985,13 +1237,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
                   <path d="M20 11v2" />
                 </svg>
               </button>
+              </div>
 
-              {/* Token Counter */}
-              {totalTokens > 0 && (
-                <span className="text-2xs font-mono text-muted-foreground px-1 select-none">
-                  {formatTokens(totalTokens)}
-                </span>
-              )}
               {draftOverLimit && (
                 <span className="text-2xs font-mono text-destructive px-1 select-none" role="status">
                   {measuredLength.toLocaleString()} / 120,000
@@ -1021,6 +1268,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
           </div>
         )}
       </ComposerSurface.Main>
+      </div>
 
       {/* Tier 2: Recessed Lower Context Strip (draft-only; collapses smoothly once chat starts) */}
       <AnimatePresence initial={false}>

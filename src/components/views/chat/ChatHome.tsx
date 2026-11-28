@@ -28,11 +28,11 @@ export const ChatHome: React.FC<ChatHomeProps> = ({
 }) => {
   const [prompt, setPrompt] = useState('');
   const [provider, setProvider] = useState<ChatProvider>('claude');
-  const [mode, setMode] = useState<ChatMode>('acceptEdits');
+  const [mode, setMode] = useState<ChatMode>('fullAccess');
   const [activeDropdown, setActiveDropdown] = useState<'provider' | 'mode' | null>(null);
 
   const providerMeta = PROVIDER_CATALOG[provider] || PROVIDER_CATALOG.claude;
-  const currentModeMeta = MODE_LABELS[mode] || MODE_LABELS.acceptEdits;
+  const currentModeMeta = MODE_LABELS[mode] || MODE_LABELS.fullAccess;
 
   const handleSend = () => {
     const text = prompt.trim();
@@ -44,7 +44,7 @@ export const ChatHome: React.FC<ChatHomeProps> = ({
     <section className="pane chat-home">
       {/* Hero Header */}
       <div className="chat-home__hero">
-        <ThemeHeroFigure variant="hero" />
+        <ThemeHeroFigure mood={prompt.trim().length > 0 ? 'curious' : 'idle'} variant="hero" />
         <h1>What’s on your mind?</h1>
         <p>Pick a model. Then ask.</p>
       </div>

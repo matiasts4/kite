@@ -4,16 +4,31 @@ import { Sidebar, WorkMode } from './components/Sidebar';
 import type { WorkspaceSessionTab, ChatThreadSummary } from './components/sidebar/types';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { openSettingsTab } from './lib/settingsNav';
+import {
+  OPEN_RIGHT_DOCK_SIDECAR_EVENT,
+  type OpenRightDockSidecarDetail,
+} from './lib/sidecarNav';
+const ArgosCompanionBar = lazy(() =>
+  import('./components/ArgosCompanionBar').then((m) => ({ default: m.ArgosCompanionBar }))
+);
+import {
+  COMPANION_GLOBAL_HOTKEY_EVENT,
+  loadCompanionGlobalShortcut,
+  matchesCompanionHotkey,
+  registerOsCompanionGlobalShortcut,
+  transferVoiceCallSurface,
+} from './lib/operator/voice/companionTransfer';
+import { sendUiAck, type UiBusRequestPayload, type NavigateViewPayload } from './lib/operator/executor/ui-bus';
 
 const RightDock = lazy(() => import('./components/RightDock').then((m) => ({ default: m.RightDock })));
 const SettingsView = lazy(() => import('./components/views/SettingsView').then((m) => ({ default: m.SettingsView })));
 const ZedStripHost = lazy(() => import('./components/ZedStrip').then((m) => ({ default: m.ZedStripHost })));
 import { isValidWorkMode, readKitePref, readSavedWorkMode, writeSavedWorkMode } from './lib/kitePrefs';
 import type { ZedCallState } from './components/ZedStrip';
-import { useVoiceSession } from './lib/operator/voice/voiceSessionStore';
+import { useVoiceSession, voiceSessionStore } from './lib/operator/voice/voiceSessionStore';
 import { loadInitialTabs } from './components/dock/dockConfig';
-import { releaseOperatorCapture } from './lib/operator/voice/zedVoice';
 import { useNotifications } from './lib/notifications/useNotifications';
+import { startTerminalNotificationBridge } from './lib/notifications/terminalNotificationBridge';
 import { Toaster } from './lib/toast';
 import { requestNewThread, resolveHeldThreadSelection } from './lib/newThreadRequest';
 import { getPlatform } from './lib/shortcuts/shortcutsRegistry';
@@ -41,6 +56,7 @@ import { AppModals } from './components/app/AppModals';
 import { AppNotificationsPopover } from './components/app/AppNotificationsPopover';
 import { AppMainStage } from './components/app/AppMainStage';
 import { GuidedLoginBanner } from './components/quota/GuidedLoginBanner';
+import { initArgosRemoteBridge } from './lib/remote/argosRemoteBridge';
 
 export type ShellRoute =
   | { kind: 'agent' }
@@ -171,11 +187,31 @@ export const App: React.FC = () => {
   }, [selectedWorkspaceId]);
 
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [selectedAgentThreadId, setSelectedAgentThreadId] = useState<string | null>(null);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [agentEditorOpen, setAgentEditorOpen] = useState<boolean>(false);
-  const [agentViewMode, setAgentViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters'>('chats');
+  const [agentViewMode, setAgentViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit'>('chats');
   const [_route, _setRoute] = useState<ShellRoute>({ kind: 'agent' });
-  const { snapshot: notifSnapshot, unreadCount } = useNotifications();
+  const [routinesOpen, setRoutinesOpen] = useState<boolean>(false);
+  const { snapshot: notifSnapshot, unreadCount } = useNotifications({
+    activeContext: {
+      workMode,
+      selectedAgentId,
+      selectedAgentThreadId,
+      selectedThreadId,
+      selectedWorkspaceId,
+      settingsOpen,
+      routinesOpen,
+    },
+    lookups: {
+      agents,
+      threads,
+    },
+  });
+
+  useEffect(() => {
+    return startTerminalNotificationBridge();
+  }, []);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState<boolean>(false);
   const [notificationsAnchor, setNotificationsAnchor] = useState<DOMRect | null>(null);
   const [workspaceSessions, setWorkspaceSessions] = useState<Record<string, WorkspaceSessionTab[]>>({});
@@ -227,16 +263,69 @@ export const App: React.FC = () => {
   const [isSshModalOpen, setIsSshModalOpen] = useState<boolean>(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
   const appPlatform = getPlatform();
-  const [routinesOpen, setRoutinesOpen] = useState<boolean>(false);
-  const [zedCallState, setZedCallState] = useState<ZedCallState>({
+  const [companionBarOpen, setCompanionBarOpen] = useState<boolean>(false);
+  const [zedCallState] = useState<ZedCallState>({
     isActive: false,
     status: 'connected',
     orbState: 'connected',
-    muted: false,
-    speakerMuted: false,
     toolCalls: [],
     pendingConfirmation: null,
   });
+
+  useEffect(() => {
+    const summonCompanion = () => {
+      setCompanionBarOpen(true);
+      const snapshot = voiceSessionStore.getSnapshot();
+      if (snapshot.phase === 'active' || snapshot.phase === 'starting') {
+        transferVoiceCallSurface('companion');
+      }
+    };
+
+    const handleCompanionHotkey = (event: KeyboardEvent) => {
+      if (!matchesCompanionHotkey(event, loadCompanionGlobalShortcut())) return;
+      event.preventDefault();
+      setCompanionBarOpen((prev) => {
+        const next = !prev;
+        if (next) {
+          const snapshot = voiceSessionStore.getSnapshot();
+          if (snapshot.phase === 'active' || snapshot.phase === 'starting') {
+            transferVoiceCallSurface('companion');
+          }
+        }
+        return next;
+      });
+    };
+
+    window.addEventListener('keydown', handleCompanionHotkey);
+    window.addEventListener(COMPANION_GLOBAL_HOTKEY_EVENT, summonCompanion);
+
+    let unlistenOsHotkey: (() => void) | undefined;
+    let cancelled = false;
+    if (isTauriEnvironment()) {
+      void registerOsCompanionGlobalShortcut(loadCompanionGlobalShortcut());
+      void import('@tauri-apps/api/event')
+        .then(({ listen }) =>
+          listen(COMPANION_GLOBAL_HOTKEY_EVENT, () => {
+            if (!cancelled) {
+              summonCompanion();
+              window.dispatchEvent(new CustomEvent(COMPANION_GLOBAL_HOTKEY_EVENT));
+            }
+          })
+        )
+        .then((stop) => {
+          if (cancelled) stop();
+          else unlistenOsHotkey = stop;
+        })
+        .catch(() => undefined);
+    }
+
+    return () => {
+      cancelled = true;
+      unlistenOsHotkey?.();
+      window.removeEventListener('keydown', handleCompanionHotkey);
+      window.removeEventListener(COMPANION_GLOBAL_HOTKEY_EVENT, summonCompanion);
+    };
+  }, []);
   const [loading, setLoading] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('kite.cached_workspaces');
@@ -278,12 +367,20 @@ export const App: React.FC = () => {
     return false; // Default closed
   });
 
+  const wasOperatorOpenRef = useRef(operatorOpen);
   useEffect(() => {
+    const wasOpen = wasOperatorOpenRef.current;
+    wasOperatorOpenRef.current = operatorOpen;
     try {
       sessionStorage.setItem('kite.operatorOpen', String(operatorOpen));
     } catch {}
-    if (!operatorOpen) {
-      void releaseOperatorCapture();
+    if (!operatorOpen && wasOpen) {
+      const phase = voiceSessionStore.getSnapshot().phase;
+      if (phase !== 'active' && phase !== 'starting') {
+        void import('./lib/operator/voice/zedVoice')
+          .then(({ releaseOperatorCapture }) => releaseOperatorCapture())
+          .catch(() => undefined);
+      }
     }
   }, [operatorOpen]);
 
@@ -439,10 +536,11 @@ export const App: React.FC = () => {
     loadBootstrap();
   }, [loadBootstrap]);
 
+  const archivedOwnerId = workMode === 'agent' ? selectedAgentId : null;
   useEffect(() => {
     if (!bootstrappedRef.current || !isTauriEnvironment()) return;
     let cancelled = false;
-    void listArchivedChats(workMode === 'agent' ? selectedAgentId : null)
+    void listArchivedChats(archivedOwnerId)
       .then((archived) => {
         if (!cancelled) {
           setArchivedCount(Array.isArray(archived) ? archived.length : 0);
@@ -454,7 +552,7 @@ export const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [workMode, selectedAgentId]);
+  }, [archivedOwnerId]);
 
   const sidebarHandlers = useAppSidebarHandlers({
     setWorkspaces,
@@ -506,7 +604,9 @@ export const App: React.FC = () => {
     setRoutinesOpen,
     setSelectedWorkspaceId,
     setSelectedAgentId,
+    setSelectedAgentThreadId,
     setSelectedThreadId,
+    setAgentViewMode,
     setRightDockVisible,
     setIsCommandPaletteOpen,
     onAddWorkspace: sidebarHandlers.handleAddWorkspace,
@@ -516,6 +616,74 @@ export const App: React.FC = () => {
     selectedAgentId,
   });
 
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+    return initArgosRemoteBridge();
+  }, []);
+
+  useEffect(() => {
+    const handleNavigateViewRequest = (e: Event) => {
+      const custom = e as CustomEvent<UiBusRequestPayload>;
+      if (!custom.detail || custom.detail.kind !== 'navigate-view') return;
+      const payload = (custom.detail.payload || {}) as Partial<NavigateViewPayload>;
+      const view = payload.view;
+      if (!view) {
+        sendUiAck({ reqId: custom.detail.reqId, ok: false, reason: 'missing_view' });
+        return;
+      }
+      if (view === 'threads') {
+        setWorkMode('chat');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+        if (payload.threadId) setSelectedThreadId(payload.threadId);
+      } else if (view === 'code') {
+        setWorkMode('code');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+        if (payload.filePath) {
+          setRightDockVisible(true);
+          window.dispatchEvent(
+            new CustomEvent('kite:open-right-dock-file', { detail: { filePath: payload.filePath } })
+          );
+        }
+      } else if (view === 'agents') {
+        setWorkMode('agent');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+      } else if (view === 'diffs') {
+        setRightDockVisible(true);
+        window.dispatchEvent(new CustomEvent('kite:open-right-dock-diffs'));
+      } else if (view === 'tasks') {
+        setRightDockVisible(true);
+        window.dispatchEvent(
+          new CustomEvent('kite:open-right-dock-tasks', {
+            detail: payload.taskId ? { taskId: payload.taskId } : undefined,
+          })
+        );
+      } else if (view === 'routines') {
+        setRoutinesOpen(true);
+        setSettingsOpen(false);
+      } else if (view === 'settings') {
+        setSettingsOpen(true);
+      }
+      sendUiAck({ reqId: custom.detail.reqId, ok: true, data: { view } });
+    };
+    window.addEventListener('kite:op-request', handleNavigateViewRequest);
+    return () => window.removeEventListener('kite:op-request', handleNavigateViewRequest);
+  }, [setWorkMode]);
+
+  useEffect(() => {
+    const handleOpenSidecarInDock = (e: Event) => {
+      const custom = e as CustomEvent<OpenRightDockSidecarDetail | undefined>;
+      setRightDockVisible(true);
+      if (custom.detail?.workspaceId) {
+        setSelectedWorkspaceId(custom.detail.workspaceId);
+      }
+    };
+    window.addEventListener(OPEN_RIGHT_DOCK_SIDECAR_EVENT, handleOpenSidecarInDock);
+    return () => window.removeEventListener(OPEN_RIGHT_DOCK_SIDECAR_EVENT, handleOpenSidecarInDock);
+  }, []);
+
   const handleNewChatInWorkspace = useCallback((targetWorkspaceId: string | null) => {
     setHasOpenedChat(true);
     setWorkMode('chat');
@@ -523,6 +691,126 @@ export const App: React.FC = () => {
     setRoutinesOpen(false);
     requestNewThread(targetWorkspaceId);
   }, []);
+
+  const handleShowModeHome = useCallback(() => {
+    setRoutinesOpen(false);
+    setSettingsOpen(false);
+    if (workModeRef.current === 'agent') {
+      setAgentEditorOpen(false);
+    }
+  }, []);
+
+  const handleSelectWorkspace = useCallback(
+    (id: string) => {
+      setSelectedWorkspaceId(id);
+      setWorkMode('code');
+      setRoutinesOpen(false);
+    },
+    [setSelectedWorkspaceId, setWorkMode],
+  );
+
+  const handleSelectAgent = useCallback(
+    (id: string) => {
+      if (id !== selectedAgentIdRef.current) {
+        setSelectedAgentThreadId(null);
+      }
+      setSelectedAgentId(id);
+      setAgentEditorOpen(false);
+      setWorkMode('agent');
+      setRoutinesOpen(false);
+    },
+    [setSelectedAgentId, setWorkMode],
+  );
+
+  const handleSelectThread = useCallback(
+    (id: string) => {
+      setSelectedThreadId(id);
+      setWorkMode('chat');
+      setRoutinesOpen(false);
+    },
+    [setSelectedThreadId, setWorkMode],
+  );
+
+  const handleNewAgent = useCallback(() => {
+    setWorkMode('agent');
+    setAgentEditorOpen(true);
+    setSettingsOpen(false);
+    setRoutinesOpen(false);
+  }, [setWorkMode]);
+
+  const handleAddWorkspaceClick = useCallback(() => {
+    void sidebarHandlers.handleAddWorkspace();
+  }, [sidebarHandlers.handleAddWorkspace]);
+
+  const handleNewGlobalChat = useCallback(() => {
+    void handleNewChatInWorkspace(null);
+  }, [handleNewChatInWorkspace]);
+
+  const handleNewAgentChat = useCallback(
+    (agentId: string) => {
+      if (agentId !== selectedAgentIdRef.current) {
+        setSelectedAgentThreadId(null);
+      }
+      setSelectedAgentId(agentId);
+      setWorkMode('agent');
+      setAgentEditorOpen(false);
+      setAgentViewMode('chats');
+      setSettingsOpen(false);
+      setRoutinesOpen(false);
+      window.dispatchEvent(new CustomEvent('studio-new-agent-chat', { detail: { agentId } }));
+    },
+    [setSelectedAgentId, setWorkMode],
+  );
+
+  const handleOpenAgentSettings = useCallback(
+    (id: string) => {
+      setSelectedAgentId(id);
+      setWorkMode('agent');
+      setAgentEditorOpen(false);
+      setAgentViewMode('settings');
+      setSettingsOpen(false);
+      setRoutinesOpen(false);
+    },
+    [setSelectedAgentId, setWorkMode],
+  );
+
+  const handleToggleRoutines = useCallback(() => {
+    setRoutinesOpen((prev) => !prev);
+    setSettingsOpen(false);
+  }, []);
+
+  const handleNewWorkspaceSession = useCallback(
+    (id: string) => {
+      setSelectedWorkspaceId(id);
+      setWorkMode('code');
+      setSettingsOpen(false);
+      setRoutinesOpen(false);
+      setNewSessionRequest((n) => n + 1);
+    },
+    [setSelectedWorkspaceId, setWorkMode],
+  );
+
+  const handleSelectWorkspaceTab = useCallback(
+    (workspaceId: string, tabId: string) => {
+      setSelectedWorkspaceId(workspaceId);
+      setRequestedCodeTabId(tabId);
+      setWorkMode('code');
+      setRoutinesOpen(false);
+    },
+    [setSelectedWorkspaceId, setWorkMode],
+  );
+
+  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
+  const handleOpenArchivedChats = useCallback(() => setIsArchivedChatsOpen(true), []);
+  const handleConnectSsh = useCallback(() => setIsSshModalOpen(true), []);
+  const handleCloseRightDock = useCallback(() => setRightDockVisible(false), []);
+  const handleStartAgentFromDock = useCallback(() => {
+    setRightDockVisible(false);
+    if (selectedWorkspaceId) {
+      setWorkMode('code');
+      setNewSessionRequest((n) => n + 1);
+    }
+  }, [selectedWorkspaceId, setWorkMode]);
 
   return (
     <div
@@ -554,6 +842,7 @@ export const App: React.FC = () => {
           onModeChange={(m) => {
             setWorkMode(m);
             setSettingsOpen(false);
+            setRoutinesOpen(false);
           }}
           sidebarVisible={sidebarVisible}
           onToggleSidebar={() => setSidebarVisible((v) => !v)}
@@ -592,57 +881,33 @@ export const App: React.FC = () => {
             hidden={!sidebarVisible}
             onRailPresenceChange={setSidebarRailMounted}
             mode={workMode}
+            routinesOpen={routinesOpen}
+            onShowModeHome={handleShowModeHome}
             workspaces={workspaces}
             agents={agents}
             threads={threads}
             selectedWorkspaceId={selectedWorkspaceId}
-            onSelectWorkspace={(id) => {
-              setSelectedWorkspaceId(id);
-              setWorkMode('code');
-            }}
+            onSelectWorkspace={handleSelectWorkspace}
             selectedAgentId={selectedAgentId}
-            onSelectAgent={(id) => {
-              setSelectedAgentId(id);
-              setAgentEditorOpen(false);
-              setWorkMode('agent');
-            }}
+            onSelectAgent={handleSelectAgent}
             selectedThreadId={selectedThreadId}
-            onSelectThread={(id) => {
-              setSelectedThreadId(id);
-              setWorkMode('chat');
-            }}
+            onSelectThread={handleSelectThread}
             accountName={accountName}
             accountTier={accountTier}
             accountTierPaid={accountTierPaid}
             creditsLabel={creditsLabel}
-            onNewAgent={() => {
-              setWorkMode('agent');
-              setAgentEditorOpen(true);
-              setSettingsOpen(false);
-            }}
-            onAddWorkspace={() => void sidebarHandlers.handleAddWorkspace()}
-            onNewChat={() => void handleNewChatInWorkspace(null)}
-            onNewChatInWorkspace={(wsId) => void handleNewChatInWorkspace(wsId)}
-            onNewAgentChat={(agentId) => {
-              setSelectedAgentId(agentId);
-              setWorkMode('agent');
-              setAgentEditorOpen(false);
-              setAgentViewMode('chats');
-              setSettingsOpen(false);
-              window.dispatchEvent(new CustomEvent('studio-new-agent-chat', { detail: { agentId } }));
-            }}
+            onNewAgent={handleNewAgent}
+            onAddWorkspace={handleAddWorkspaceClick}
+            onNewChat={handleNewGlobalChat}
+            onNewChatInWorkspace={handleNewChatInWorkspace}
+            onNewAgentChat={handleNewAgentChat}
             onCopyWorkspacePath={sidebarHandlers.handleCopyPath}
             onTogglePinWorkspace={sidebarHandlers.handleTogglePinWorkspace}
             onTogglePinAgent={sidebarHandlers.handleTogglePinAgent}
             onMoveAgent={sidebarHandlers.handleMoveAgent}
             onDeleteAgent={sidebarHandlers.handleDeleteAgent}
-            onOpenAgentSettings={(id) => {
-              setSelectedAgentId(id);
-              setWorkMode('agent');
-              setAgentEditorOpen(false);
-              setAgentViewMode('settings');
-              setSettingsOpen(false);
-            }}
+            onOpenAgentSettings={handleOpenAgentSettings}
+            onOpenRoutines={handleToggleRoutines}
             onRenameWorkspace={sidebarHandlers.handleRenameWorkspace}
             onRemoveWorkspaceFromList={sidebarHandlers.handleRemoveWorkspaceFromList}
             onMoveWorkspace={sidebarHandlers.handleMoveWorkspace}
@@ -654,23 +919,14 @@ export const App: React.FC = () => {
             onRestoreThread={sidebarHandlers.handleRestoreThread}
             onDeleteThread={sidebarHandlers.handleDeleteThread}
             archivedCount={archivedCount}
-            onNewWorkspaceSession={(id) => {
-              setSelectedWorkspaceId(id);
-              setWorkMode('code');
-              setSettingsOpen(false);
-              setNewSessionRequest((n) => n + 1);
-            }}
+            onNewWorkspaceSession={handleNewWorkspaceSession}
             workspaceSessions={workspaceSessions}
-            onSelectWorkspaceTab={(workspaceId, tabId) => {
-              setSelectedWorkspaceId(workspaceId);
-              setRequestedCodeTabId(tabId);
-              setWorkMode('code');
-            }}
+            onSelectWorkspaceTab={handleSelectWorkspaceTab}
             onCloseWorkspaceTab={sidebarHandlers.handleCloseWorkspaceTab}
             onRenameWorkspaceTab={sidebarHandlers.handleRenameWorkspaceTab}
-            onOpenSettings={() => setSettingsOpen(true)}
-            onOpenArchivedChats={() => setIsArchivedChatsOpen(true)}
-            onConnectSsh={() => setIsSshModalOpen(true)}
+            onOpenSettings={handleOpenSettings}
+            onOpenArchivedChats={handleOpenArchivedChats}
+            onConnectSsh={handleConnectSsh}
             appearance={appearance}
             onToggleAppearance={handleToggleAppearance}
           />
@@ -689,7 +945,10 @@ export const App: React.FC = () => {
               setSelectedWorkspaceId={setSelectedWorkspaceId}
               selectedAgentId={selectedAgentId}
               setSelectedAgentId={setSelectedAgentId}
+              selectedAgentThreadId={selectedAgentThreadId}
+              setSelectedAgentThreadId={setSelectedAgentThreadId}
               selectedThreadId={selectedThreadId}
+              setSelectedThreadId={setSelectedThreadId}
               agentEditorOpen={agentEditorOpen}
               setAgentEditorOpen={setAgentEditorOpen}
               agentViewMode={agentViewMode}
@@ -714,9 +973,13 @@ export const App: React.FC = () => {
               <Suspense fallback={null}>
                 <RightDock
                   visible={rightDockVisible}
-                  onClose={() => setRightDockVisible(false)}
+                  onClose={handleCloseRightDock}
                   workspaceId={selectedWorkspaceId}
-                  selectedThreadId={selectedThreadId}
+                  selectedThreadId={
+                    workMode === 'agent'
+                      ? (selectedAgentThreadId ?? selectedThreadId)
+                      : selectedThreadId
+                  }
                   isOccluded={
                     isUsageModalOpen ||
                     isWhatsNewOpen ||
@@ -728,13 +991,7 @@ export const App: React.FC = () => {
                   }
                   workspaces={workspaces}
                   onSelectWorkspace={setSelectedWorkspaceId}
-                  onStartAgent={() => {
-                    setRightDockVisible(false);
-                    if (selectedWorkspaceId) {
-                      setWorkMode('code');
-                      setNewSessionRequest((n) => n + 1);
-                    }
-                  }}
+                  onStartAgent={handleStartAgentFromDock}
                 />
               </Suspense>
             </ErrorBoundary>
@@ -765,6 +1022,7 @@ export const App: React.FC = () => {
           onCloseArchivedChats={() => setIsArchivedChatsOpen(false)}
           onRestoredArchivedChat={async (threadId) => {
             setWorkMode('chat');
+            setRoutinesOpen(false);
             await loadThreads();
             if (threadId) {
               setSelectedThreadId(threadId);
@@ -777,6 +1035,7 @@ export const App: React.FC = () => {
             void loadBootstrap();
             setSelectedWorkspaceId(ws.id);
             setWorkMode('code');
+            setRoutinesOpen(false);
           }}
         />
 
@@ -810,17 +1069,23 @@ export const App: React.FC = () => {
           isOpen={isNotificationsOpen}
           anchor={notificationsAnchor}
           notifSnapshot={notifSnapshot}
+          agents={agents}
+          threads={threads}
           onClose={() => {
             setIsNotificationsOpen(false);
             setNotificationsAnchor(null);
           }}
+          setSelectedWorkspaceId={setSelectedWorkspaceId}
           setSelectedAgentId={setSelectedAgentId}
+          setSelectedAgentThreadId={setSelectedAgentThreadId}
           setSelectedThreadId={setSelectedThreadId}
+          setAgentViewMode={setAgentViewMode}
           setWorkMode={setWorkMode}
           setSettingsOpen={setSettingsOpen}
+          setRoutinesOpen={setRoutinesOpen}
         />
 
-        {/* Floating Zed Voice & Operations Orb */}
+        {/* Floating Argos Voice & Operations Orb */}
         {(operatorOpen || isVoiceSessionRunning) && (
           <Suspense fallback={null}>
             <ZedStripHost
@@ -828,13 +1093,11 @@ export const App: React.FC = () => {
               call={{
                 ...zedCallState,
                 isActive: operatorOpen,
+                muted: voiceSession.micMuted,
+                speakerMuted: voiceSession.speakerMuted,
               }}
-              onToggleMute={() =>
-                setZedCallState((s) => ({ ...s, muted: !s.muted }))
-              }
-              onToggleSpeaker={() =>
-                setZedCallState((s) => ({ ...s, speakerMuted: !s.speakerMuted }))
-              }
+              onToggleMute={() => voiceSession.toggleMicMuted()}
+              onToggleSpeaker={() => voiceSession.toggleSpeakerMuted()}
               onEndCall={() => setOperatorOpen(false)}
               onOpenSettingsZed={() => {
                 setSettingsOpen(true);
@@ -844,10 +1107,28 @@ export const App: React.FC = () => {
           </Suspense>
         )}
 
+        {companionBarOpen && (
+          <Suspense fallback={null}>
+            <ArgosCompanionBar
+              open={companionBarOpen}
+              onOpenChange={setCompanionBarOpen}
+              enableGlobalHotkey={false}
+              threadId={voiceSession.boundThreadId ?? selectedThreadId}
+              onTransferToThread={(tid) => {
+                if (tid) setSelectedThreadId(tid);
+                setWorkMode('chat');
+                setRoutinesOpen(false);
+                setCompanionBarOpen(false);
+              }}
+              onEndSession={() => setCompanionBarOpen(false)}
+            />
+          </Suspense>
+        )}
+
         <AppIntro open={!introDismissed} />
 
         {/* Ambient Sileo Toast System */}
-        <Toaster position="bottom-right" theme={appearance} offset={{ bottom: 24, right: 24 }} />
+        <Toaster position="bottom-right" theme={appearance} offset={isVoiceSessionRunning ? { bottom: 96, right: 24 } : { bottom: 24, right: 24 }} />
       </div>
     </div>
   );

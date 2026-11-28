@@ -447,4 +447,50 @@ describe('useChatTurnActions', () => {
     expect(threadsMap['t-stop'].stoppedByBuilder).toBe(false);
     unmount();
   });
+
+  it('forwards preserveChildren: true without setting stoppedByBuilder when cancelling for steer/send-now', async () => {
+    vi.mocked(invokeCommand).mockResolvedValue(undefined);
+
+    let threadsMap: Record<string, ExtendedChatThread> = {
+      't-1': {
+        id: 't-1',
+        provider: 'antigravity',
+        mode: 'fullAccess',
+        status: 'running',
+        stoppedByBuilder: false,
+        items: [],
+      } as unknown as ExtendedChatThread,
+    };
+    const setThreadsMap = vi.fn((updater) => {
+      threadsMap = typeof updater === 'function' ? updater(threadsMap) : updater;
+    });
+
+    const { result, unmount } = renderHook(() =>
+      useChatTurnActions({
+        agentId: 'agent-1',
+        threadsMap,
+        setThreadsMap,
+        promptMap: {},
+        setPromptMap: vi.fn(),
+        attachmentsMap: {},
+        writeAttachments: vi.fn(),
+        threadWithResolvedBinding: (t) => t,
+        notifyThreadsChanged: vi.fn(),
+        isMountedRef: { current: true },
+        activePollRunsRef: { current: new Set(['run-1']) },
+      })
+    );
+
+    await act(async () => {
+      await result.current.handleCancelTurn('t-1', { preserveChildren: true });
+    });
+
+    expect(invokeCommand).toHaveBeenCalledWith('cancel_agent_chat_turn', {
+      threadId: 't-1',
+      preserveChildren: true,
+    });
+    expect(threadsMap['t-1'].status).toBe('idle');
+    expect(threadsMap['t-1'].stoppedByBuilder).toBe(false);
+    unmount();
+  });
 });

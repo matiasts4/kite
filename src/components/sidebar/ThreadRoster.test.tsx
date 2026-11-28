@@ -74,28 +74,203 @@ describe('ThreadRoster live shelves', () => {
     expect(onNewChatInWorkspace).toHaveBeenCalledWith('ws');
   });
 
-  it('folds a running thread into Working and returns it when the turn finishes', () => {
-    const running = thread({ id: 'busy', title: 'Busy', status: 'running', workspaceId: 'ws' });
-    const pinned = thread({ id: 'pin', title: 'Pinned busy', status: 'running', pinned: true, workspaceId: 'ws' });
+  it('keeps running and waiting threads inside their project without a separate Working shelf and renders status indicator inline', () => {
+    const running = thread({
+      id: 'busy',
+      title: 'Busy',
+      status: 'running',
+      workspaceId: 'ws',
+      lastTurnAtUnixMs: 200,
+      updatedAtUnixMs: 200,
+    });
+    const waiting = thread({
+      id: 'wait',
+      title: 'Needs approval chat',
+      status: 'waiting',
+      workspaceId: 'ws',
+      lastTurnAtUnixMs: 150,
+      updatedAtUnixMs: 150,
+    });
+    const pinned = thread({
+      id: 'pin',
+      title: 'Pinned busy',
+      status: 'running',
+      pinned: true,
+      workspaceId: 'ws',
+      lastTurnAtUnixMs: 100,
+      updatedAtUnixMs: 100,
+    });
     const view = render(
-      <ThreadRoster threads={[running, pinned]} workspaces={[workspace]} selectedThreadId={null} />,
+      <ThreadRoster threads={[running, waiting, pinned]} workspaces={[workspace]} selectedThreadId={null} />,
     );
 
-    const working = screen.getByRole('region', { name: 'Working threads' });
-    expect(within(working).getByText('Busy')).toBeInTheDocument();
-    expect(within(working).queryByText('Pinned busy')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Working threads' })).not.toBeInTheDocument();
+    const kiteRegion = screen.getByRole('region', { name: 'Kite threads' });
+    expect(within(kiteRegion).getByText('Busy')).toBeInTheDocument();
+    expect(within(kiteRegion).getByText('Needs approval chat')).toBeInTheDocument();
+    expect(
+      kiteRegion.querySelectorAll('[data-testid="agent-status-indicator"][data-status="running"]'),
+    ).toHaveLength(1);
+    expect(within(kiteRegion).queryByText('Pinned busy')).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Pinned threads' }).textContent).toContain('Pinned busy');
     expect(screen.getAllByText('Busy')).toHaveLength(1);
 
     view.rerender(
       <ThreadRoster
-        threads={[{ ...running, status: 'idle' }, pinned]}
+        threads={[{ ...running, status: 'idle' }, waiting, pinned]}
         workspaces={[workspace]}
         selectedThreadId={null}
       />,
     );
     expect(screen.queryByRole('region', { name: 'Working threads' })).not.toBeInTheDocument();
-    expect(screen.getByText('Busy')).toBeInTheDocument();
+    expect(within(screen.getByRole('region', { name: 'Kite threads' })).getByText('Busy')).toBeInTheDocument();
+  });
+
+  it('caps each project at 6 threads when collapsed, expands independently, and auto-reveals on search or hidden selection', () => {
+    const wsOther: Workspace = {
+      id: 'ws-other',
+      displayName: 'OtherRepo',
+      createdAtUnixMs: 2,
+      lastOpenedAtUnixMs: 2,
+      pinned: false,
+      available: true,
+    };
+    const wsSmall: Workspace = {
+      id: 'ws-small',
+      displayName: 'SmallRepo',
+      createdAtUnixMs: 3,
+      lastOpenedAtUnixMs: 3,
+      pinned: false,
+      available: true,
+    };
+
+    const kiteThreads = Array.from({ length: 8 }, (_, idx) =>
+      thread({
+        id: `k-${idx + 1}`,
+        title: `Kite Chat ${idx + 1}`,
+        workspaceId: 'ws',
+        lastTurnAtUnixMs: (idx + 1) * 100,
+        updatedAtUnixMs: (idx + 1) * 100,
+      }),
+    );
+    const otherThreads = Array.from({ length: 7 }, (_, idx) =>
+      thread({
+        id: `o-${idx + 1}`,
+        title: `Other Chat ${idx + 1}`,
+        workspaceId: 'ws-other',
+        lastTurnAtUnixMs: (idx + 1) * 100,
+        updatedAtUnixMs: (idx + 1) * 100,
+      }),
+    );
+    const smallThreads = Array.from({ length: 6 }, (_, idx) =>
+      thread({
+        id: `s-${idx + 1}`,
+        title: `Small Chat ${idx + 1}`,
+        workspaceId: 'ws-small',
+        lastTurnAtUnixMs: (idx + 1) * 100,
+        updatedAtUnixMs: (idx + 1) * 100,
+      }),
+    );
+
+    const allThreads = [...kiteThreads, ...otherThreads, ...smallThreads];
+    const view = render(
+      <ThreadRoster
+        threads={allThreads}
+        workspaces={[workspace, wsOther, wsSmall]}
+        selectedThreadId="k-8"
+      />,
+    );
+
+    const kiteRegion = screen.getByRole('region', { name: 'Kite threads' });
+    const otherRegion = screen.getByRole('region', { name: 'OtherRepo threads' });
+    const smallRegion = screen.getByRole('region', { name: 'SmallRepo threads' });
+
+    // Shows the 6 newest threads per project by default
+    expect(within(kiteRegion).getByText('Kite Chat 8')).toBeInTheDocument();
+    expect(within(kiteRegion).getByText('Kite Chat 3')).toBeInTheDocument();
+    expect(within(kiteRegion).queryByText('Kite Chat 2')).not.toBeInTheDocument();
+    expect(within(kiteRegion).queryByText('Kite Chat 1')).not.toBeInTheDocument();
+    expect(within(kiteRegion).getByRole('button', { name: '+2 more' })).toBeInTheDocument();
+
+    expect(within(otherRegion).getByText('Other Chat 7')).toBeInTheDocument();
+    expect(within(otherRegion).queryByText('Other Chat 1')).not.toBeInTheDocument();
+    expect(within(otherRegion).getByRole('button', { name: '+1 more' })).toBeInTheDocument();
+
+    // Small project (<= 6) has no overflow toggle
+    expect(within(smallRegion).getByText('Small Chat 1')).toBeInTheDocument();
+    expect(within(smallRegion).queryByRole('button', { name: /more|Show less/ })).not.toBeInTheDocument();
+
+    // Expanding Kite shows all 8 without expanding OtherRepo
+    fireEvent.click(within(kiteRegion).getByRole('button', { name: '+2 more' }));
+    expect(within(kiteRegion).getByText('Kite Chat 1')).toBeInTheDocument();
+    expect(within(kiteRegion).getByRole('button', { name: 'Show less' })).toBeInTheDocument();
+    expect(within(otherRegion).queryByText('Other Chat 1')).not.toBeInTheDocument();
+
+    // Collapsing Kite returns to 6
+    fireEvent.click(within(kiteRegion).getByRole('button', { name: 'Show less' }));
+    expect(within(kiteRegion).queryByText('Kite Chat 1')).not.toBeInTheDocument();
+
+    // Active search reveals older hidden matches
+    fireEvent.change(screen.getByPlaceholderText('Search threads…'), { target: { value: 'Kite Chat 1' } });
+    expect(within(kiteRegion).getByText('Kite Chat 1')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Search threads…'), { target: { value: '' } });
+    expect(within(kiteRegion).queryByText('Kite Chat 1')).not.toBeInTheDocument();
+
+    // Selecting a thread outside the top 6 auto-expands that project
+    view.rerender(
+      <ThreadRoster
+        threads={allThreads}
+        workspaces={[workspace, wsOther, wsSmall]}
+        selectedThreadId="k-1"
+      />,
+    );
+    expect(within(screen.getByRole('region', { name: 'Kite threads' })).getByText('Kite Chat 1')).toBeInTheDocument();
+  });
+
+  it('orders threads newest-first and keeps two concurrent working threads in stable order despite updatedAtUnixMs ticks', () => {
+    const tOld = thread({
+      id: 't-old',
+      title: 'Oldest Idle',
+      workspaceId: 'ws',
+      status: 'idle',
+      updatedAtUnixMs: 100,
+    });
+    const tWorkA = thread({
+      id: 't-work-a',
+      title: 'Working Alpha',
+      workspaceId: 'ws',
+      status: 'running',
+      updatedAtUnixMs: 300,
+    });
+    const tWorkB = thread({
+      id: 't-work-b',
+      title: 'Working Beta',
+      workspaceId: 'ws',
+      status: 'running',
+      updatedAtUnixMs: 500,
+    });
+
+    const rowTitlesInKite = () =>
+      Array.from(
+        screen.getByRole('region', { name: 'Kite threads' }).querySelectorAll('.chat-thread-row__title'),
+      ).map((el) => el.textContent);
+
+    const view = render(
+      <ThreadRoster threads={[tOld, tWorkA, tWorkB]} workspaces={[workspace]} selectedThreadId={null} />,
+    );
+
+    expect(rowTitlesInKite()).toEqual(['Working Beta', 'Working Alpha', 'Oldest Idle']);
+
+    // Simulate Working Alpha emitting a streaming touch() update with a newer updatedAtUnixMs while both remain running
+    view.rerender(
+      <ThreadRoster
+        threads={[tOld, { ...tWorkA, updatedAtUnixMs: 9_999 }, tWorkB]}
+        workspaces={[workspace]}
+        selectedThreadId={null}
+      />,
+    );
+
+    expect(rowTitlesInKite()).toEqual(['Working Beta', 'Working Alpha', 'Oldest Idle']);
   });
 
   it('parks a snoozed thread on the Snoozed shelf', () => {

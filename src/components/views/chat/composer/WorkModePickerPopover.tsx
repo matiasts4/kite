@@ -173,7 +173,7 @@ export const WorkModePickerPopover: React.FC<WorkModePickerPopoverProps> = ({
                         onSelectWorkMode({
                           agent: choice.id === 'build' ? null : choice.id,
                           plan: false,
-                          mode: currentMode === 'readOnly' ? 'acceptEdits' : currentMode,
+                          mode: currentMode === 'readOnly' ? 'fullAccess' : currentMode,
                         });
                       }
                       setIsOpen(false);

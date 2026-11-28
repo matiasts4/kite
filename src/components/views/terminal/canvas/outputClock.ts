@@ -5,9 +5,10 @@ export const OUTPUT_GAP_FOCUSED_MS = 16;
 export const OUTPUT_GAP_VISIBLE_MS = 66;
 
 /**
- * Hidden or minimized window. No canvas paint. This is only the credit heartbeat
- * so a streaming agent does not block on an empty snapshot budget.
- * About 6 fps, inside the 4–8 fps band.
+ * Hidden or minimized window cadence floor for `outputGapMs('hidden')`.
+ * Minimized/hidden surfaces pause polling and no longer run a standing 166ms credit
+ * heartbeat IPC interval; returning visible catches up via `set_terminal_presentation(live=true)`
+ * + `replenish_terminal_credit` + full snapshot pull.
  */
 export const OUTPUT_GAP_HIDDEN_HEARTBEAT_MS = 166;
 

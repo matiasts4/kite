@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import type { SubagentRun } from '../../../types';
+import { isSuppressedNoiseRun } from '../chat/subagentRunHelpers';
 import { SubagentRunCard } from './SubagentRunCard';
 import {
   isRunActive,
@@ -25,8 +26,13 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
   const [filter, setFilter] = useState<'all' | 'live'>('all');
   const [showFailedGroup, setShowFailedGroup] = useState(false);
 
+  const visibleRuns = useMemo(
+    () => runs.filter((run) => !isSuppressedNoiseRun(run, runs)),
+    [runs],
+  );
+
   const { sorted, activeCount, waitingCount } = useMemo(() => {
-    const ordered = sortRunsForOverview(runs);
+    const ordered = sortRunsForOverview(visibleRuns);
     let active = 0;
     let waiting = 0;
     for (const run of ordered) {
@@ -38,9 +44,9 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
       }
     }
     return { sorted: ordered, activeCount: active, waitingCount: waiting };
-  }, [runs]);
+  }, [visibleRuns]);
 
-  const effectiveFilter = activeCount > 0 && activeCount < runs.length ? filter : 'all';
+  const effectiveFilter = activeCount > 0 && activeCount < visibleRuns.length ? filter : 'all';
   const displayedRuns = useMemo(
     () =>
       effectiveFilter === 'live'
@@ -54,7 +60,8 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
       return { primaryRuns: displayedRuns, foldedFailedRuns: [] as SubagentRun[] };
     }
     const emptyFailures = displayedRuns.filter((run) => isZeroStepFailedRun(run));
-    if (emptyFailures.length < 3) {
+    const hasPrimary = displayedRuns.length > emptyFailures.length;
+    if (emptyFailures.length === 0 || (emptyFailures.length < 3 && !hasPrimary)) {
       return { primaryRuns: displayedRuns, foldedFailedRuns: [] as SubagentRun[] };
     }
     const emptySet = new Set(emptyFailures.map((run) => run.subagentId));
@@ -68,7 +75,7 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
     <div className="subagent-overview" data-testid="subagent-runs-overview">
       <div className="subagent-overview__toolbar">
         <div className="subagent-overview__summary">
-          <strong>{runs.length} subagents</strong>
+          <strong>{visibleRuns.length} subagents</strong>
           {waitingCount > 0 && (
             <span className="subagent-badge subagent-badge--waiting">
               {waitingCount} waiting
@@ -79,7 +86,7 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
           )}
         </div>
 
-        {activeCount > 0 && activeCount < runs.length && (
+        {activeCount > 0 && activeCount < visibleRuns.length && (
           <div
             className="subagent-inspector__segmented"
             role="tablist"
@@ -92,7 +99,7 @@ export const SubagentRunsOverview: React.FC<SubagentRunsOverviewProps> = ({
               className={`subagent-inspector__segment-btn${effectiveFilter === 'all' ? ' subagent-inspector__segment-btn--active' : ''}`}
               onClick={() => setFilter('all')}
             >
-              All ({runs.length})
+              All ({visibleRuns.length})
             </button>
             <button
               type="button"

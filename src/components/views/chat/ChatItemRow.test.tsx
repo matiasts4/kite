@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
+import {
+  computeNextRevealLength,
+  SMOOTH_STREAM_MIN_FRAME_MS,
+} from './useSmoothStreamingText';
 import { SubagentGroupRow } from './SubagentActivityCard';
 import type { ChatItem } from '../../../types';
 import { OPEN_RIGHT_DOCK_FILE_EVENT, type FilePreviewRequest } from '../../../lib/filePreviewNav';
@@ -1060,13 +1064,15 @@ describe('ChatItemRow smooth streaming reveal', () => {
       frames.delete(id);
     });
 
+    let frameTime = 1000;
     const flushNextFrame = () => {
       const first = frames.entries().next();
       if (first.done) return false;
       const [id, cb] = first.value;
       frames.delete(id);
+      frameTime += 34;
       act(() => {
-        cb(performance.now());
+        cb(frameTime);
       });
       return true;
     };
@@ -1132,6 +1138,94 @@ describe('ChatItemRow smooth streaming reveal', () => {
       expect(container.querySelector('.md-body')?.textContent).toBe(reduceFull);
     } finally {
       delete document.documentElement.dataset.motion;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('paces at ~60fps without 24-char jumps past 1,000 chars, smooths live initial lines, and keeps rAF continuous across deltas', async () => {
+    expect(SMOOTH_STREAM_MIN_FRAME_MS).toBeLessThanOrEqual(16);
+
+    const longPrefix = 'A'.repeat(1_200);
+    const shortLineDelta = `${longPrefix}Short follow-up line arriving mid-turn.`;
+    const nextAfterLine = computeNextRevealLength(longPrefix.length, shortLineDelta);
+    expect(nextAfterLine - longPrefix.length).toBeLessThan(12);
+
+    let nextId = 1;
+    let fakeNow = 100;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextId++;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.fn((id: number) => {
+      frames.delete(id);
+    });
+    vi.stubGlobal('cancelAnimationFrame', cancelSpy);
+
+    const stepFrame = (deltaMs: number) => {
+      const first = frames.entries().next();
+      if (first.done) return false;
+      const [id, cb] = first.value;
+      frames.delete(id);
+      fakeNow += deltaMs;
+      act(() => {
+        cb(fakeNow);
+      });
+      return true;
+    };
+
+    try {
+      const firstLine = 'First line injected from the provider in a single initial burst.';
+      const liveItem = mockItem({
+        id: 'stream-live-enter',
+        kind: 'assistant',
+        streaming: true,
+        text: firstLine,
+      });
+      const { container, rerender } = render(<ChatItemRow item={liveItem} enter />);
+
+      const initialShown = container.querySelector('.md-body')?.textContent ?? '';
+      expect(initialShown.length).toBeGreaterThan(0);
+      expect(initialShown.length).toBeLessThan(firstLine.length);
+      expect(frames.size).toBe(1);
+
+      expect(stepFrame(16)).toBe(true);
+      const after16ms = container.querySelector('.md-body')?.textContent ?? '';
+      expect(after16ms.length).toBeGreaterThan(initialShown.length);
+      expect(after16ms.length).toBeLessThan(firstLine.length);
+
+      // Appending another delta mid-flight must keep the active rAF loop instead of cancelling/resetting it.
+      const cancelCountBeforeDelta = cancelSpy.mock.calls.length;
+      const extended = `${firstLine} Second clause arrives smoothly.`;
+      rerender(<ChatItemRow item={{ ...liveItem, text: extended }} enter />);
+      expect(cancelSpy.mock.calls.length).toBe(cancelCountBeforeDelta);
+      expect(frames.size).toBe(1);
+
+      // Sub-frame 8ms tick (120Hz display) defers commit cleanly until >= SMOOTH_STREAM_MIN_FRAME_MS.
+      expect(stepFrame(8)).toBe(true);
+      expect(container.querySelector('.md-body')?.textContent).toBe(after16ms);
+
+      expect(stepFrame(8)).toBe(true);
+      const afterSecondCommit = container.querySelector('.md-body')?.textContent ?? '';
+      expect(afterSecondCommit.length).toBeGreaterThan(after16ms.length);
+
+      let guard = 0;
+      while (stepFrame(16) && guard < 100) {
+        guard += 1;
+      }
+      expect(container.querySelector('.md-body')?.textContent).toBe(extended);
+
+      const fsSpecifier = ['node', 'fs'].join(':');
+      const fs = (await import(/* @vite-ignore */ fsSpecifier)) as {
+        readFileSync: (filePath: string, encoding: 'utf8') => string;
+      };
+      const chatMdCss = fs.readFileSync('src/components/views/chat/styles/chat-markdown-actions.css', 'utf8');
+      expect(chatMdCss).toMatch(/\.chat-turn--streaming\s+\.md-body[\s\S]*animation:\s*md-stream-block-in/);
+      expect(chatMdCss).toMatch(/@keyframes\s+md-stream-block-in\s*\{[\s\S]*opacity:/);
+      expect(chatMdCss).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.chat-turn--streaming/);
+      expect(chatMdCss).toMatch(/html\[data-motion='reduce'\][\s\S]*\.chat-turn--streaming/);
+    } finally {
       vi.unstubAllGlobals();
     }
   });

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   declarationFromCatalog,
+  reconcileEffortForModel,
   resolveEffortChoicesForModel,
 } from './driverDeclaration';
 import type { ModelOption } from './types';
@@ -130,5 +131,32 @@ describe('declarationFromCatalog with dynamic effort levels', () => {
     expect(nonEffortDecl.effort).toBeNull();
     expect(nonEffortDecl.defaultEffort).toBeNull();
     expect(nonEffortDecl.unlistedReasons?.effort).toContain('does not advertise reasoning effort');
+  });
+});
+
+describe('reconcileEffortForModel', () => {
+  it('clears effort for models that do not advertise reasoning effort', () => {
+    expect(
+      reconcileEffortForModel(
+        { id: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)', supportsEffort: false },
+        'high'
+      )
+    ).toBeNull();
+    expect(reconcileEffortForModel(null, 'high')).toBeNull();
+  });
+
+  it('preserves supported levels and clamps out-of-range levels to the nearest advertised tier', () => {
+    const argon: ModelOption = {
+      id: 'gemini-4-argon',
+      name: 'Gemini 4 Argon',
+      supportsEffort: true,
+      effortLevels: ['low', 'medium', 'high'],
+      defaultEffort: 'medium',
+    };
+    expect(reconcileEffortForModel(argon, 'high')).toBe('high');
+    expect(reconcileEffortForModel(argon, 'xhigh')).toBe('high');
+    expect(reconcileEffortForModel(argon, 'max')).toBe('high');
+    expect(reconcileEffortForModel(argon, 'minimal')).toBe('low');
+    expect(reconcileEffortForModel(argon, null)).toBeNull();
   });
 });

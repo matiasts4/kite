@@ -1232,4 +1232,71 @@ describe('ChatComposer - Behavioral Tests', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open diff' }));
     expect(onOpenTurnDiff).toHaveBeenCalledTimes(1);
   });
+
+  it('supports keyboard ArrowDown/ArrowUp/Enter navigation on @agent mention autocomplete', async () => {
+    const user = userEvent.setup();
+    const agents = [
+      { id: 'ship-guard', name: 'Ship Guard', engine: 'antigravity' },
+      { id: 'discovery-architect', name: 'Discovery Architect', engine: 'antigravity' },
+    ];
+
+    function MentionHarness() {
+      const [prompt, setPrompt] = useState('');
+      return (
+        <ChatComposer
+          {...defaultProps}
+          prompt={prompt}
+          agents={agents}
+          onChangePrompt={setPrompt}
+        />
+      );
+    }
+
+    render(<MentionHarness />);
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    await user.click(textbox);
+    await user.type(textbox, '@');
+
+    const listbox = screen.getByRole('listbox', { name: 'Mentions' });
+    expect(listbox).toBeInTheDocument();
+    const options = screen.getAllByRole('option');
+    expect(options.map((el) => el.textContent)).toEqual(['@Ship Guard', '@Discovery Architect']);
+    expect(options[0]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(textbox, { key: 'ArrowDown' });
+    expect(screen.getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(textbox, { key: 'ArrowUp' });
+    expect(screen.getAllByRole('option')[0]).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.keyDown(textbox, { key: 'ArrowDown' });
+    fireEvent.keyDown(textbox, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('listbox', { name: 'Mentions' })).not.toBeInTheDocument();
+    });
+    expect(screen.getByText('@Discovery Architect')).toBeInTheDocument();
+  });
+
+  it('omits the consumed token counter from the composer footer while keeping the 120k draft limit guard', () => {
+    const { rerender } = render(
+      <ChatComposer
+        {...defaultProps}
+        totalTokens={35600}
+        prompt="Normal draft"
+      />,
+    );
+
+    expect(screen.queryByText(/35\.6k tokens/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\btokens\b/i)).not.toBeInTheDocument();
+
+    rerender(
+      <ChatComposer
+        {...defaultProps}
+        totalTokens={35600}
+        prompt={'a'.repeat(120_005)}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(/120[.,\s]005 \/ 120,000/);
+  });
 });

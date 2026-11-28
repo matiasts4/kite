@@ -46,6 +46,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
   const reduceMotion = useReducedMotion();
 
   const [scope, setScope] = useState<InspectorScope>('thread');
+  const [includeHistory, setIncludeHistory] = useState(false);
   const [globalTarget, setGlobalTarget] = useState<OpenRightDockSubagentDetail | null>(null);
   const [mode, setMode] = useState<InspectorMode>('subagent');
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(() =>
@@ -74,7 +75,7 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
     snapshot: globalSnapshot,
     loading: globalLoading,
     refresh: refreshGlobal,
-  } = useGlobalSubagents();
+  } = useGlobalSubagents({ includeHistory });
 
   const {
     thread,
@@ -394,11 +395,14 @@ export const SubagentInspectorView: React.FC<SubagentInspectorViewProps> = ({
           entries={globalSnapshot.runs}
           totalCount={globalSnapshot.totalCount}
           activeCount={globalSnapshot.activeCount}
+          historyCount={globalSnapshot.historyCount ?? 0}
+          includeHistory={includeHistory}
           loading={globalLoading}
           stoppingRunKey={stoppingRunKey}
           onInspectEntry={handleInspectGlobalEntry}
           onStopEntry={(entry) => void handleStopRun(entry.threadId, entry.run.subagentId)}
           onFocusThread={(tid) => handleJumpToThread(tid)}
+          onToggleHistory={() => setIncludeHistory((prev) => !prev)}
         />
       ) : isThreadEmpty ? (
         <div className="subagent-inspector__empty" data-testid="subagent-inspector-empty">

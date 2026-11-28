@@ -255,12 +255,27 @@ export function useTranscriptLiveEdge(
   // message exists, so a thread-id dependency alone never attached to a new chat.
   useLayoutEffect(() => {
     const scroller = transcriptRef.current;
-    const found =
-      columnSelector === ':self'
-        ? scroller
-        : (scroller?.querySelector(columnSelector) ?? null);
-    const column = found instanceof HTMLElement ? found : null;
+    if (
+      scroller?.closest(
+        '.mode-layer:not(.mode-layer--visible), [aria-hidden="true"], [style*="display: none"], [style*="display:none"], [hidden]',
+      )
+    ) {
+      return;
+    }
     const current = observedRef.current;
+    const column =
+      current &&
+      current.scroller === scroller &&
+      current.column &&
+      current.column.isConnected
+        ? current.column
+        : (() => {
+            const found =
+              columnSelector === ':self'
+                ? scroller
+                : (scroller?.querySelector(columnSelector) ?? null);
+            return found instanceof HTMLElement ? found : null;
+          })();
     if (
       current &&
       current.scroller === scroller &&

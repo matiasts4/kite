@@ -10,9 +10,12 @@ import {
 } from '../../../../lib/liveChatRunsStore';
 import type { ExtendedChatThread, ChatAttachment, LiveChatRun } from '../types';
 import type { PlanActionPayload } from '../ChatPlanPanel';
+import type { ApprovalDecision } from '../ChatApprovalCard';
 import { expandCitations } from '../citationChip';
+import { expandMentions, mentionSpans } from '../mentionChip';
 import { pollTurnUpdates } from '../turnPolling';
 import { readThreadSendBinding } from './useChatConnectionBindings';
+import { pruneThreadsMapLru } from './useChatGridPersistence';
 
 export interface UseChatTurnActionsOptions {
   agentId?: string | null;
@@ -28,6 +31,7 @@ export interface UseChatTurnActionsOptions {
   activePollRunsRef: MutableRefObject<Set<string>>;
   activePollThreadsRef?: MutableRefObject<Map<string, string>>;
   reconcileThread?: (threadId: string) => Promise<void> | void;
+  getProtectedThreadIds?: (extraId?: string | null) => string[];
 }
 
 export function useChatTurnActions({
@@ -44,6 +48,7 @@ export function useChatTurnActions({
   activePollRunsRef,
   activePollThreadsRef,
   reconcileThread,
+  getProtectedThreadIds,
 }: UseChatTurnActionsOptions) {
   const [isRunning, setIsRunningState] = useState<Record<string, boolean>>({});
   const isRunningRef = useRef<Record<string, boolean>>(isRunning);
@@ -115,7 +120,7 @@ export function useChatTurnActions({
 
   const handleApproval = async (
     threadId: string,
-    decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
+    decision: ApprovalDecision,
     requestId: string
   ) => {
     try {
@@ -132,12 +137,17 @@ export function useChatTurnActions({
     }
   };
 
-  const handleCancelTurn = async (threadId: string): Promise<boolean> => {
+  const handleCancelTurn = async (
+    threadId: string,
+    options?: { preserveChildren?: boolean }
+  ): Promise<boolean> => {
+    const preserveChildren = Boolean(options?.preserveChildren);
+    const payload = preserveChildren ? { threadId, preserveChildren: true } : { threadId };
     try {
       if (agentId) {
-        await invokeCommand<void>('cancel_agent_chat_turn', { threadId });
+        await invokeCommand<void>('cancel_agent_chat_turn', payload);
       } else {
-        await invokeCommand<void>('cancel_chat_turn', { threadId });
+        await invokeCommand<void>('cancel_chat_turn', payload);
       }
       if (activePollThreadsRef) {
         const trackedRunId = activePollThreadsRef.current.get(threadId);
@@ -152,7 +162,16 @@ export function useChatTurnActions({
       setIsRunning((prev) => ({ ...prev, [threadId]: false }));
       setThreadsMap((prev) => {
         const t = prev[threadId];
-        return t ? { ...prev, [threadId]: { ...t, status: 'idle', stoppedByBuilder: true } } : prev;
+        return t
+          ? {
+              ...prev,
+              [threadId]: {
+                ...t,
+                status: 'idle',
+                stoppedByBuilder: preserveChildren ? Boolean(t.stoppedByBuilder) : true,
+              },
+            }
+          : prev;
       });
       return true;
     } catch (err) {
@@ -170,7 +189,17 @@ export function useChatTurnActions({
   ): Promise<boolean> => {
     const thread = overrideThread || threadsMap[threadId];
     const rawPrompt = (overridePrompt !== undefined ? overridePrompt : promptMap[threadId] || '').trim();
-    const promptText = expandCitations(rawPrompt);
+    const expandedPrompt = expandMentions(expandCitations(rawPrompt));
+    const agentMentions = mentionSpans(rawPrompt).filter((span) => span.mention.kind === 'agent');
+    const uniqueAgentMentions = Array.from(
+      new Map(agentMentions.map((span) => [span.mention.id, span.mention])).values()
+    );
+    const promptText =
+      uniqueAgentMentions.length > 0
+        ? `${expandedPrompt}\n\n[Specialist routing: ${uniqueAgentMentions
+            .map((m) => `@${m.label || m.id} (agent:${m.id})`)
+            .join(', ')}]`
+        : expandedPrompt;
     const currentAttachments =
       overrideAttachments !== undefined ? overrideAttachments : (attachmentsMap[threadId] || []);
 
@@ -217,8 +246,8 @@ export function useChatTurnActions({
       }
     }
 
-    if (promptText.length > 120_000) return false;
-    if ((!promptText && currentAttachments.length === 0) || !thread || isRunningRef.current[threadId]) return false;
+    if (expandedPrompt.length > 120_000) return false;
+    if ((!expandedPrompt && currentAttachments.length === 0) || !thread || isRunningRef.current[threadId]) return false;
 
     if (overridePrompt === undefined) {
       setPromptMap((prev) => ({ ...prev, [threadId]: '' }));
@@ -230,7 +259,7 @@ export function useChatTurnActions({
     const userItem: ChatItem = {
       id: `u-${Date.now()}`,
       kind: 'user',
-      text: promptText,
+      text: expandedPrompt,
       title: null,
       detail: null,
       status: 'completed',
@@ -243,19 +272,23 @@ export function useChatTurnActions({
     const boundThread = threadWithResolvedBinding(thread);
     const sendBinding = readThreadSendBinding(boundThread);
 
+    const protectedIds = getProtectedThreadIds ? getProtectedThreadIds(threadId) : [threadId];
+
     setThreadsMap((prev) => {
       const t = prev[threadId] || boundThread;
-      return {
-        ...prev,
+      const { [threadId]: _reordered, ...rest } = prev;
+      const updated = {
+        ...rest,
         [threadId]: {
           ...t,
           items: [...t.items, userItem],
-          status: 'running',
+          status: 'running' as const,
           stoppedByBuilder: false,
           turnFailure: undefined,
           ...readThreadSendBinding(boundThread),
         },
       };
+      return pruneThreadsMapLru(updated, protectedIds);
     });
     setIsRunning((prev) => ({ ...prev, [threadId]: true }));
 
@@ -292,13 +325,16 @@ export function useChatTurnActions({
         const existing = prev[threadId];
         const preservedQueue =
           existing?.queuedRuns !== undefined ? existing.queuedRuns : res.thread?.queuedRuns;
-        return {
-          ...prev,
-          [threadId]:
-            preservedQueue !== undefined
-              ? { ...res.thread, queuedRuns: preservedQueue }
-              : res.thread,
+        const nextThread =
+          preservedQueue !== undefined
+            ? { ...res.thread, queuedRuns: preservedQueue }
+            : res.thread;
+        const { [threadId]: _reordered, ...rest } = prev;
+        const updated = {
+          ...rest,
+          [threadId]: nextThread,
         };
+        return pruneThreadsMapLru(updated, protectedIds);
       });
       if (res.thread?.status === 'idle') {
         setIsRunning((prev) => ({ ...prev, [threadId]: false }));

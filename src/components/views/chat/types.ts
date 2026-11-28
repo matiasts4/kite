@@ -222,7 +222,7 @@ export const PROVIDER_CATALOG: Record<
     vendor: 'OpenAI',
     engineId: 'codex',
     defaultModel: '',
-    modes: ['readOnly', 'acceptEdits'],
+    modes: ['readOnly', 'acceptEdits', 'fullAccess'],
     isDynamic: true,
     models: [],
   },

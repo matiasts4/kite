@@ -23,6 +23,7 @@ import {
   isItemFailed,
   isItemRunning,
   isRawDispatchCommand,
+  isSuppressedSubagentNoiseItem,
   matchSubagentRun,
   plainPreviewLine,
 } from './subagentRunHelpers';
@@ -37,21 +38,145 @@ export interface SubagentActivityCardProps {
   enter?: boolean;
 }
 
-function useActiveInspection(): OpenRightDockSubagentDetail | null {
-  const [active, setActive] = useState<OpenRightDockSubagentDetail | null>(() =>
-    getActiveSubagentInspection(),
-  );
-  useEffect(() => {
-    const handler = (ev: Event) => {
-      setActive((ev as CustomEvent<OpenRightDockSubagentDetail | null>).detail ?? null);
-    };
-    window.addEventListener(SUBAGENT_INSPECTION_CHANGE_EVENT, handler);
-    return () => window.removeEventListener(SUBAGENT_INSPECTION_CHANGE_EVENT, handler);
-  }, []);
-  return active;
+type InspectionSubscriber = (detail: OpenRightDockSubagentDetail | null) => void;
+const inspectionSubscribers = new Set<InspectionSubscriber>();
+let globalInspectionListenerAttached = false;
+
+function handleGlobalInspectionChange(ev: Event) {
+  const detail = (ev as CustomEvent<OpenRightDockSubagentDetail | null>).detail ?? null;
+  for (const sub of inspectionSubscribers) {
+    sub(detail);
+  }
 }
 
-export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
+function subscribeInspectionStore(sub: InspectionSubscriber): () => void {
+  inspectionSubscribers.add(sub);
+  if (!globalInspectionListenerAttached && typeof window !== 'undefined') {
+    window.addEventListener(SUBAGENT_INSPECTION_CHANGE_EVENT, handleGlobalInspectionChange);
+    globalInspectionListenerAttached = true;
+  }
+  return () => {
+    inspectionSubscribers.delete(sub);
+    if (
+      inspectionSubscribers.size === 0 &&
+      globalInspectionListenerAttached &&
+      typeof window !== 'undefined'
+    ) {
+      window.removeEventListener(SUBAGENT_INSPECTION_CHANGE_EVENT, handleGlobalInspectionChange);
+      globalInspectionListenerAttached = false;
+    }
+  };
+}
+
+function computeIsInspected(
+  activeInspection: OpenRightDockSubagentDetail | null,
+  isInspectable: boolean,
+  threadId: string | undefined,
+  subagentId: string,
+  childThreadId: string | null
+): boolean {
+  return Boolean(
+    isInspectable &&
+      activeInspection &&
+      activeInspection.mode !== 'swarm' &&
+      activeInspection.threadId === threadId &&
+      ((activeInspection.subagentId && activeInspection.subagentId === subagentId) ||
+        (childThreadId && activeInspection.childThreadId === childThreadId))
+  );
+}
+
+function useIsSubagentInspected(
+  isInspectable: boolean,
+  threadId: string | undefined,
+  subagentId: string,
+  childThreadId: string | null
+): boolean {
+  const [isInspected, setIsInspected] = useState<boolean>(() =>
+    computeIsInspected(
+      getActiveSubagentInspection(),
+      isInspectable,
+      threadId,
+      subagentId,
+      childThreadId
+    )
+  );
+  useEffect(() => {
+    setIsInspected(
+      computeIsInspected(
+        getActiveSubagentInspection(),
+        isInspectable,
+        threadId,
+        subagentId,
+        childThreadId
+      )
+    );
+    return subscribeInspectionStore((detail) => {
+      const next = computeIsInspected(detail, isInspectable, threadId, subagentId, childThreadId);
+      setIsInspected((prev) => (prev === next ? prev : next));
+    });
+  }, [isInspectable, threadId, subagentId, childThreadId]);
+  return isInspected;
+}
+
+export function areSubagentRunCardsEqual(
+  a?: SubagentRun | null,
+  b?: SubagentRun | null
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return !a && !b;
+  return (
+    a.subagentId === b.subagentId &&
+    a.status === b.status &&
+    a.stepCount === b.stepCount &&
+    a.latestActivity === b.latestActivity &&
+    a.updatedAtUnixMs === b.updatedAtUnixMs &&
+    a.completedAtUnixMs === b.completedAtUnixMs &&
+    (a.childThreadId ?? null) === (b.childThreadId ?? null) &&
+    (a.transcriptUri ?? null) === (b.transcriptUri ?? null) &&
+    (a.model ?? null) === (b.model ?? null) &&
+    (a.provider ?? null) === (b.provider ?? null) &&
+    (a.role ?? null) === (b.role ?? null) &&
+    (a.workspaceMode ?? null) === (b.workspaceMode ?? null) &&
+    (a.typeName ?? null) === (b.typeName ?? null) &&
+    (a.prompt ?? null) === (b.prompt ?? null) &&
+    (a.items?.length ?? 0) === (b.items?.length ?? 0)
+  );
+}
+
+function areSubagentItemsEqual(a: ChatItem, b: ChatItem): boolean {
+  if (a === b) return true;
+  if (
+    a.id !== b.id ||
+    a.title !== b.title ||
+    a.detail !== b.detail ||
+    a.text !== b.text ||
+    a.status !== b.status ||
+    Boolean(a.streaming) !== Boolean(b.streaming) ||
+    a.createdAtUnixMs !== b.createdAtUnixMs
+  ) {
+    return false;
+  }
+  const ma = a.subagentMeta;
+  const mb = b.subagentMeta;
+  if (ma === mb) return true;
+  if (!ma || !mb) return false;
+  return (
+    ma.subagentId === mb.subagentId &&
+    ma.status === mb.status &&
+    ma.stepCount === mb.stepCount &&
+    ma.latestActivity === mb.latestActivity &&
+    ma.childThreadId === mb.childThreadId &&
+    ma.transcriptUri === mb.transcriptUri &&
+    ma.role === mb.role &&
+    ma.model === mb.model &&
+    ma.provider === mb.provider &&
+    ma.workspaceMode === mb.workspaceMode &&
+    ma.typeName === mb.typeName &&
+    ma.prompt === mb.prompt
+  );
+}
+
+const SubagentActivityCardInner: React.FC<SubagentActivityCardProps> = ({
   item,
   threadId,
   workspaceId = null,
@@ -75,15 +200,7 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
       (run?.items?.length ?? 0) > 0,
   );
   const isInspectable = Boolean(threadId) && isBacked;
-  const activeInspection = useActiveInspection();
-  const isInspected = Boolean(
-    isInspectable &&
-      activeInspection &&
-      activeInspection.mode !== 'swarm' &&
-      activeInspection.threadId === threadId &&
-      ((activeInspection.subagentId && activeInspection.subagentId === subagentId) ||
-        (childThreadId && activeInspection.childThreadId === childThreadId)),
-  );
+  const isInspected = useIsSubagentInspected(isInspectable, threadId, subagentId, childThreadId);
 
   const startedAt = run?.startedAtUnixMs || item.createdAtUnixMs || 0;
   const meaningfulRunSteps = (run?.items ?? []).filter(
@@ -187,7 +304,13 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
                 running={false}
                 startedAtUnixMs={startedAt}
                 completedAtUnixMs={run?.completedAtUnixMs}
-                durationSeconds={item.durationSeconds}
+                durationSeconds={
+                  typeof run?.completedAtUnixMs === 'number' &&
+                  startedAt > 0 &&
+                  run.completedAtUnixMs >= startedAt
+                    ? undefined
+                    : item.durationSeconds
+                }
                 format="duration"
                 idleLabel="Done"
               />
@@ -251,19 +374,160 @@ export const SubagentActivityCard: React.FC<SubagentActivityCardProps> = ({
   );
 };
 
-export const SubagentGroupRow: React.FC<{
+export const SubagentActivityCard = React.memo(
+  SubagentActivityCardInner,
+  (prev, next) =>
+    prev.threadId === next.threadId &&
+    prev.workspaceId === next.workspaceId &&
+    prev.enter === next.enter &&
+    areSubagentItemsEqual(prev.item, next.item) &&
+    areSubagentRunCardsEqual(prev.run, next.run)
+);
+SubagentActivityCard.displayName = 'SubagentActivityCard';
+
+interface SubagentGroupRowProps {
   items: ChatItem[];
   threadId?: string;
   workspaceId?: string | null;
   subagentRuns?: SubagentRun[] | null;
   enterFor?: (id: string) => boolean;
-}> = React.memo(({ items, threadId, workspaceId = null, subagentRuns = null, enterFor }) => {
+}
+
+function areSubagentGroupRowPropsEqual(
+  prev: SubagentGroupRowProps,
+  next: SubagentGroupRowProps
+): boolean {
+  if (
+    prev.threadId !== next.threadId ||
+    prev.workspaceId !== next.workspaceId ||
+    prev.items.length !== next.items.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < next.items.length; i += 1) {
+    if (!areSubagentItemsEqual(prev.items[i]!, next.items[i]!)) return false;
+  }
+  if (prev.subagentRuns === next.subagentRuns) return true;
+  const prevDeduped = dedupeSubagentRuns(prev.subagentRuns);
+  const nextDeduped = dedupeSubagentRuns(next.subagentRuns);
+  const dedupedItems = dedupeSubagentItems(next.items);
+  for (const item of dedupedItems) {
+    const prevRun = matchSubagentRun(item, prevDeduped);
+    const nextRun = matchSubagentRun(item, nextDeduped);
+    if (!areSubagentRunCardsEqual(prevRun, nextRun)) return false;
+  }
+  return true;
+}
+
+export interface SubagentFailureDisclosureProps {
+  items: ChatItem[];
+  runs?: ReadonlyArray<SubagentRun | null>;
+  threadId?: string;
+  workspaceId?: string | null;
+  enterFor?: (id: string) => boolean;
+  enter?: boolean;
+}
+
+/**
+ * Option 1 discreet non-red disclosure for genuine subagent failures in the main
+ * timeline. Starts collapsed with muted neutral chrome and expands on click to reveal
+ * calm neutral cards with click-to-inspect diagnostics when backed.
+ */
+export const SubagentFailureDisclosure: React.FC<SubagentFailureDisclosureProps> = React.memo(
+  ({ items, runs = [], threadId, workspaceId = null, enterFor, enter = false }) => {
+    const [expanded, setExpanded] = useState(false);
+    if (items.length === 0) return null;
+
+    const first = items[0]!;
+    const firstRun = runs[0] ?? null;
+    const firstRole = firstRun?.role || first.subagentMeta?.role || first.title || 'Subagent';
+    const firstStatus = (
+      firstRun?.status ||
+      first.subagentMeta?.status ||
+      first.status ||
+      'failed'
+    ).toLowerCase();
+    const isStopped = firstStatus === 'killed' || firstStatus === 'cancelled';
+
+    const label =
+      items.length === 1
+        ? `${firstRole} · ${isStopped ? 'Stopped' : 'Did not finish'}`
+        : `${items.length} subagents did not finish`;
+
+    const totalSteps = items.reduce((acc, it, idx) => {
+      const r = runs[idx];
+      const steps = Math.max(r?.stepCount ?? 0, it.subagentMeta?.stepCount ?? 0);
+      return acc + steps;
+    }, 0);
+
+    return (
+      <div
+        className={`chat-subagent-failed-disclosure ${expanded ? 'chat-subagent-failed-disclosure--expanded' : ''}`}
+        data-testid="subagent-failed-disclosure"
+      >
+        <button
+          type="button"
+          className="chat-subagent-failed-disclosure__toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <span aria-hidden="true" className="chat-subagent-failed-disclosure__icon">
+            <AgentStatusIndicator status={isStopped ? 'killed' : 'failed'} size={12} />
+          </span>
+          <span className="chat-subagent-failed-disclosure__label">{label}</span>
+          <span className="chat-subagent-card__spacer" />
+          {totalSteps > 0 ? (
+            <span className="chat-subagent-failed-disclosure__meta">
+              {totalSteps} {totalSteps === 1 ? 'step' : 'steps'}
+            </span>
+          ) : null}
+          <span className="chat-subagent-failed-disclosure__meta">
+            {expanded ? 'Hide' : 'Details'}
+          </span>
+          <span
+            aria-hidden="true"
+            className={`chat-work-entry__chevron ${expanded ? 'chat-work-entry__chevron--open' : ''}`}
+          >
+            <ChevronRightIcon size={12} />
+          </span>
+        </button>
+
+        {expanded && (
+          <div className="chat-subagent-failed-disclosure__items">
+            {items.map((item, idx) => (
+              <SubagentActivityCard
+                key={item.id}
+                item={item}
+                threadId={threadId}
+                workspaceId={workspaceId}
+                run={runs[idx] ?? null}
+                enter={enterFor ? enterFor(item.id) : enter}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  },
+);
+SubagentFailureDisclosure.displayName = 'SubagentFailureDisclosure';
+
+export const SubagentGroupRow: React.FC<SubagentGroupRowProps> = React.memo(
+  ({ items, threadId, workspaceId = null, subagentRuns = null, enterFor }) => {
   const dedupedRuns = dedupeSubagentRuns(subagentRuns);
   const dedupedItems = dedupeSubagentItems(items);
-  const resolvedRuns = dedupedItems.map((it) => matchSubagentRun(it, dedupedRuns));
-  const runningCount = dedupedItems.filter((it, idx) => isItemRunning(it, resolvedRuns[idx])).length;
-  const blockedCount = dedupedItems.filter((it, idx) => isItemBlocked(it, resolvedRuns[idx])).length;
-  const failedCount = dedupedItems.filter((it, idx) => isItemFailed(it, resolvedRuns[idx])).length;
+  const allResolvedRuns = dedupedItems.map((it) => matchSubagentRun(it, dedupedRuns));
+  const visibleEntries = dedupedItems
+    .map((it, idx) => ({ item: it, run: allResolvedRuns[idx] ?? null }))
+    .filter(
+      ({ item, run }) =>
+        !isSuppressedSubagentNoiseItem(item, dedupedItems, run, allResolvedRuns),
+    );
+  const visibleItems = visibleEntries.map((e) => e.item);
+  const resolvedRuns = visibleEntries.map((e) => e.run);
+  const runningCount = visibleItems.filter((it, idx) => isItemRunning(it, resolvedRuns[idx])).length;
+  const blockedCount = visibleItems.filter((it, idx) => isItemBlocked(it, resolvedRuns[idx])).length;
+  const failedCount = visibleItems.filter((it, idx) => isItemFailed(it, resolvedRuns[idx])).length;
   const anyActiveOrBlocked = runningCount > 0 || blockedCount > 0;
   const anyRunning = runningCount > 0;
   const [expanded, setExpanded] = useState(anyActiveOrBlocked);
@@ -274,8 +538,24 @@ export const SubagentGroupRow: React.FC<{
     }
   }, [anyActiveOrBlocked]);
 
-  if (dedupedItems.length === 1) {
-    const single = dedupedItems[0];
+  if (visibleItems.length === 0) {
+    return null;
+  }
+
+  if (failedCount === visibleItems.length) {
+    return (
+      <SubagentFailureDisclosure
+        items={visibleItems}
+        runs={resolvedRuns}
+        threadId={threadId}
+        workspaceId={workspaceId}
+        enterFor={enterFor}
+      />
+    );
+  }
+
+  if (visibleItems.length === 1) {
+    const single = visibleItems[0]!;
     return (
       <SubagentActivityCard
         item={single}
@@ -289,7 +569,7 @@ export const SubagentGroupRow: React.FC<{
 
   const title = anyRunning
     ? `${runningCount} subagent${runningCount === 1 ? '' : 's'} running`
-    : `Started ${dedupedItems.length} subagents`;
+    : `Started ${visibleItems.length} subagents`;
 
   return (
     <div
@@ -323,11 +603,11 @@ export const SubagentGroupRow: React.FC<{
         </span>
         {failedCount > 0 ? (
           <span className="chat-subagent-card__state chat-subagent-card__state--failed">
-            {failedCount} failed
+            {failedCount} did not finish
           </span>
         ) : null}
         <span className="chat-subagent-card__spacer" />
-        <span className="chat-subagent-card__steps">{dedupedItems.length} total</span>
+        <span className="chat-subagent-card__steps">{visibleItems.length} total</span>
         {anyRunning ? (
           <AgentStatusIndicator status="running" size={13} />
         ) : blockedCount > 0 ? (
@@ -343,7 +623,7 @@ export const SubagentGroupRow: React.FC<{
 
       {expanded && (
         <div className="chat-subagent-group__items">
-          {dedupedItems.map((item, idx) => (
+          {visibleItems.map((item, idx) => (
             <SubagentActivityCard
               key={item.id}
               item={item}
@@ -357,4 +637,4 @@ export const SubagentGroupRow: React.FC<{
       )}
     </div>
   );
-});
+}, areSubagentGroupRowPropsEqual);

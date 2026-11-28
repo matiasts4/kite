@@ -144,4 +144,108 @@ describe('VoiceModeFooterBar — Component Unit Tests', () => {
     fireEvent.click(sendBtn);
     expect(onSend).toHaveBeenCalledTimes(1);
   });
+
+  it('shows truthful confirmation, hands-free reply, and mic-preparing states (S1.3, S3.4)', () => {
+    voiceSessionStore.startSession('thread-test-1', 'thread');
+    act(() => {
+      voiceSessionStore.setVoiceRuntimeState({ isListening: true });
+    });
+
+    render(<VoiceModeFooterBar threadId="thread-test-1" hasDraftText={false} />);
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Escuchando en vivo');
+
+    act(() => {
+      voiceSessionStore.setHandsFreeReplyWindow(12_000);
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Esperando tu respuesta…');
+
+    act(() => {
+      voiceSessionStore.setDraftProposal('thread-test-1', {
+        proposalId: 'prop-1',
+        status: 'awaiting_confirmation',
+        targetKind: 'subagent',
+        title: 'Auditar ODD',
+        taskBrief: 'Revisar el roadmap',
+        revision: 1,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Esperando tu confirmación…');
+
+    act(() => {
+      voiceSessionStore.setVoiceRuntimeState({ isListening: false });
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Preparando micrófono…');
+
+    act(() => {
+      voiceSessionStore.clearDraftProposal('thread-test-1');
+      voiceSessionStore.setHandsFreeReplyWindow(0);
+      voiceSessionStore.setVoiceRuntimeState({ isListening: true });
+      voiceSessionStore.setActiveTurnStage('post_tts_guard');
+    });
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Preparando micrófono…');
+
+    act(() => {
+      voiceSessionStore.setActiveTurnStage(undefined, undefined);
+    });
+  });
+
+  it('displays mic flatline warning and Reconectar control when micFlatlined is true (T7, S4.1)', () => {
+    voiceSessionStore.startSession('thread-test-1', 'thread');
+    const onReconnectMic = vi.fn();
+
+    const { rerender } = render(
+      <VoiceModeFooterBar
+        threadId="thread-test-1"
+        micFlatlined={true}
+        onReconnectMic={onReconnectMic}
+      />
+    );
+
+    const statusPill = screen.getByTestId('voice-live-status-pill');
+    expect(statusPill).toHaveTextContent('Sin señal de micrófono');
+    expect(statusPill).toHaveAttribute('data-tone', 'paused');
+
+    const reconnectBtn = screen.getByTestId('voice-reconnect-mic-btn');
+    expect(reconnectBtn).toHaveTextContent('Reconectar');
+    expect(reconnectBtn).toHaveClass('h-8', 'rounded-control');
+
+    fireEvent.click(reconnectBtn);
+    expect(onReconnectMic).toHaveBeenCalledTimes(1);
+
+    // Without onReconnectMic, warning stays visible without the button
+    rerender(<VoiceModeFooterBar threadId="thread-test-1" micFlatlined={true} />);
+    expect(screen.getByTestId('voice-live-status-pill')).toHaveTextContent('Sin señal de micrófono');
+    expect(screen.queryByTestId('voice-reconnect-mic-btn')).not.toBeInTheDocument();
+  });
+
+  it('renders playback speed badge/button and triggers onCyclePlaybackSpeed on click (T7, S4.1)', () => {
+    voiceSessionStore.startSession('thread-test-1', 'thread');
+    const onCyclePlaybackSpeed = vi.fn();
+
+    const { rerender } = render(
+      <VoiceModeFooterBar
+        threadId="thread-test-1"
+        playbackSpeed={1}
+        onCyclePlaybackSpeed={onCyclePlaybackSpeed}
+      />
+    );
+
+    const speedBtn = screen.getByTestId('voice-playback-speed-btn');
+    expect(speedBtn).toHaveTextContent('1x');
+    expect(speedBtn).toHaveClass('h-8', 'rounded-control');
+
+    fireEvent.click(speedBtn);
+    expect(onCyclePlaybackSpeed).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <VoiceModeFooterBar
+        threadId="thread-test-1"
+        playbackSpeed={1.25}
+        onCyclePlaybackSpeed={onCyclePlaybackSpeed}
+      />
+    );
+    expect(screen.getByTestId('voice-playback-speed-btn')).toHaveTextContent('1.25x');
+  });
 });

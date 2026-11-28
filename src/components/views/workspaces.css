@@ -107,10 +107,10 @@
 
 .workspaces-search-input {
   width: 100%;
-  height: 28px;
-  background: var(--glass-elevated-bg, var(--composer, #1c1c1c));
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-chip);
+  height: var(--vl-control-md, 32px);
+  background: var(--glass-field-bg, var(--composer, #1c1c1c));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
+  border-radius: var(--control-radius, 8px);
   padding: 0 10px 0 28px;
   font-size: 12px;
   color: var(--text-primary);
@@ -125,17 +125,17 @@
 .workspaces-filter-tabs {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  background: var(--chip-fill);
-  border-radius: var(--radius-chip);
+  gap: 2px;
+  background: var(--glass-field-bg, var(--chip-fill));
+  border-radius: var(--control-radius, 8px);
   padding: 2px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
 }
 
 .workspaces-filter-btn {
-  height: 22px;
-  padding: 0 8px;
-  border-radius: calc(var(--radius-chip) - 1px);
+  height: var(--vl-control-sm, 26px);
+  padding: 0 10px;
+  border-radius: var(--vl-radius-sm, 6px);
   font-size: 11px;
   font-weight: var(--weight-medium);
   color: var(--text-secondary);
@@ -170,8 +170,8 @@
 
 .workspace-card {
   background: var(--glass-elevated-bg, var(--pane, #141414));
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-card);
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
+  border-radius: var(--card-radius, var(--radius-card));
   padding: 14px;
   display: flex;
   flex-direction: column;
@@ -183,7 +183,7 @@
 }
 
 .workspace-card:hover {
-  border-color: var(--control-stroke-hover, var(--glass-border));
+  border-color: var(--glass-card-border-hover, var(--control-stroke-hover, var(--glass-card-border)));
   background: color-mix(in srgb, var(--glass-elevated-bg, var(--pane, #1a1a1c)) 88%, var(--text-primary, #ffffff) 12%);
 }
 
@@ -203,9 +203,9 @@
 .workspace-card__icon-box {
   width: 34px;
   height: 34px;
-  border-radius: var(--radius-row);
-  background: rgba(92, 143, 255, 0.1);
-  border: 1px solid rgba(92, 143, 255, 0.22);
+  border-radius: var(--control-radius, var(--radius-row));
+  background: var(--accent-tint, rgba(92, 143, 255, 0.1));
+  border: 1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.22));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -234,10 +234,10 @@
 }
 
 .workspace-card__rename-input {
-  height: 24px;
-  background: var(--glass-elevated-bg, var(--composer));
+  height: var(--vl-control-sm, 26px);
+  background: var(--glass-field-bg, var(--composer));
   border: 1px solid var(--accent);
-  border-radius: var(--radius-chip);
+  border-radius: var(--vl-radius-sm, 6px);
   padding: 0 6px;
   font-size: 12px;
   color: var(--text-primary);
@@ -295,9 +295,9 @@
 }
 
 .action-icon-btn {
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-chip);
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  border-radius: var(--vl-radius-sm, 6px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -347,10 +347,10 @@
 .copied-banner {
   margin-bottom: 12px;
   padding: 8px 12px;
-  background: rgba(6, 78, 59, 0.4);
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  border-radius: var(--radius-chip);
-  color: #6ee7b7;
+  background: color-mix(in srgb, var(--status-running, #10b981) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--status-running, #10b981) 30%, transparent);
+  border-radius: var(--control-radius, 8px);
+  color: var(--status-running, #10b981);
   font-size: 11px;
   display: flex;
   align-items: center;
@@ -358,9 +358,9 @@
 }
 
 .copied-banner code {
-  background: rgba(6, 95, 70, 0.6);
+  background: color-mix(in srgb, var(--status-running, #10b981) 18%, transparent);
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: var(--vl-radius-xs, 4px);
   font-family: var(--font-mono);
 }
 
@@ -645,9 +645,9 @@
   align-items: center;
   justify-content: flex-start;
   padding: 6px 10px;
-  border-radius: 5px;
+  border-radius: var(--vl-radius-sm, 6px);
   cursor: pointer;
-  color: var(--text-primary, #ffffff);
+  color: var(--text-primary);
   font-size: 12px;
   user-select: none;
   gap: 8px;

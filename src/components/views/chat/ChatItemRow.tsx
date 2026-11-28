@@ -12,7 +12,17 @@ import {
   PencilIcon,
 } from './ChatIcons';
 import type { ChatItem, SubagentRun, SwarmState } from '../../../types';
-import { dedupeSubagentRuns, SubagentActivityCard } from './SubagentActivityCard';
+import {
+  areSubagentRunCardsEqual,
+  dedupeSubagentRuns,
+  SubagentActivityCard,
+  SubagentFailureDisclosure,
+} from './SubagentActivityCard';
+import {
+  isHookBlockedInvokeNoise,
+  isItemFailed,
+  matchSubagentRun,
+} from './subagentRunHelpers';
 import { SwarmActivityCard } from './SwarmActivityCard';
 import { ActivityGlyph } from './activityGlyph';
 import { AttachmentPreviewThumb } from './attachmentPreview';
@@ -41,6 +51,7 @@ import {
 import { ChatWorkEntry, ChatWorkGroup } from './ChatWorkLog';
 import { AssistantCitationChip } from './ChatCitationChip';
 import { useSmoothStreamingText } from './useSmoothStreamingText';
+import { McpAppFrame } from '../plugins/McpAppFrame';
 
 export {
   groupTranscriptRows,
@@ -54,6 +65,118 @@ export {
   ChatWorkGroup,
   AssistantCitationChip,
 };
+
+export interface ChatItemMcpAppMeta {
+  serverName: string;
+  resourceUri: string;
+  toolName?: string;
+  input?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  title?: string;
+}
+
+export type ChatItemWithMcpApp = ChatItem & {
+  mcpApp?: ChatItemMcpAppMeta | null;
+  _meta?: Record<string, unknown> | null;
+  meta?: Record<string, unknown> | null;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function firstNonEmptyString(...candidates: unknown[]): string | null {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string') {
+      const trimmed = candidate.trim();
+      if (trimmed.length > 0) return trimmed;
+    }
+  }
+  return null;
+}
+
+function extractServerFromToolName(raw: string | null | undefined): string | null {
+  const clean = (raw ?? '').trim();
+  if (!clean) return null;
+  const doubleMatch = /^mcp__(.+?)__(.+)$/i.exec(clean);
+  if (doubleMatch && doubleMatch[1].trim()) {
+    return doubleMatch[1].trim();
+  }
+  const dotMatch = /^([a-z0-9_-]+)\s*·\s*(.+)$/i.exec(clean);
+  if (dotMatch && dotMatch[1].toLowerCase() !== 'plan') {
+    return dotMatch[1].trim();
+  }
+  return null;
+}
+
+function tryParseJsonRecord(raw: string | null | undefined): Record<string, unknown> | undefined {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return asRecord(parsed) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveInlineMcpApp(item: ChatItemWithMcpApp): ChatItemMcpAppMeta | null {
+  if (item.kind !== 'tool' && item.kind !== 'command') return null;
+
+  const explicit = item.mcpApp;
+  if (explicit && typeof explicit === 'object') {
+    const resourceUri = typeof explicit.resourceUri === 'string' ? explicit.resourceUri.trim() : '';
+    const serverName =
+      firstNonEmptyString(
+        explicit.serverName,
+        item.serverName,
+        extractServerFromToolName(item.toolName || item.title),
+      ) ?? '';
+    if (resourceUri.toLowerCase().startsWith('ui://') && serverName.length > 0) {
+      return {
+        serverName,
+        resourceUri,
+        toolName: explicit.toolName ?? item.toolName ?? undefined,
+        input: explicit.input,
+        result: explicit.result,
+        title: explicit.title,
+      };
+    }
+  }
+
+  const metaObj = asRecord(item._meta) ?? asRecord(item.meta);
+  if (!metaObj) return null;
+  const uiObj = asRecord(metaObj.ui);
+  const rawUri = firstNonEmptyString(
+    uiObj?.resourceUri,
+    uiObj?.resource_uri,
+    metaObj['ui/resourceUri'],
+  );
+  if (!rawUri || !rawUri.toLowerCase().startsWith('ui://')) return null;
+
+  const serverName =
+    firstNonEmptyString(item.serverName, extractServerFromToolName(item.toolName || item.title)) ??
+    '';
+  if (!serverName) return null;
+
+  const derivedResult =
+    !item.streaming && item.text.trim().length > 0
+      ? {
+          content: [{ type: 'text', text: item.text }],
+          isError: item.status === 'failed',
+        }
+      : undefined;
+
+  return {
+    serverName,
+    resourceUri: rawUri,
+    toolName: item.toolName ?? undefined,
+    input: tryParseJsonRecord(item.detail),
+    result: derivedResult,
+    title: firstNonEmptyString(uiObj?.title) ?? undefined,
+  };
+}
 
 function restoreErrorText(error: unknown): string {
   if (typeof error === 'string' && error.trim()) return error;
@@ -70,10 +193,11 @@ function restoreCommandMissing(text: string): boolean {
 }
 
 export interface ChatItemRowProps {
-  item: ChatItem;
+  item: ChatItemWithMcpApp;
   threadId?: string;
   workspaceId?: string | null;
   subagentRuns?: SubagentRun[] | null;
+  matchedSubagentRun?: SubagentRun | null;
   swarmState?: SwarmState | null;
   /** True when this row is new and should animate in. */
   enter?: boolean;
@@ -90,6 +214,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
   threadId,
   workspaceId = null,
   subagentRuns = null,
+  matchedSubagentRun,
   swarmState = null,
   enter = false,
   onEditUserMessage,
@@ -134,6 +259,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
   const displayedAssistantText = useSmoothStreamingText(
     cleanAssistantText,
     item.kind === 'assistant' && Boolean(item.streaming) && !reduceMotion,
+    { animateInitial: Boolean(enter) },
   );
 
   // User row: no "You" or timestamp header
@@ -431,18 +557,24 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
   // Tool / Command Work Row (rendered individually if not grouped)
   if (item.kind === 'tool' || item.kind === 'command') {
     if (item.toolKind === 'subagent' || item.subagentMeta) {
-      const dedupedRuns = dedupeSubagentRuns(subagentRuns);
+      if (isHookBlockedInvokeNoise(item)) {
+        return null;
+      }
       const matchedRun =
-        dedupedRuns.find(
-          (r) =>
-            (item.subagentMeta?.subagentId && r.subagentId === item.subagentMeta.subagentId) ||
-            (item.subagentMeta?.childThreadId && r.childThreadId === item.subagentMeta.childThreadId) ||
-            r.parentToolCallId === item.id ||
-            (item.subagentMeta?.role &&
-              r.role &&
-              r.role.trim().toLowerCase() === item.subagentMeta.role.trim().toLowerCase() &&
-              dedupedRuns.length === 1),
-        ) ?? null;
+        matchedSubagentRun !== undefined
+          ? matchedSubagentRun
+          : matchSubagentRun(item, dedupeSubagentRuns(subagentRuns));
+      if (isItemFailed(item, matchedRun)) {
+        return (
+          <SubagentFailureDisclosure
+            items={[item]}
+            runs={[matchedRun]}
+            threadId={threadId}
+            workspaceId={workspaceId}
+            enter={enter}
+          />
+        );
+      }
       return (
         <SubagentActivityCard
           item={item}
@@ -462,6 +594,26 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
           swarmState={swarmState}
           enter={enter}
         />
+      );
+    }
+    const inlineMcpApp = resolveInlineMcpApp(item);
+    if (inlineMcpApp) {
+      return (
+        <div className="chat-work-entry-app">
+          <ChatWorkEntry item={item} running={item.streaming} enter={enter} />
+          <McpAppFrame
+            key={`chat-${item.id}`}
+            mode="inline"
+            serverName={inlineMcpApp.serverName}
+            resourceUri={inlineMcpApp.resourceUri}
+            toolName={inlineMcpApp.toolName}
+            title={inlineMcpApp.title ?? item.title ?? inlineMcpApp.toolName ?? 'Extension App'}
+            workspaceId={workspaceId}
+            toolInput={inlineMcpApp.input ?? null}
+            toolResult={inlineMcpApp.result ?? null}
+            instanceId={`chat-${item.id}`}
+          />
+        </div>
       );
     }
     return <ChatWorkEntry item={item} running={item.streaming} enter={enter} />;
@@ -501,7 +653,7 @@ const ChatItemRowInner: React.FC<ChatItemRowProps> = ({
   return null;
 };
 
-function areChatItemsVisuallyEqual(prev: ChatItem, next: ChatItem): boolean {
+function areChatItemsVisuallyEqual(prev: ChatItemWithMcpApp, next: ChatItemWithMcpApp): boolean {
   if (prev === next) return true;
   if (
     prev.id !== next.id ||
@@ -556,6 +708,20 @@ function areChatItemsVisuallyEqual(prev: ChatItem, next: ChatItem): boolean {
     }
   }
   if (prev.swarmMeta !== next.swarmMeta) return false;
+  if (prev.mcpApp !== next.mcpApp) {
+    if (!prev.mcpApp || !next.mcpApp) return false;
+    if (
+      prev.mcpApp.serverName !== next.mcpApp.serverName ||
+      prev.mcpApp.resourceUri !== next.mcpApp.resourceUri ||
+      prev.mcpApp.toolName !== next.mcpApp.toolName ||
+      prev.mcpApp.title !== next.mcpApp.title ||
+      prev.mcpApp.input !== next.mcpApp.input ||
+      prev.mcpApp.result !== next.mcpApp.result
+    ) {
+      return false;
+    }
+  }
+  if (prev._meta !== next._meta || prev.meta !== next.meta) return false;
   return true;
 }
 
@@ -581,7 +747,17 @@ function areChatItemRowPropsEqual(prev: ChatItemRowProps, next: ChatItemRowProps
   const isTool = next.item.kind === 'tool' || next.item.kind === 'command';
   const usesSubagents = isTool && (next.item.toolKind === 'subagent' || Boolean(next.item.subagentMeta));
   const usesSwarm = isTool && (next.item.toolKind === 'swarm' || Boolean(next.item.swarmMeta));
-  if (usesSubagents && prev.subagentRuns !== next.subagentRuns) return false;
+  if (usesSubagents) {
+    const prevRun =
+      prev.matchedSubagentRun !== undefined
+        ? prev.matchedSubagentRun
+        : matchSubagentRun(prev.item, dedupeSubagentRuns(prev.subagentRuns));
+    const nextRun =
+      next.matchedSubagentRun !== undefined
+        ? next.matchedSubagentRun
+        : matchSubagentRun(next.item, dedupeSubagentRuns(next.subagentRuns));
+    if (!areSubagentRunCardsEqual(prevRun, nextRun)) return false;
+  }
   if (usesSwarm && prev.swarmState !== next.swarmState) return false;
   return true;
 }

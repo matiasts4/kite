@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SubagentInspectorView } from './SubagentInspectorView';
 import { getActiveSubagentInspection } from '../../../lib/subagentNav';
 
@@ -23,6 +23,27 @@ const respondChatApprovalMock = vi.fn();
 const swarmPostFromUiMock = vi.fn();
 const swarmSwitchWorkerModelMock = vi.fn();
 const swarmKillWorkerFromUiMock = vi.fn();
+
+const tauriListeners = vi.hoisted(
+  () => new Map<string, Set<(event: { payload: unknown }) => void>>()
+);
+
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+    const handlers = tauriListeners.get(name) ?? new Set();
+    handlers.add(handler);
+    tauriListeners.set(name, handlers);
+    return () => {
+      handlers.delete(handler);
+    };
+  }),
+}));
+
+function emitTauriEvent(name: string, payload: unknown) {
+  act(() => {
+    for (const handler of tauriListeners.get(name) ?? []) handler({ payload });
+  });
+}
 
 vi.mock('../../../lib/ipc/chat', () => ({
   loadChatThread: (...args: unknown[]) => loadChatThreadMock(...args),
@@ -168,6 +189,11 @@ function makeThread(overrides: Partial<ExtendedChatThread> = {}): ExtendedChatTh
 }
 
 describe('SubagentInspectorView', () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    tauriListeners.clear();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     getThreadSubagentDetailMock.mockResolvedValue(null);
@@ -765,7 +791,71 @@ describe('SubagentInspectorView', () => {
     expect(screen.getByTestId('global-subagents-view')).toBeInTheDocument();
   });
 
-  it('displays parentModelLabel when subagent model is inherit and refreshes on kite:threads-changed', async () => {
+  it('scopes All Threads to the current session by default, allows toggling previous history, and keeps This Thread populated', async () => {
+    const olderThread = makeThread({ id: 'thread-older-1', title: 'Previous Session Work', swarmState: null });
+    loadChatThreadMock.mockResolvedValue(olderThread);
+    listAllSubagentRunsMock.mockImplementation(async (params?: { includeHistory?: boolean }) => {
+      if (params?.includeHistory) {
+        return {
+          totalCount: 1,
+          activeCount: 0,
+          waitingCount: 0,
+          historyCount: 0,
+          runs: [
+            {
+              threadId: 'thread-older-1',
+              threadTitle: 'Previous Session Work',
+              workspaceId: 'ws-1',
+              parentProvider: 'claude',
+              parentModel: 'claude-opus-4-6',
+              hasPendingApproval: false,
+              run: {
+                ...olderThread.subagentRuns![0],
+                status: 'completed',
+                items: [],
+              },
+            },
+          ],
+        };
+      }
+      return {
+        runs: [],
+        totalCount: 0,
+        activeCount: 0,
+        waitingCount: 0,
+        historyCount: 3,
+      };
+    });
+
+    render(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-older-1" />);
+
+    // Opened historical thread still renders its own subagents in This Thread.
+    expect(await screen.findByText('Codebase Researcher')).toBeInTheDocument();
+    expect(listAllSubagentRunsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 120, includeHistory: false }),
+    );
+
+    // Switching to All Threads defaults to current app session (empty) with an on-demand history toggle.
+    fireEvent.click(screen.getByRole('tab', { name: /All Threads/i }));
+    expect(await screen.findByText('No subagents in this session yet')).toBeInTheDocument();
+    const showPrevBtn = await screen.findByRole('button', { name: /Show previous sessions \(3\)/i });
+    fireEvent.click(showPrevBtn);
+
+    await waitFor(() => {
+      expect(listAllSubagentRunsMock).toHaveBeenCalledWith(
+        expect.objectContaining({ limit: 120, includeHistory: true }),
+      );
+      expect(screen.getByText('Previous Session Work')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: /This session/i }));
+    await waitFor(() => {
+      expect(screen.getByText('No subagents in this session yet')).toBeInTheDocument();
+    });
+  });
+
+  it('displays parentModelLabel when subagent model is inherit and applies live subagent events without reloading the thread', async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     const initialThread = makeThread({
       id: 'thread-inherit',
       status: 'running',
@@ -788,43 +878,44 @@ describe('SubagentInspectorView', () => {
         },
       ],
     });
-    const settledThread = makeThread({
-      id: 'thread-inherit',
-      status: 'idle',
-      subagentRuns: [
-        {
-          ...initialThread.subagentRuns![0],
+    const settledRun = {
+      ...initialThread.subagentRuns![0],
+      status: 'completed',
+      stepCount: 1,
+      completedAtUnixMs: Date.now(),
+      items: [
+        makeItem({
+          id: 'asst-done',
+          kind: 'assistant',
+          text: 'Audit finished cleanly.',
           status: 'completed',
-          stepCount: 1,
-          completedAtUnixMs: Date.now(),
-          items: [
-            makeItem({
-              id: 'asst-done',
-              kind: 'assistant',
-              text: 'Audit finished cleanly.',
-              status: 'completed',
-            }),
-          ],
-        },
+        }),
       ],
-    });
+    };
 
-    loadChatThreadMock
-      .mockResolvedValueOnce(initialThread)
-      .mockResolvedValueOnce(settledThread);
+    loadChatThreadMock.mockResolvedValueOnce(initialThread);
 
     render(<SubagentInspectorView workspaceId="ws-1" selectedThreadId="thread-inherit" />);
 
     const hierarchy = await screen.findByTestId('subagent-model-hierarchy');
     expect(hierarchy).toHaveTextContent('Main: Opus 4.6 ➔ Subagent: Opus 4.6');
     expect(hierarchy.textContent).not.toMatch(/inherit/i);
+    await waitFor(() => expect(tauriListeners.get('chat-subagent-event')?.size).toBeGreaterThan(0));
 
-    window.dispatchEvent(new Event('kite:threads-changed'));
+    emitTauriEvent('chat-subagent-event', {
+      kind: 'subagentRunUpdated',
+      threadId: 'thread-inherit',
+      subagentId: 'sub-inh-1',
+      run: settledRun,
+    });
+    act(() => {
+      window.dispatchEvent(new Event('kite:threads-changed'));
+    });
 
     await waitFor(() => {
       expect(screen.getByText(/Audit finished cleanly\./i)).toBeInTheDocument();
     });
-    expect(loadChatThreadMock).toHaveBeenCalledTimes(2);
+    expect(loadChatThreadMock).toHaveBeenCalledTimes(1);
   });
 
   it('renders SubagentRoleIcon and 4-dot orbital spinner without literal Working text in cards and inspector header', async () => {
@@ -1068,6 +1159,7 @@ describe('SubagentInspectorView', () => {
       ],
     });
     loadChatThreadMock.mockResolvedValueOnce(initialThread);
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
 
     const { container } = render(
       <SubagentInspectorView
@@ -1084,6 +1176,7 @@ describe('SubagentInspectorView', () => {
     await waitFor(() => {
       expect(screen.getByText('Initial chunk.')).toBeInTheDocument();
     });
+    await waitFor(() => expect(tauriListeners.get('chat-subagent-event')?.size).toBeGreaterThan(0));
 
     const stream = container.querySelector('.subagent-inspector__stream') as HTMLDivElement;
     let scrollHeight = 500;
@@ -1101,24 +1194,23 @@ describe('SubagentInspectorView', () => {
 
     // Simulate the single existing assistant step streaming more lines (stepCount stays 1)
     scrollHeight = 860;
-    loadChatThreadMock.mockResolvedValueOnce({
-      ...initialThread,
-      subagentRuns: [
-        {
-          ...initialThread.subagentRuns![0],
-          updatedAtUnixMs: Date.now(),
-          items: [
-            makeItem({
-              id: 'sub-msg-1',
-              kind: 'assistant',
-              text: 'Initial chunk.\n\nAppended streaming paragraph with findings.',
-              streaming: true,
-            }),
-          ],
-        },
+    emitTauriEvent('chat-subagent-event', {
+      kind: 'subagentStepsUpdated',
+      threadId: 'thread-main-1',
+      subagentId: 'sub-stream-1',
+      status: 'running',
+      stepCount: 1,
+      updatedAtUnixMs: Date.now(),
+      items: [
+        makeItem({
+          id: 'sub-msg-1',
+          kind: 'assistant',
+          text: 'Initial chunk.\n\nAppended streaming paragraph with findings.',
+          streaming: true,
+        }),
       ],
     });
-    window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+    expect(loadChatThreadMock).toHaveBeenCalledTimes(1);
 
     await waitFor(() => {
       expect(screen.getByText(/Appended streaming paragraph/)).toBeInTheDocument();

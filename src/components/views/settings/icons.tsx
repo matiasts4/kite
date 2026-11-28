@@ -851,3 +851,22 @@ export const MessageSquareIcon: React.FC<IconProps> = ({ size = 14, strokeWidth 
     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
   </svg>
 );
+
+export const SmartphoneIcon: React.FC<IconProps> = ({ size = 14, strokeWidth = 1.75, className = '', style }) => (
+  <svg
+    aria-hidden="true"
+    className={className}
+    fill="none"
+    height={size}
+    stroke="currentColor"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    strokeWidth={strokeWidth}
+    style={style}
+    viewBox="0 0 24 24"
+    width={size}
+  >
+    <rect width="14" height="20" x="5" y="2" rx="2" ry="2" />
+    <path d="M12 18h.01" />
+  </svg>
+);

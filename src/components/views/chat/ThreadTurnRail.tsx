@@ -41,22 +41,66 @@ export function formatTurnTimestamp(unixMs: number | null | undefined): string {
   }
 }
 
+interface CachedSettledTurn {
+  userItem: ChatItem;
+  userText: string;
+  sliceLen: number;
+  lastItem: ChatItem | undefined;
+  lastText: string | undefined;
+  lastStatus: string | null | undefined;
+  runningFlag: boolean;
+  entry: ThreadTurnEntry;
+}
+
+const MAX_CACHED_SETTLED_TURNS = 512;
+const settledTurnCache = new Map<string, CachedSettledTurn>();
+
 export function buildThreadTurns(items: ChatItem[], running = false): ThreadTurnEntry[] {
-  const humanTurnCount = items.filter((it) => it.kind === 'user' && !isInternalDispatchItem(it)).length;
-  const turns: ThreadTurnEntry[] = [];
+  if (settledTurnCache.size > MAX_CACHED_SETTLED_TURNS) {
+    settledTurnCache.clear();
+  }
+  const userIndices: number[] = [];
   for (let i = 0; i < items.length; i += 1) {
     const item = items[i];
-    if (!item || item.kind !== 'user' || isInternalDispatchItem(item)) continue;
+    if (item && item.kind === 'user' && !isInternalDispatchItem(item)) {
+      userIndices.push(i);
+    }
+  }
+  const humanTurnCount = userIndices.length;
+  const turns: ThreadTurnEntry[] = [];
+  for (let tIdx = 0; tIdx < humanTurnCount; tIdx += 1) {
+    const i = userIndices[tIdx]!;
+    const endIdx = tIdx + 1 < humanTurnCount ? userIndices[tIdx + 1]! : items.length;
+    const item = items[i]!;
+    const isLastTurn = tIdx === humanTurnCount - 1;
+    const turnRunning = isLastTurn && running;
+    const sliceLen = endIdx - i;
+    const lastItem = endIdx > i + 1 ? items[endIdx - 1] : undefined;
+    const cached = settledTurnCache.get(item.id);
+    if (
+      cached &&
+      cached.userItem === item &&
+      cached.userText === (item.text || '') &&
+      cached.sliceLen === sliceLen &&
+      cached.lastItem === lastItem &&
+      cached.lastText === lastItem?.text &&
+      cached.lastStatus === lastItem?.status &&
+      cached.runningFlag === turnRunning
+    ) {
+      turns.push(
+        cached.entry.index === tIdx ? cached.entry : { ...cached.entry, index: tIdx }
+      );
+      continue;
+    }
 
     const rawPrompt = stripMarkdown(expandCitations(item.text || ''));
     const promptTitle = rawPrompt || (item.attachments?.length ? 'Attached files' : 'Message');
 
     const assistantParts: string[] = [];
     const workItems: ChatItem[] = [];
-    for (let j = i + 1; j < items.length; j += 1) {
+    for (let j = i + 1; j < endIdx; j += 1) {
       const next = items[j];
       if (!next) continue;
-      if (next.kind === 'user' && !isInternalDispatchItem(next)) break;
       if (next.kind === 'assistant') {
         const visible = visibleAssistantText(next.text ?? '').trim();
         if (visible) assistantParts.push(visible);
@@ -66,7 +110,6 @@ export function buildThreadTurns(items: ChatItem[], running = false): ThreadTurn
     }
 
     const joinedAssistant = stripMarkdown(assistantParts.join(' '));
-    const isLastTurn = turns.length === humanTurnCount - 1;
     let assistantPreview = joinedAssistant;
     if (!assistantPreview) {
       if (workItems.length > 0) {
@@ -74,20 +117,31 @@ export function buildThreadTurns(items: ChatItem[], running = false): ThreadTurn
         assistantPreview =
           summarizeWorkBurst(workItems) ||
           (lastWork ? activityTraceLabel(lastWork) : '') ||
-          (isLastTurn && running ? 'Working…' : 'Completed actions');
+          (turnRunning ? 'Working…' : 'Completed actions');
       } else {
-        assistantPreview = isLastTurn && running ? 'Working…' : 'No response yet';
+        assistantPreview = turnRunning ? 'Working…' : 'No response yet';
       }
     }
 
-    turns.push({
+    const entry: ThreadTurnEntry = {
       userItemId: item.id,
-      index: turns.length,
+      index: tIdx,
       promptTitle,
       assistantPreview,
       createdAtUnixMs: item.createdAtUnixMs ?? 0,
       timeLabel: formatTurnTimestamp(item.createdAtUnixMs),
+    };
+    settledTurnCache.set(item.id, {
+      userItem: item,
+      userText: item.text || '',
+      sliceLen,
+      lastItem,
+      lastText: lastItem?.text,
+      lastStatus: lastItem?.status,
+      runningFlag: turnRunning,
+      entry,
     });
+    turns.push(entry);
   }
   return turns;
 }

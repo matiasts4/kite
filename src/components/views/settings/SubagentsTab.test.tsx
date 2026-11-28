@@ -8,10 +8,11 @@ const { mockInvoke } = vi.hoisted(() => ({
 
 vi.mock('../../../lib/ipc/core', () => ({
   invokeCommand: mockInvoke,
+  invokeFlatCommand: mockInvoke,
   isTauriEnvironment: () => true,
 }));
 
-import { SubagentsTab } from './SubagentsTab';
+import { SubagentsTab, resetSubagentsTabCacheForTest } from './SubagentsTab';
 import { SettingsView } from '../SettingsView';
 
 const INITIAL_SNAPSHOT = {
@@ -77,9 +78,22 @@ const INITIAL_SNAPSHOT = {
 
 describe('SubagentsTab', () => {
   let state = structuredClone(INITIAL_SNAPSHOT);
+  let runtimeSettingsState = {
+    fastLaneEnabled: false,
+    mcpHttpHubEnabled: true,
+    maxHeavyProcesses: 4,
+  };
+  let legacyMissingRuntimeMetrics = false;
 
   beforeEach(() => {
+    resetSubagentsTabCacheForTest();
     state = structuredClone(INITIAL_SNAPSHOT);
+    runtimeSettingsState = {
+      fastLaneEnabled: false,
+      mcpHttpHubEnabled: true,
+      maxHeavyProcesses: 4,
+    };
+    legacyMissingRuntimeMetrics = false;
     mockInvoke.mockReset();
     mockInvoke.mockImplementation(async (cmd: string, args?: Record<string, any>) => {
       if (cmd === 'get_subagent_settings') {
@@ -94,8 +108,14 @@ describe('SubagentsTab', () => {
               {
                 id: 'gemini-3-flash',
                 name: 'Gemini 3 Flash',
+                supportsEffort: true,
                 defaultEffort: 'medium',
                 effortLevels: ['low', 'medium', 'high'],
+              },
+              {
+                id: 'gemini-pro-orchestrator-neon',
+                name: 'Orchestrator (Neon)',
+                supportsEffort: false,
               },
             ],
           };
@@ -145,6 +165,31 @@ describe('SubagentsTab', () => {
           ),
         };
         return { ok: true, roles: structuredClone(state.roles) };
+      }
+      if (cmd === 'get_runtime_transport_metrics') {
+        if (legacyMissingRuntimeMetrics) {
+          return undefined;
+        }
+        return {
+          activeMuxDaemons: 1,
+          agyAcp: { daemons: 1, sessions: 1 },
+          opencode: { servers: 0, leases: 0 },
+          grok: { daemons: 0, sessions: 0 },
+          mcpHub: { httpRunning: true, port: 43120, requestCount: 0, pooledStdioServers: 1 },
+          activeFastLaneSessions: 0,
+          governor: {
+            heavyActive: 0,
+            heavyLimit: runtimeSettingsState.maxHeavyProcesses,
+            multiplexedActive: 1,
+            multiplexedLimit: 16,
+            heavyQueued: 0,
+          },
+          settings: structuredClone(runtimeSettingsState),
+        };
+      }
+      if (cmd === 'save_runtime_resource_settings') {
+        runtimeSettingsState = structuredClone(args?.settings ?? runtimeSettingsState);
+        return structuredClone(runtimeSettingsState);
       }
       return { ok: true };
     });
@@ -278,5 +323,117 @@ describe('SubagentsTab', () => {
         })
       );
     });
+  });
+
+  it('toggles Fast Lane, MCP Hub pooling, and updates concurrent heavy process cap via IPC', async () => {
+    const user = userEvent.setup();
+    render(<SubagentsTab />);
+
+    expect(await screen.findByText('Motor de ejecución y recursos')).toBeInTheDocument();
+
+    const fastLaneSwitch = screen.getByRole('switch', {
+      name: /Fast Lane nativo en Rust/i,
+    });
+    const mcpHubSwitch = screen.getByRole('switch', {
+      name: /Pool HTTP\/Stdio del Hub MCP/i,
+    });
+
+    expect(fastLaneSwitch).toHaveAttribute('aria-checked', 'false');
+    expect(mcpHubSwitch).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('button', { name: '4' })).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(fastLaneSwitch);
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_runtime_resource_settings', {
+        settings: {
+          fastLaneEnabled: true,
+          mcpHttpHubEnabled: true,
+          maxHeavyProcesses: 4,
+        },
+      });
+    });
+    expect(fastLaneSwitch).toHaveAttribute('aria-checked', 'true');
+
+    await user.click(mcpHubSwitch);
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_runtime_resource_settings', {
+        settings: {
+          fastLaneEnabled: true,
+          mcpHttpHubEnabled: false,
+          maxHeavyProcesses: 4,
+        },
+      });
+    });
+    expect(mcpHubSwitch).toHaveAttribute('aria-checked', 'false');
+
+    await user.click(screen.getByRole('button', { name: '8' }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_runtime_resource_settings', {
+        settings: {
+          fastLaneEnabled: true,
+          mcpHttpHubEnabled: false,
+          maxHeavyProcesses: 8,
+        },
+      });
+    });
+    expect(screen.getByRole('button', { name: '8' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('falls back to safe default runtime resource settings when legacy IPC returns undefined', async () => {
+    legacyMissingRuntimeMetrics = true;
+    const user = userEvent.setup();
+    render(<SubagentsTab />);
+
+    expect(await screen.findByText('Motor de ejecución y recursos')).toBeInTheDocument();
+    const fastLaneSwitch = screen.getByRole('switch', {
+      name: /Fast Lane nativo en Rust/i,
+    });
+    const mcpHubSwitch = screen.getByRole('switch', {
+      name: /Pool HTTP\/Stdio del Hub MCP/i,
+    });
+
+    expect(fastLaneSwitch).toHaveAttribute('aria-checked', 'false');
+    expect(mcpHubSwitch).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('button', { name: '4' })).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(screen.getByRole('button', { name: '2' }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_runtime_resource_settings', {
+        settings: {
+          fastLaneEnabled: false,
+          mcpHttpHubEnabled: true,
+          maxHeavyProcesses: 2,
+        },
+      });
+    });
+  });
+
+  it('omits effort levels and resets effort to default when a non-effort model is selected', async () => {
+    const user = userEvent.setup();
+    render(<SubagentsTab />);
+
+    expect(await screen.findByText('Política de delegación y modelo predeterminado')).toBeInTheDocument();
+
+    // Select Antigravity provider
+    await user.click(screen.getByRole('combobox', { name: 'Proveedor' }));
+    await user.click(await screen.findByRole('option', { name: /Antigravity/i }));
+
+    // Pick Gemini 3 Flash and choose "high" effort
+    await user.click(screen.getByRole('combobox', { name: 'Esfuerzo' }));
+    await user.click(await screen.findByRole('option', { name: 'high' }));
+    expect(screen.getByRole('combobox', { name: 'Esfuerzo' })).toHaveTextContent('Esfuerzo: high');
+
+    // Switch to Orchestrator (Neon) which has supportsEffort: false
+    await user.click(screen.getByRole('combobox', { name: 'Modelo' }));
+    await user.click(await screen.findByRole('option', { name: /Orchestrator \(Neon\)/i }));
+
+    // Effort must reset to Por defecto and not offer fabricated levels like "high"
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: 'Esfuerzo' })).toHaveTextContent(
+        'Esfuerzo: Por defecto'
+      );
+    });
+    await user.click(screen.getByRole('combobox', { name: 'Esfuerzo' }));
+    expect(screen.queryByRole('option', { name: 'high' })).not.toBeInTheDocument();
   });
 });

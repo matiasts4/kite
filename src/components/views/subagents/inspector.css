@@ -69,6 +69,8 @@
   align-items: center;
   gap: 6px;
   flex: none;
+  flex-wrap: wrap;
+  max-width: 100%;
 }
 
 .subagent-inspector__popout-btn {
@@ -113,9 +115,9 @@
   align-items: center;
   gap: 2px;
   padding: 2px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
   border-radius: var(--control-radius, 8px);
-  background: var(--block-fill);
+  background: var(--glass-field-bg, var(--block-fill));
 }
 
 .subagent-inspector__segment-btn {
@@ -422,9 +424,9 @@
 .subagent-inspector__failure-card {
   margin: 8px 12px 0;
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--danger-ink) 38%, transparent);
+  border: 1px solid var(--block-stroke);
   border-radius: var(--control-radius, 8px);
-  background: color-mix(in srgb, var(--danger-ink) 8%, transparent);
+  background: var(--glass-subagent-card-bg, color-mix(in srgb, var(--composer) 72%, transparent));
   color: var(--text-primary);
   display: flex;
   flex-direction: column;
@@ -436,7 +438,7 @@
 }
 
 .subagent-inspector__failure-card strong {
-  color: var(--danger-ink);
+  color: var(--text-secondary);
   font-weight: var(--weight-semibold, 600);
 }
 
@@ -487,7 +489,16 @@
 }
 
 .subagent-dot--failed {
-  background: var(--danger-ink);
+  background: var(--text-tertiary);
+}
+
+.subagent-run-card .subagent-role-icon--failed,
+.subagent-run-card .agent-status-indicator--failed,
+.subagent-overview .subagent-role-icon--failed,
+.subagent-overview .agent-status-indicator--failed,
+.subagent-switcher__popover .subagent-role-icon--failed,
+.subagent-switcher__popover .agent-status-indicator--failed {
+  color: var(--text-tertiary);
 }
 
 @keyframes subagent-pulse {
@@ -712,8 +723,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  row-gap: 6px;
   min-width: 0;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
 }
 
 .subagent-inspector__scope-count {
@@ -794,7 +806,7 @@
   flex-direction: column;
   gap: 6px;
   padding: 8px 10px;
-  border: 1px solid var(--glass-border, var(--separator));
+  border: 1px solid var(--glass-card-border, var(--separator));
   border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, color-mix(in srgb, var(--block-fill) 60%, transparent));
   -webkit-backdrop-filter: none;
@@ -856,7 +868,7 @@
 }
 
 .subagent-run-card {
-  border: 1px solid var(--glass-border, var(--block-stroke));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
   border-radius: var(--card-radius, 12px);
   background: var(--glass-subagent-card-bg, var(--glass-elevated-bg, var(--block-fill)));
   -webkit-backdrop-filter: none;
@@ -867,7 +879,7 @@
 
 .subagent-run-card:hover {
   background: var(--glass-subagent-card-hover-bg, var(--hover-fill));
-  border-color: var(--control-stroke-hover);
+  border-color: var(--glass-card-border-hover, var(--control-stroke-hover));
 }
 
 .subagent-run-card--active {
@@ -977,7 +989,7 @@
   padding: 0 10px;
   border: 1px solid var(--block-stroke);
   border-radius: var(--control-radius, 8px);
-  background: color-mix(in srgb, var(--danger-ink) 5%, transparent);
+  background: transparent;
   color: var(--text-secondary);
   font-size: var(--text-caption, 11px);
   font-weight: var(--weight-medium, 500);

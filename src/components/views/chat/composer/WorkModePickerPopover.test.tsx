@@ -83,7 +83,7 @@ describe('WorkModePickerPopover', () => {
     });
   });
 
-  it('switches to acceptEdits when selecting a build agent while in readOnly', () => {
+  it('switches to fullAccess when selecting a build agent while in readOnly', () => {
     const onSelect = vi.fn();
     render(
       <WorkModePickerPopover
@@ -101,7 +101,7 @@ describe('WorkModePickerPopover', () => {
     expect(onSelect).toHaveBeenCalledWith({
       agent: 'gentle-orchestrator',
       plan: false,
-      mode: 'acceptEdits',
+      mode: 'fullAccess',
     });
   });
 });

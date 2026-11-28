@@ -126,6 +126,7 @@ export interface TerminalCanvasSurfaceProps {
   onBlur?: () => void;
   onTitleChange?: (title: string) => void;
   onProcessExit?: (exitCode: number | null) => void;
+  onAccountRotated?: () => void;
   /** Stages image bytes. Returns false when the blob is not a supported image. */
   onStageClipboardBlob?: (blob: Blob, mimeType: string, fileName?: string) => boolean;
 }

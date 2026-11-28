@@ -24,6 +24,7 @@ const tauriMocks = vi.hoisted(() => {
 });
 
 const ipcMocks = vi.hoisted(() => ({
+  invokeCommand: vi.fn().mockResolvedValue(undefined),
   confirmPendingAutoSwitch: vi.fn(),
   dismissPendingAutoSwitch: vi.fn(),
   closeResidualProviderProcesses: vi.fn(),
@@ -460,5 +461,205 @@ describe('useAppGlobalEvents Hook', () => {
 
     expect(ipcMocks.closeResidualProviderProcesses).toHaveBeenCalledWith('agy');
     expect(ipcMocks.confirmPendingAutoSwitch).toHaveBeenCalledTimes(2);
+  });
+
+  it('routes agent-scoped kite:select-thread to selectedAgentThreadId without mutating Thread selection', () => {
+    const setWorkMode = vi.fn();
+    const setSelectedAgentId = vi.fn();
+    const setSelectedAgentThreadId = vi.fn();
+    const setSelectedThreadId = vi.fn();
+    const setAgentViewMode = vi.fn();
+
+    renderHook(() =>
+      useAppGlobalEvents({
+        setWorkMode,
+        setSettingsOpen: vi.fn(),
+        setRoutinesOpen: vi.fn(),
+        setSelectedWorkspaceId: vi.fn(),
+        setSelectedAgentId,
+        setSelectedAgentThreadId,
+        setSelectedThreadId,
+        setAgentViewMode,
+        setRightDockVisible: vi.fn(),
+        setIsCommandPaletteOpen: vi.fn(),
+        onAddWorkspace: vi.fn(),
+        loadBootstrap: vi.fn(),
+        loadThreads: vi.fn(),
+        setAgents: vi.fn(),
+        selectedAgentId: null,
+      })
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', {
+          detail: { threadId: 'a-t1', agentId: 'ship-guard', mode: 'agent' },
+        })
+      );
+    });
+
+    expect(setSelectedAgentId).toHaveBeenCalledWith('ship-guard');
+    expect(setSelectedAgentThreadId).toHaveBeenCalledWith('a-t1');
+    expect(setAgentViewMode).toHaveBeenCalledWith('chats');
+    expect(setWorkMode).toHaveBeenCalledWith('agent');
+    expect(setSelectedThreadId).not.toHaveBeenCalled();
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('kite:select-thread', {
+          detail: { threadId: 'a-t1', mode: 'chat' },
+        })
+      );
+    });
+
+    expect(setSelectedThreadId).toHaveBeenCalledWith('a-t1');
+    expect(setWorkMode).toHaveBeenCalledWith('chat');
+  });
+
+  it('registers deep toast navigation for chat threads, agent threads, and terminal sessions', () => {
+    const setWorkMode = vi.fn();
+    const setSettingsOpen = vi.fn();
+    const setRoutinesOpen = vi.fn();
+    const setSelectedWorkspaceId = vi.fn();
+    const setSelectedAgentId = vi.fn();
+    const setSelectedAgentThreadId = vi.fn();
+    const setSelectedThreadId = vi.fn();
+    const setAgentViewMode = vi.fn();
+    const focusEvents: CustomEvent[] = [];
+    const onFocusTerminal = (e: Event) => focusEvents.push(e as CustomEvent);
+    window.addEventListener('kite:focus-terminal-session', onFocusTerminal);
+
+    try {
+      renderHook(() =>
+        useAppGlobalEvents({
+          setWorkMode,
+          setSettingsOpen,
+          setRoutinesOpen,
+          setSelectedWorkspaceId,
+          setSelectedAgentId,
+          setSelectedAgentThreadId,
+          setSelectedThreadId,
+          setAgentViewMode,
+          setRightDockVisible: vi.fn(),
+          setIsCommandPaletteOpen: vi.fn(),
+          onAddWorkspace: vi.fn(),
+          loadBootstrap: vi.fn(),
+          loadThreads: vi.fn(),
+          setAgents: vi.fn(),
+          selectedAgentId: null,
+        })
+      );
+
+      const regCalls = toastMocks.registerToastNavigator.mock.calls;
+      const nav = (regCalls[regCalls.length - 1] as unknown as [any])?.[0];
+      expect(nav).toBeDefined();
+
+      nav.onNavigateThread('chat-thread-1', null);
+      expect(setWorkMode).toHaveBeenCalledWith('chat');
+      expect(setSelectedThreadId).toHaveBeenCalledWith('chat-thread-1');
+      expect(setSettingsOpen).toHaveBeenCalledWith(false);
+      expect(setRoutinesOpen).toHaveBeenCalledWith(false);
+
+      nav.onNavigateThread('agent-thread-2', 'agent-chip');
+      expect(setSelectedAgentId).toHaveBeenCalledWith('agent-chip');
+      expect(setAgentViewMode).toHaveBeenCalledWith('chats');
+      expect(setSelectedAgentThreadId).toHaveBeenCalledWith('agent-thread-2');
+      expect(setWorkMode).toHaveBeenCalledWith('agent');
+
+      nav.onNavigateTerminal('term-1', 'ws-99');
+      expect(setSelectedWorkspaceId).toHaveBeenCalledWith('ws-99');
+      expect(setWorkMode).toHaveBeenCalledWith('code');
+      expect(focusEvents).toHaveLength(1);
+      expect(focusEvents[0].detail).toEqual({ sessionId: 'term-1', workspaceId: 'ws-99' });
+    } finally {
+      window.removeEventListener('kite:focus-terminal-session', onFocusTerminal);
+    }
+  });
+
+  it('routes kite:agent-announce through notifications_report_attention or refresh without direct toasts', async () => {
+    const refreshEvents: Event[] = [];
+    const onRefresh = (e: Event) => refreshEvents.push(e);
+    window.addEventListener('kite:notifications-refresh', onRefresh);
+
+    try {
+      renderHook(() =>
+        useAppGlobalEvents({
+          setWorkMode: vi.fn(),
+          setSettingsOpen: vi.fn(),
+          setRoutinesOpen: vi.fn(),
+          setSelectedWorkspaceId: vi.fn(),
+          setSelectedAgentId: vi.fn(),
+          setSelectedThreadId: vi.fn(),
+          setRightDockVisible: vi.fn(),
+          setIsCommandPaletteOpen: vi.fn(),
+          onAddWorkspace: vi.fn(),
+          loadBootstrap: vi.fn(),
+          loadThreads: vi.fn(),
+          setAgents: vi.fn(),
+          selectedAgentId: null,
+        })
+      );
+
+      // 1. alreadyPersisted skips duplicate notifications_report_attention and only refreshes
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent('kite:agent-announce', {
+            detail: {
+              source: 'routine',
+              agentId: 'agent-chip',
+              agentName: 'Chip Worker',
+              threadId: 'thread-r1',
+              summary: 'Daily scan finished',
+              alreadyPersisted: true,
+            },
+          })
+        );
+      });
+
+      expect(ipcMocks.invokeCommand).not.toHaveBeenCalled();
+      expect(refreshEvents).toHaveLength(1);
+      expect(toastMocks.toast.success).not.toHaveBeenCalled();
+      expect(toastMocks.toast.action).not.toHaveBeenCalled();
+      expect(toastMocks.toast.error).not.toHaveBeenCalled();
+
+      // 2. Non-persisted announcement reports enriched attention payload and refreshes
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent('kite:agent-announce', {
+            detail: {
+              source: 'routine',
+              agentId: 'agent-chip',
+              agentName: 'Chip Worker',
+              threadId: 'thread-r2',
+              threadTitle: 'Nightly build',
+              workspaceId: 'ws-1',
+              summary: 'Build failed on lint',
+              failed: true,
+            },
+          })
+        );
+      });
+
+      await waitFor(() => {
+        expect(ipcMocks.invokeCommand).toHaveBeenCalledWith('notifications_report_attention', {
+          payload: expect.objectContaining({
+            kind: 'error',
+            source: 'agentChat',
+            module: 'agent',
+            profileId: 'agent-chip',
+            actorName: 'Chip Worker',
+            threadId: 'thread-r2',
+            threadTitle: 'Nightly build',
+            workspaceId: 'ws-1',
+            body: 'Build failed on lint',
+          }),
+        });
+        expect(refreshEvents).toHaveLength(2);
+      });
+
+      expect(toastMocks.toast.error).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('kite:notifications-refresh', onRefresh);
+    }
   });
 });

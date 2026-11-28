@@ -142,7 +142,7 @@
 .files-toolbar-btn:hover:not(:disabled) {
   background: var(--hover-fill);
   color: var(--text-primary);
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: var(--vl-stroke-strong, rgba(255, 255, 255, 0.2));
 }
 
 .files-toolbar-btn:disabled {
@@ -257,7 +257,7 @@
   text-align: center;
   padding: var(--space-6) var(--space-5);
   background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)));
-  border: 1px solid var(--glass-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
+  border: 1px solid var(--glass-card-border, var(--panel-stroke, rgba(255, 255, 255, 0.1)));
   border-radius: var(--card-radius);
   box-shadow: var(--glass-highlight, var(--shadow-raised, none));
 }
@@ -465,12 +465,12 @@
 }
 
 .scroll-quiet::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--scrollbar-thumb, rgba(128, 128, 128, 0.28));
   border-radius: var(--radius-pill);
 }
 
 .scroll-quiet::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: var(--vl-stroke-strong, rgba(128, 128, 128, 0.42));
 }
 
 /* ==========================================================================

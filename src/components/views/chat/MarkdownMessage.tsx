@@ -3,6 +3,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { CheckIcon, CopyIcon } from './ChatIcons';
 import { openFileInRightDock } from '../../../lib/filePreviewNav';
+import { openSidecarInRightDock, parseSidecarUri } from '../../../lib/sidecarNav';
 import { MermaidDiagram } from '../../ui/MermaidDiagram';
 import { toast } from '../../../lib/toast';
 
@@ -15,7 +16,7 @@ function isFilePathCandidate(text: string): boolean {
   if (!trimmed || trimmed.length > 1024 || /[\r\n]/.test(trimmed)) return false;
   trimmed = trimmed.replace(/^['"`]+|['"`]+$/g, '').trim();
   if (!trimmed) return false;
-  if (/^https?:\/\//i.test(trimmed)) return false;
+  if (/^(?:https?|sidecar):\/\//i.test(trimmed)) return false;
   if (/^file:\/\//i.test(trimmed)) return true;
   if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return true;
   if (/^(\.{1,2}[\\/]|[a-zA-Z0-9_@.-]+[\\/])/.test(trimmed)) return true;
@@ -23,7 +24,7 @@ function isFilePathCandidate(text: string): boolean {
   return false;
 }
 
-const PATH_REGEX = /((?:file:\/\/[^\s"'`<>]+|[a-zA-Z]:[\\/][^\s"'`<>()]+|(?:\.{1,2}[\\/]|[a-zA-Z0-9_@.-]+[\\/])[^\s"'`<>()]+|[a-zA-Z0-9_.-]+\.(?:tsx|ts|jsx|json|js|mdx|md|rs|toml|css|scss|html|py|go|ya?ml|sh|bat|cmd|sql|xml|env|log|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|pdf)(?::\d+(?::\d+)?)?))/gi;
+const PATH_REGEX = /((?:(?:file|sidecar):\/\/[^\s"'`<>]+|[a-zA-Z]:[\\/][^\s"'`<>()]+|(?:\.{1,2}[\\/]|[a-zA-Z0-9_@.-]+[\\/])[^\s"'`<>()]+|[a-zA-Z0-9_.-]+\.(?:tsx|ts|jsx|json|js|mdx|md|rs|toml|css|scss|html|py|go|ya?ml|sh|bat|cmd|sql|xml|env|log|png|jpe?g|gif|webp|svg|ico|bmp|tiff?|avif|pdf)(?::\d+(?::\d+)?)?))/gi;
 
 function renderPlainTextWithPaths(text: string, baseKey: string | number, workspaceId?: string | null): React.ReactNode {
   const parts = text.split(PATH_REGEX);
@@ -123,13 +124,30 @@ const CodeBlock: React.FC<{ lang: string; code: string }> = ({ lang, code }) => 
   );
 };
 
-function isFileHref(href: string): boolean {
+export function isFileHref(href: string): boolean {
+  const trimmed = href.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('sidecar://')) return false;
   return (
-    href.startsWith('file://') ||
-    href.startsWith('/') ||
-    href.startsWith('./') ||
-    (href.includes('.') && !href.startsWith('http'))
+    lower.startsWith('file://') ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('./') ||
+    (trimmed.includes('.') && !lower.startsWith('http'))
   );
+}
+
+function extractNodeText(node: React.ReactNode): string | undefined {
+  if (typeof node === 'string' || typeof node === 'number') {
+    return String(node);
+  }
+  if (Array.isArray(node)) {
+    const joined = node.map(extractNodeText).filter(Boolean).join('');
+    return joined || undefined;
+  }
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return extractNodeText(node.props.children);
+  }
+  return undefined;
 }
 
 // Keep ReactMarkdown component identities stable across renders so updating text or
@@ -171,6 +189,37 @@ const MarkdownA: React.FC<{ href?: string; children?: React.ReactNode }> = ({
   children,
 }) => {
   const workspaceId = useContext(MarkdownWorkspaceContext);
+  const trimmedHref = href.trim();
+  if (trimmedHref.toLowerCase().startsWith('sidecar://')) {
+    const parsed = parseSidecarUri(trimmedHref);
+    const rawLabel = extractNodeText(children)?.trim();
+    const cleanTitle =
+      rawLabel && !rawLabel.toLowerCase().startsWith('sidecar://') ? rawLabel : undefined;
+
+    return (
+      <button
+        type="button"
+        className="md-sidecar-pill"
+        data-sidecar-uri={trimmedHref}
+        title={parsed ? `Open ${parsed.sidecarId} (${parsed.viewPath})` : 'Open extension panel'}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!parsed) return;
+          openSidecarInRightDock({
+            sidecarId: parsed.sidecarId,
+            viewPath: parsed.viewPath,
+            title: cleanTitle,
+            workspaceId: workspaceId || null,
+          });
+        }}
+      >
+        <span className="md-sidecar-pill__dot" aria-hidden="true" />
+        <span className="md-sidecar-pill__label">{children}</span>
+      </button>
+    );
+  }
+
   const isFile = isFileHref(href);
   return (
     <a

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CITATION_START, decodeCitation, deleteCitationKey, encodeCitation } from './citationChip';
 import {
+  decodeMention,
   deleteComposerChipKey,
   deleteMentionKey,
   encodeMention,
@@ -9,6 +10,7 @@ import {
   insertDropAtCaret,
   insertMentionAtCaret,
   insertThreadReference,
+  mentionChipLabel,
   mentionClipboard,
   mentionFromDrop,
   mentionFromTerminalExcerpt,
@@ -173,5 +175,25 @@ describe('mention chips', () => {
     expect(replaced.text.startsWith('see ')).toBe(true);
     expect(replaced.text.endsWith(' please')).toBe(true);
     expect(replaced.text).not.toContain('@src');
+  });
+
+  it('supports @agent mention filtering, chip labeling, and markdown expansion', () => {
+    const rows = filterMentionMenu('ship', {
+      agents: [
+        { id: 'ship-guard', name: 'Ship Guard', engine: 'antigravity' },
+        { id: 'discovery-architect', name: 'Discovery Architect', engine: 'antigravity' },
+      ],
+      files: ['README.md'],
+    });
+
+    expect(rows).toEqual([
+      { kind: 'agent', id: 'ship-guard', label: 'Ship Guard', menuLabel: '@Ship Guard' },
+    ]);
+
+    const payload = { kind: 'agent' as const, id: 'ship-guard', label: 'Ship Guard' };
+    expect(mentionChipLabel(payload)).toBe('@Ship Guard');
+    const token = encodeMention(payload);
+    expect(decodeMention(token)).toEqual(payload);
+    expect(expandMentions(`Ask ${token} to audit`)).toBe('Ask [@Ship Guard](agent:ship-guard) to audit');
   });
 });

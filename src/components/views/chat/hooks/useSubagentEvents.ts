@@ -1,6 +1,7 @@
 import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import type { ChatItem, SubagentRun, SwarmState } from '../../../../types';
 import type { ExtendedChatThread } from '../types';
+import { dedupeSubagentRuns } from '../subagentRunHelpers';
 
 export type ChatSubagentEventPayload =
   | {
@@ -57,21 +58,42 @@ function mergeRunItems(existing: ChatItem[], incoming: ChatItem[]): ChatItem[] {
  * Returns whether a subagent or swarm event introduces or updates child thread
  * lifecycle state that the sidebar and known-threads summary list should sync.
  */
+const MAX_TRACKED_RUN_SIGNATURES = 256;
+
+/**
+ * When `seen` is provided, progress events that repeat a run's last known
+ * `status|childThreadId` signature are ignored, so only creation and lifecycle
+ * transitions fan out to the sidebar/dock/summary listeners. Without `seen`
+ * the check is stateless (every lifecycle-bearing event qualifies).
+ */
 export function shouldDispatchThreadsChanged(
-  payload: ChatSubagentEventPayload | undefined
+  payload: ChatSubagentEventPayload | undefined,
+  seen?: Map<string, string>
 ): boolean {
   if (!payload?.threadId) return false;
-  if (
-    payload.kind === 'subagentRunUpdated' ||
-    payload.kind === 'subagentRunRemoved' ||
-    payload.kind === 'swarmStateUpdated'
-  ) {
+  if (payload.kind === 'swarmStateUpdated') return true;
+  if (payload.kind === 'subagentRunRemoved') {
+    if (seen) {
+      const sid = payload.subagentId?.trim();
+      if (sid) seen.delete(`${payload.threadId}:${sid}`);
+    }
     return true;
   }
-  return (
-    payload.kind === 'subagentStepsUpdated' &&
-    Boolean(payload.status || payload.childThreadId)
-  );
+  const isRunUpdate = payload.kind === 'subagentRunUpdated';
+  if (!isRunUpdate && payload.kind !== 'subagentStepsUpdated') return false;
+  if (!isRunUpdate && !(payload.status || payload.childThreadId)) return false;
+  if (!seen) return true;
+
+  const sid = isRunUpdate ? (payload.run?.subagentId ?? payload.subagentId) : payload.subagentId;
+  if (!sid) return true;
+  const status = isRunUpdate ? payload.run?.status : payload.status;
+  const childThreadId = isRunUpdate ? payload.run?.childThreadId : payload.childThreadId;
+  const signature = `${status ?? ''}|${childThreadId ?? ''}`;
+  const key = `${payload.threadId}:${sid}`;
+  if (seen.get(key) === signature) return false;
+  if (seen.size >= MAX_TRACKED_RUN_SIGNATURES && !seen.has(key)) seen.clear();
+  seen.set(key, signature);
+  return true;
 }
 
 export function applySubagentEvent(
@@ -109,23 +131,47 @@ export function applySubagentEvent(
 
   if (payload.kind === 'subagentRunUpdated' && payload.run) {
     const existingRuns = thread.subagentRuns ?? [];
-    const idx = existingRuns.findIndex(
+    const incoming = payload.run;
+    const incomingSid = (incoming.subagentId ?? '').trim();
+    const incomingCid = (incoming.childThreadId ?? '').trim();
+    const incomingCallId = (incoming.parentToolCallId ?? '').trim();
+
+    let idx = existingRuns.findIndex(
       (r) =>
-        r.subagentId === payload.run!.subagentId ||
-        (payload.run!.parentToolCallId && r.parentToolCallId === payload.run!.parentToolCallId)
+        (incomingSid && r.subagentId === incomingSid) ||
+        (incomingCid && (r.childThreadId === incomingCid || r.subagentId === incomingCid)) ||
+        (incomingSid && r.childThreadId === incomingSid)
     );
+    if (idx < 0 && incomingCallId) {
+      idx = existingRuns.findIndex((r) => {
+        if (r.parentToolCallId !== incomingCallId) return false;
+        const rCid = (r.childThreadId ?? '').trim();
+        const rSid = (r.subagentId ?? '').trim();
+        return !rCid && (!rSid || rSid === r.parentToolCallId);
+      });
+    }
+
     const mergedRuns =
       idx >= 0
-        ? existingRuns.map((run, i) =>
-            i === idx
-              ? {
-                  ...run,
-                  ...payload.run!,
-                  items: payload.run!.items?.length ? mergeRunItems(run.items ?? [], payload.run!.items) : run.items ?? [],
-                }
-              : run
-          )
-        : [...existingRuns, { ...payload.run, items: payload.run.items ?? [] }];
+        ? existingRuns.map((run, i) => {
+            const sameIdentity =
+              i === idx ||
+              (incomingSid && run.subagentId === incomingSid) ||
+              (incomingCid && Boolean(run.childThreadId) && run.childThreadId === incomingCid);
+            if (!sameIdentity) return run;
+            return {
+              ...run,
+              ...incoming,
+              parentToolCallId:
+                run.parentToolCallId && !run.parentToolCallId.startsWith('dispatch-subagent-')
+                  ? run.parentToolCallId
+                  : incoming.parentToolCallId ?? run.parentToolCallId,
+              items: incoming.items?.length
+                ? mergeRunItems(run.items ?? [], incoming.items)
+                : run.items ?? [],
+            };
+          })
+        : [...existingRuns, { ...incoming, items: incoming.items ?? [] }];
     return {
       ...thread,
       subagentRuns: mergedRuns,
@@ -134,12 +180,22 @@ export function applySubagentEvent(
 
   if (payload.kind === 'subagentStepsUpdated' && payload.subagentId) {
     const existingRuns = thread.subagentRuns ?? [];
-    const idx = existingRuns.findIndex(
+    const targetSid = payload.subagentId.trim();
+    const targetCid = (payload.childThreadId ?? '').trim();
+    let idx = existingRuns.findIndex(
       (r) =>
-        r.subagentId === payload.subagentId ||
-        r.parentToolCallId === payload.subagentId ||
-        (payload.childThreadId && r.childThreadId === payload.childThreadId)
+        r.subagentId === targetSid ||
+        (targetCid && (r.childThreadId === targetCid || r.subagentId === targetCid)) ||
+        r.childThreadId === targetSid
     );
+    if (idx < 0) {
+      idx = existingRuns.findIndex((r) => {
+        if (r.parentToolCallId !== targetSid) return false;
+        const rCid = (r.childThreadId ?? '').trim();
+        const rSid = (r.subagentId ?? '').trim();
+        return !rCid && (!rSid || rSid === r.parentToolCallId);
+      });
+    }
     if (idx < 0) {
       const synthesizedItems = payload.items ?? [];
       const synthesizedRun: SubagentRun = {
@@ -163,7 +219,11 @@ export function applySubagentEvent(
       };
     }
     const nextRuns = existingRuns.map((run, i) => {
-      if (i !== idx) return run;
+      const sameIdentity =
+        i === idx ||
+        run.subagentId === targetSid ||
+        (targetCid && Boolean(run.childThreadId) && run.childThreadId === targetCid);
+      if (!sameIdentity) return run;
       const mergedItems = payload.items ? mergeRunItems(run.items ?? [], payload.items) : run.items ?? [];
       return {
         ...run,
@@ -190,7 +250,8 @@ export function countRunningSubagents(
   thread: Pick<ExtendedChatThread, 'subagentRuns' | 'swarmState'> | null | undefined
 ): number {
   if (!thread) return 0;
-  const activeRunCount = (thread.subagentRuns ?? []).filter((run) => {
+  const dedupedRuns = dedupeSubagentRuns(thread.subagentRuns);
+  const activeRunCount = dedupedRuns.filter((run) => {
     const status = (run.status ?? '').toLowerCase();
     return status === 'running' || status === 'queued' || status === 'pending' || status === 'waiting';
   }).length;
@@ -215,6 +276,7 @@ export function useSubagentEvents({
     let unlistenSwarm: (() => void) | undefined;
     let cancelled = false;
     let threadsSyncTimer: number | null = null;
+    const seenRunSignatures = new Map<string, string>();
     const scheduleThreadsChanged = () => {
       if (threadsSyncTimer !== null) return;
       threadsSyncTimer = window.setTimeout(() => {
@@ -226,7 +288,7 @@ export function useSubagentEvents({
     };
     const handlePayload = (payload: ChatSubagentEventPayload | undefined) => {
       if (!isMountedRef.current || !payload?.threadId) return;
-      if (shouldDispatchThreadsChanged(payload)) {
+      if (shouldDispatchThreadsChanged(payload, seenRunSignatures)) {
         scheduleThreadsChanged();
       }
       setThreadsMap((prev) => {

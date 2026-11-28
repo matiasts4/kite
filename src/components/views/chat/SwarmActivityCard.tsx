@@ -2,12 +2,15 @@ import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import type { ChatItem, SwarmState } from '../../../types';
 import { BotIcon, CheckIcon, ChevronRightIcon, CloseIcon } from './ChatIcons';
+import { AgentStatusIndicator } from '../../ui/AgentStatusIndicator';
 import { plainPreviewLine } from './SubagentActivityCard';
 import { prefersReducedMotion } from '../../../motion/contract';
 import { tweens } from '../../../motion/standard/tokens';
 import {
   getActiveSubagentInspection,
+  getActiveSwarmCardItemId,
   openSubagentInRightDock,
+  setActiveSwarmCardItemId,
   SUBAGENT_INSPECTION_CHANGE_EVENT,
   type OpenRightDockSubagentDetail,
 } from '../../../lib/subagentNav';
@@ -49,9 +52,13 @@ export const SwarmActivityCard: React.FC<SwarmActivityCardProps> = ({
   const [activeInspection, setActiveInspection] = useState<OpenRightDockSubagentDetail | null>(() =>
     getActiveSubagentInspection(),
   );
+  const [activeCardItemId, setActiveCardItemId] = useState<string | null>(() =>
+    getActiveSwarmCardItemId(),
+  );
   useEffect(() => {
     const handler = (ev: Event) => {
       setActiveInspection((ev as CustomEvent<OpenRightDockSubagentDetail | null>).detail ?? null);
+      setActiveCardItemId(getActiveSwarmCardItemId());
     };
     window.addEventListener(SUBAGENT_INSPECTION_CHANGE_EVENT, handler);
     return () => window.removeEventListener(SUBAGENT_INSPECTION_CHANGE_EVENT, handler);
@@ -62,7 +69,8 @@ export const SwarmActivityCard: React.FC<SwarmActivityCardProps> = ({
       activeInspection &&
       activeInspection.mode === 'swarm' &&
       activeInspection.threadId === threadId &&
-      (!activeInspection.swarmId || activeInspection.swarmId === swarmId),
+      (!activeInspection.swarmId || activeInspection.swarmId === swarmId) &&
+      (!activeCardItemId || activeCardItemId === item.id),
   );
 
   const postSeq = latestPost?.seq ?? meta?.seq ?? null;
@@ -76,6 +84,7 @@ export const SwarmActivityCard: React.FC<SwarmActivityCardProps> = ({
 
   const handleOpen = () => {
     if (!isInspectable || !threadId) return;
+    setActiveSwarmCardItemId(item.id);
     openSubagentInRightDock({
       threadId,
       swarmId,
@@ -111,7 +120,7 @@ export const SwarmActivityCard: React.FC<SwarmActivityCardProps> = ({
         ) : null}
         <span className="chat-subagent-card__spacer" />
         <span className="chat-subagent-card__telemetry">
-          {isRunning ? <span aria-hidden="true" className="chat-working-pulse" /> : null}
+          {isRunning ? <AgentStatusIndicator status="running" size={12} /> : null}
           {isInspectable ? (
             <>
               <span className="chat-subagent-card__inspect-label">Inspect Board</span>

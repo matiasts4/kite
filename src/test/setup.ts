@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { MotionGlobalConfig } from 'motion/react';
+import { MotionGlobalConfig } from 'motion-utils';
 
 // jsdom has no layout engine and real Motion animations starve the test runner.
 // Production and the browser lane keep the real animations.

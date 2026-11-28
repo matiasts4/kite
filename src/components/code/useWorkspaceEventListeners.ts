@@ -6,6 +6,10 @@ import {
   collectActiveAgentNames,
   estimateTargetPaneGrid,
 } from './workspaceUtils';
+import {
+  clearPendingTerminalFocus,
+  peekPendingTerminalFocus,
+} from '../../lib/notifications/terminalNotificationBridge';
 import { cleanAgentTitle, resolveCanonicalAgentName } from '../../lib/agentNames';
 import { invokeCommand } from '../../lib/ipc';
 import { registerSpawnedTerminal } from '../../lib/terminalRegistry';
@@ -67,6 +71,68 @@ export function useWorkspaceEventListeners({
   handleLaunchAgent,
 }: UseWorkspaceEventListenersParams) {
   const spawnQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const applySpotlightFocusRef = useRef<
+    (detail: { leafId?: string; sessionId?: string; workspaceId?: string | null }) => boolean
+  >(() => false);
+
+  applySpotlightFocusRef.current = (detail) => {
+    if (detail.workspaceId && selectedWorkspace && detail.workspaceId !== selectedWorkspace.id) {
+      onSelectWorkspace(detail.workspaceId);
+    }
+
+    const current = latestLayoutRef.current;
+    let targetTab: WorkspaceTab | null = null;
+    let targetLeaf: PaneLeaf | null = null;
+
+    for (const tab of current.tabs) {
+      const leaf = getAllLeaves(tab.root).find(
+        (l) =>
+          (detail.leafId && l.id === detail.leafId) ||
+          (detail.sessionId && l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.sessionId) ||
+          (detail.leafId && l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.leafId)
+      );
+      if (leaf) {
+        targetTab = tab;
+        targetLeaf = leaf;
+        break;
+      }
+    }
+
+    if (targetLeaf) {
+      const leafId = targetLeaf.id;
+      if (targetTab && current.activeTabId !== targetTab.id) {
+        void persistLayout({
+          ...current,
+          activeTabId: targetTab.id,
+        });
+      }
+      setFocusedLeafId(leafId);
+      setSpotlightLeafId(leafId);
+      if (spotlightTimerRef.current) {
+        clearTimeout(spotlightTimerRef.current);
+      }
+      spotlightTimerRef.current = setTimeout(() => {
+        setSpotlightLeafId(null);
+      }, 2500);
+      clearPendingTerminalFocus(detail.sessionId);
+      return true;
+    }
+    return false;
+  };
+
+  // Resolve pending terminal focus after lazy mount or asynchronous workspace layout load
+  useEffect(() => {
+    const pending = peekPendingTerminalFocus();
+    if (!pending) return;
+    if (pending.workspaceId && selectedWorkspace && pending.workspaceId !== selectedWorkspace.id) {
+      return;
+    }
+    applySpotlightFocusRef.current({
+      sessionId: pending.sessionId,
+      workspaceId: pending.workspaceId,
+    });
+  });
 
   // Escape & layout keyboard shortcuts
   useEffect(() => {
@@ -153,47 +219,9 @@ export function useWorkspaceEventListeners({
     };
 
     const onSpotlight = (e: Event) => {
-      const detail = (e as CustomEvent<{ leafId?: string; sessionId?: string; workspaceId?: string }>).detail;
+      const detail = (e as CustomEvent<{ leafId?: string; sessionId?: string; workspaceId?: string | null }>).detail;
       if (!detail) return;
-      if (detail.workspaceId && selectedWorkspace && detail.workspaceId !== selectedWorkspace.id) {
-        onSelectWorkspace(detail.workspaceId);
-      }
-
-      const current = latestLayoutRef.current;
-      let targetTab: WorkspaceTab | null = null;
-      let targetLeaf: PaneLeaf | null = null;
-
-      for (const tab of current.tabs) {
-        const leaf = getAllLeaves(tab.root).find(
-          (l) =>
-            (detail.leafId && l.id === detail.leafId) ||
-            (detail.sessionId && l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.sessionId) ||
-            (detail.leafId && l.occupant.kind === 'terminal' && l.occupant.sessionId === detail.leafId)
-        );
-        if (leaf) {
-          targetTab = tab;
-          targetLeaf = leaf;
-          break;
-        }
-      }
-
-      if (targetLeaf) {
-        const leafId = targetLeaf.id;
-        if (targetTab && current.activeTabId !== targetTab.id) {
-          void persistLayout({
-            ...current,
-            activeTabId: targetTab.id,
-          });
-        }
-        setFocusedLeafId(leafId);
-        setSpotlightLeafId(leafId);
-        if (spotlightTimerRef.current) {
-          clearTimeout(spotlightTimerRef.current);
-        }
-        spotlightTimerRef.current = setTimeout(() => {
-          setSpotlightLeafId(null);
-        }, 2500);
-      }
+      applySpotlightFocusRef.current(detail);
     };
 
     const spawnTerminalCore = async (detail: {
@@ -401,10 +429,19 @@ export function useWorkspaceEventListeners({
       }
     };
 
+    const pending = peekPendingTerminalFocus();
+    if (pending) {
+      applySpotlightFocusRef.current({
+        sessionId: pending.sessionId,
+        workspaceId: pending.workspaceId,
+      });
+    }
+
     window.addEventListener('kite:terminate-agent', onTerminate);
     window.addEventListener('kite:close-workspace-tab', onCloseTabEvent);
     window.addEventListener('kite:rename-workspace-tab', onRenameTabEvent);
     window.addEventListener('kite:spotlight-pane', onSpotlight);
+    window.addEventListener('kite:focus-terminal-session', onSpotlight);
     window.addEventListener('kite:spawn-agent-terminal', onSpawnAgentTerminal);
     window.addEventListener('kite:op-request', onOpRequest);
     return () => {
@@ -412,6 +449,7 @@ export function useWorkspaceEventListeners({
       window.removeEventListener('kite:close-workspace-tab', onCloseTabEvent);
       window.removeEventListener('kite:rename-workspace-tab', onRenameTabEvent);
       window.removeEventListener('kite:spotlight-pane', onSpotlight);
+      window.removeEventListener('kite:focus-terminal-session', onSpotlight);
       window.removeEventListener('kite:spawn-agent-terminal', onSpawnAgentTerminal);
       window.removeEventListener('kite:op-request', onOpRequest);
       if (spotlightTimerRef.current) {

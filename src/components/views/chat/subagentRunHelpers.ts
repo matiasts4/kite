@@ -20,6 +20,156 @@ export function extractFailureSummary(text?: string | null): string {
   return raw;
 }
 
+const STARTED_THREAD_RE = /started\s+thread:([0-9a-fA-F-]{8,})/i;
+const SUBAGENT_THREAD_TAG_RE = /\[subagent_id:\s*thread:([0-9a-fA-F-]{8,})\]/i;
+const JSON_ADDRESS_THREAD_RE = /"address"\s*:\s*"thread:([0-9a-fA-F-]{8,})"/i;
+
+export function extractStartedChildThreadId(text?: string | null): string | null {
+  const raw = (text ?? '').trim();
+  if (!raw) return null;
+  const match =
+    raw.match(STARTED_THREAD_RE) ??
+    raw.match(SUBAGENT_THREAD_TAG_RE) ??
+    raw.match(JSON_ADDRESS_THREAD_RE);
+  return match?.[1]?.trim() || null;
+}
+
+/**
+ * True when `raw` is a blocking `wait` slice timeout receipt (either raw JSON
+ * `{"op":"wait","status":"failed","error":"timeout",...}` or the non-error
+ * `"still running after ... wait slice"` guidance text).
+ */
+export function isWaitTimeoutReceiptText(raw?: string | null): boolean {
+  const text = (raw ?? '').trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  if (lower.includes('still running after ') && lower.includes('wait slice')) {
+    return true;
+  }
+  if (text.startsWith('{') && text.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const receipt =
+        parsed.receipt && typeof parsed.receipt === 'object' && !Array.isArray(parsed.receipt)
+          ? (parsed.receipt as Record<string, unknown>)
+          : parsed;
+      const err = typeof receipt.error === 'string' ? receipt.error.trim().toLowerCase() : '';
+      const op = typeof receipt.op === 'string' ? receipt.op.trim().toLowerCase() : '';
+      const addr = typeof receipt.address === 'string' ? receipt.address.trim() : '';
+      if (err === 'timeout' && (op === 'wait' || addr.startsWith('thread:'))) {
+        return true;
+      }
+    } catch {
+      // Ignore non-JSON strings.
+    }
+  }
+  return false;
+}
+
+function isHookBlockedText(raw?: string | null): boolean {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return true;
+  const lower = trimmed.toLowerCase();
+  return (
+    lower.includes('pre-tool hook') ||
+    lower.includes('native `invoke_subagent` is blocked') ||
+    lower.includes('native invoke_subagent is blocked')
+  );
+}
+
+function isInvokeSubagentItem(item: ChatItem): boolean {
+  const rawTool = (item.toolName ?? '').trim().toLowerCase();
+  if (rawTool === 'invoke_subagent' || rawTool.endsWith('__invoke_subagent')) {
+    return true;
+  }
+  const title = (item.title ?? '').trim().toLowerCase();
+  return (
+    title === 'invoke_subagent' ||
+    title === 'run invoke_subagent' ||
+    title.startsWith('invoke_subagent ·')
+  );
+}
+
+/**
+ * True for an unspawned `PreToolUse`-blocked native `invoke_subagent` call (0 steps,
+ * no backing child thread or transcript, hook-blocked or empty text).
+ */
+export function isHookBlockedInvokeNoise(item: ChatItem): boolean {
+  if (!isInvokeSubagentItem(item)) return false;
+  const rawStatus = (item.subagentMeta?.status || item.status || '').toLowerCase();
+  if (rawStatus !== 'failed' && rawStatus !== 'error') return false;
+  const meta = item.subagentMeta;
+  const steps = meta?.stepCount ?? 0;
+  const backed = Boolean(meta?.childThreadId || meta?.transcriptUri);
+  if (backed || steps > 0) return false;
+  return isHookBlockedText(item.text);
+}
+
+/**
+ * True when a failed subagent item produced zero steps and has no backing child
+ * thread or transcript, making it safe to suppress when superseded by a real retry.
+ */
+export function isZeroStepUnbackedFailedItem(
+  item: ChatItem,
+  run?: SubagentRun | null,
+): boolean {
+  if (!isItemFailed(item, run)) return false;
+  const steps = Math.max(run?.stepCount ?? 0, item.subagentMeta?.stepCount ?? 0, run?.items?.length ?? 0);
+  const backed = Boolean(
+    run?.childThreadId ||
+      item.subagentMeta?.childThreadId ||
+      run?.transcriptUri ||
+      item.subagentMeta?.transcriptUri ||
+      (run?.items?.length ?? 0) > 0,
+  );
+  return steps === 0 && !backed;
+}
+
+/**
+ * Defensive Option 1 noise suppression for subagent timeline items:
+ * 1) `PreToolUse` hook-blocked native `invoke_subagent` redirects,
+ * 2) 0-step unbacked failed attempts superseded by another non-failed or step-bearing
+ *    subagent in the same group/turn.
+ */
+export function isSuppressedSubagentNoiseItem(
+  item: ChatItem,
+  siblingItems: readonly ChatItem[],
+  run?: SubagentRun | null,
+  siblingRuns?: ReadonlyArray<SubagentRun | null>,
+): boolean {
+  if (isHookBlockedInvokeNoise(item)) return true;
+  if (!isZeroStepUnbackedFailedItem(item, run)) return false;
+  return siblingItems.some((other, idx) => {
+    if (other.id === item.id) return false;
+    const otherRun = siblingRuns ? siblingRuns[idx] : null;
+    if (!isItemFailed(other, otherRun)) return true;
+    const otherSteps = Math.max(
+      otherRun?.stepCount ?? 0,
+      other.subagentMeta?.stepCount ?? 0,
+      otherRun?.items?.length ?? 0,
+    );
+    return otherSteps > 0;
+  });
+}
+
+/**
+ * Defensive Option 1 noise suppression for `SubagentRun` rows in RightDock overviews.
+ */
+export function isSuppressedNoiseRun(run: SubagentRun, allRuns: readonly SubagentRun[]): boolean {
+  const s = (run.status ?? '').toLowerCase();
+  if (s !== 'failed' && s !== 'error') return false;
+  const steps = Math.max(run.stepCount ?? 0, run.items?.length ?? 0);
+  const backed = Boolean(run.childThreadId || run.transcriptUri || (run.items?.length ?? 0) > 0);
+  if (steps === 0 && !backed) {
+    const latest = (run.latestActivity ?? '').trim();
+    if (latest && isHookBlockedText(latest)) return true;
+    if (isWaitTimeoutReceiptText(latest)) {
+      return allRuns.some((other) => other.subagentId !== run.subagentId && other.status !== 'failed');
+    }
+  }
+  return false;
+}
+
 function isRunBacked(run?: SubagentRun | null): boolean {
   if (!run) return false;
   return Boolean(
@@ -27,6 +177,61 @@ function isRunBacked(run?: SubagentRun | null): boolean {
       run.transcriptUri ||
       (Array.isArray(run.items) && run.items.length > 0),
   );
+}
+
+function isRunTerminalStatus(status?: string | null): boolean {
+  return TERMINAL_STATUSES.has((status ?? '').trim().toLowerCase());
+}
+
+function runProgressScore(run: SubagentRun): number {
+  const itemsLen = Array.isArray(run.items) ? run.items.length : 0;
+  const stepCount = typeof run.stepCount === 'number' ? run.stepCount : 0;
+  const terminalBonus = isRunTerminalStatus(run.status) ? 500 : 0;
+  const realCallBonus =
+    run.parentToolCallId && !run.parentToolCallId.startsWith('dispatch-subagent-') ? 200 : 0;
+  const backedBonus = isRunBacked(run) ? 100 : 0;
+  return itemsLen * 1_000_000 + stepCount * 1_000 + terminalBonus + realCallBonus + backedBonus;
+}
+
+function mergeDuplicateRunPair(existing: SubagentRun, candidate: SubagentRun): SubagentRun {
+  const existingScore = runProgressScore(existing);
+  const candidateScore = runProgressScore(candidate);
+  const candidateWins =
+    candidateScore > existingScore ||
+    (candidateScore === existingScore &&
+      (candidate.updatedAtUnixMs ?? 0) >= (existing.updatedAtUnixMs ?? 0));
+  const winner = candidateWins ? candidate : existing;
+  const loser = candidateWins ? existing : candidate;
+
+  const winnerCallId = (winner.parentToolCallId ?? '').trim();
+  const loserCallId = (loser.parentToolCallId ?? '').trim();
+  const preferredCallId =
+    winnerCallId && !winnerCallId.startsWith('dispatch-subagent-')
+      ? winnerCallId
+      : loserCallId && !loserCallId.startsWith('dispatch-subagent-')
+        ? loserCallId
+        : winnerCallId || loserCallId || undefined;
+
+  const wStart = typeof winner.startedAtUnixMs === 'number' && winner.startedAtUnixMs > 0 ? winner.startedAtUnixMs : 0;
+  const lStart = typeof loser.startedAtUnixMs === 'number' && loser.startedAtUnixMs > 0 ? loser.startedAtUnixMs : 0;
+  const earliestStart = wStart > 0 && lStart > 0 ? Math.min(wStart, lStart) : wStart || lStart;
+
+  const settledStatus = isRunTerminalStatus(winner.status)
+    ? winner.status
+    : isRunTerminalStatus(loser.status)
+      ? loser.status
+      : winner.status;
+
+  return {
+    ...loser,
+    ...winner,
+    status: settledStatus,
+    parentToolCallId: preferredCallId ?? winner.parentToolCallId,
+    startedAtUnixMs: earliestStart || winner.startedAtUnixMs,
+    completedAtUnixMs: winner.completedAtUnixMs ?? loser.completedAtUnixMs,
+    stepCount: Math.max(winner.stepCount ?? 0, loser.stepCount ?? 0),
+    items: (winner.items?.length ?? 0) >= (loser.items?.length ?? 0) ? winner.items : loser.items,
+  };
 }
 
 function isSubagentItemBacked(item: ChatItem): boolean {
@@ -51,9 +256,13 @@ export function dedupeSubagentRuns(runs?: SubagentRun[] | null): SubagentRun[] {
       if (r.childThreadId && candidate.childThreadId && r.childThreadId === candidate.childThreadId) {
         return true;
       }
+      const hasConflictingChild = Boolean(
+        r.childThreadId && candidate.childThreadId && r.childThreadId !== candidate.childThreadId,
+      );
       if (
-        (r.parentToolCallId && r.parentToolCallId === candidate.subagentId) ||
-        (candidate.parentToolCallId && candidate.parentToolCallId === r.subagentId)
+        !hasConflictingChild &&
+        ((r.parentToolCallId && r.parentToolCallId === candidate.subagentId) ||
+          (candidate.parentToolCallId && candidate.parentToolCallId === r.subagentId))
       ) {
         return true;
       }
@@ -77,12 +286,8 @@ export function dedupeSubagentRuns(runs?: SubagentRun[] | null): SubagentRun[] {
 
     if (existingIdx === -1) {
       result.push(candidate);
-    } else if (candBacked && !isRunBacked(result[existingIdx])) {
-      result[existingIdx] = {
-        ...result[existingIdx],
-        ...candidate,
-        parentToolCallId: candidate.parentToolCallId ?? result[existingIdx].parentToolCallId,
-      };
+    } else {
+      result[existingIdx] = mergeDuplicateRunPair(result[existingIdx], candidate);
     }
   }
   return result;
@@ -213,20 +418,51 @@ export function isItemBlocked(item: ChatItem, run?: SubagentRun | null): boolean
 }
 
 export function isItemFailed(item: ChatItem, run?: SubagentRun | null): boolean {
-  const rawStatus = (run?.status || item.subagentMeta?.status || item.status || '').toLowerCase();
+  const runStatus = run?.status?.toLowerCase();
+  if (runStatus) {
+    return (
+      runStatus === 'failed' ||
+      runStatus === 'error' ||
+      runStatus === 'killed' ||
+      runStatus === 'cancelled'
+    );
+  }
+  const rawStatus = (item.subagentMeta?.status || item.status || '').toLowerCase();
+  if ((rawStatus === 'failed' || rawStatus === 'error') && isWaitTimeoutReceiptText(item.text)) {
+    return false;
+  }
   return rawStatus === 'failed' || rawStatus === 'error' || rawStatus === 'killed' || rawStatus === 'cancelled';
 }
 
 export function matchSubagentRun(item: ChatItem, subagentRuns?: SubagentRun[] | null): SubagentRun | null {
   if (!subagentRuns?.length || !item.subagentMeta) return null;
-  const sid = item.subagentMeta.subagentId;
-  const ctid = item.subagentMeta.childThreadId;
+  const receiptCid = extractStartedChildThreadId(item.text);
+  if (receiptCid) {
+    const byReceipt = subagentRuns.find(
+      (r) => r.childThreadId === receiptCid || r.subagentId === receiptCid,
+    );
+    if (byReceipt) return byReceipt;
+  }
+  const ctid = item.subagentMeta.childThreadId?.trim();
+  const sid = item.subagentMeta.subagentId?.trim();
+  if (ctid) {
+    const byChild = subagentRuns.find((r) => r.childThreadId === ctid || r.subagentId === ctid);
+    if (byChild) return byChild;
+  }
+  if (sid && sid !== item.id) {
+    const bySubId = subagentRuns.find((r) => r.subagentId === sid || r.childThreadId === sid);
+    if (bySubId) return bySubId;
+  }
   return (
-    subagentRuns.find(
-      (r) =>
-        (sid && (r.subagentId === sid || r.parentToolCallId === item.id)) ||
-        (ctid && r.childThreadId === ctid),
-    ) ?? null
+    subagentRuns.find((r) => {
+      if (sid && r.subagentId === sid) return true;
+      if (r.parentToolCallId === item.id) {
+        if (receiptCid && r.childThreadId && r.childThreadId !== receiptCid) return false;
+        if (ctid && r.childThreadId && r.childThreadId !== ctid) return false;
+        return true;
+      }
+      return false;
+    }) ?? null
   );
 }
 

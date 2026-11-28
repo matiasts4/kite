@@ -57,6 +57,7 @@ vi.mock('./TerminalCanvasSurface', async () => {
       return ReactMod.createElement('div', {
         'data-testid': `mock-surface-${props.sessionId}`,
         onDoubleClick: () => props.onProcessExit?.(0),
+        onContextMenu: () => props.onAccountRotated?.(),
       });
     }),
     measureTerminalCanvasGrid: vi.fn(() => ({
@@ -185,7 +186,7 @@ describe('TerminalView provider-scoped command bus', () => {
     ).toHaveLength(0);
   });
 
-  it('clears exit banner without restarting when terminal://account-rotated arrives for that session', async () => {
+  it('clears exit banner via surface onAccountRotated without registering duplicate Tauri listeners in TerminalView', async () => {
     vi.mocked(isTauriEnvironment).mockReturnValue(true);
 
     render(
@@ -196,9 +197,13 @@ describe('TerminalView provider-scoped command bus', () => {
     );
 
     await waitFor(() => {
-      const rotationListeners = tauriListeners.get('terminal://account-rotated') ?? [];
-      expect(rotationListeners.length).toBeGreaterThanOrEqual(2);
+      const attachCalls = vi.mocked(invokeCommand).mock.calls.filter(([cmd]) => cmd === 'attach_terminal');
+      expect(attachCalls.length).toBe(2);
     });
+
+    // TerminalView must not register a duplicate terminal://account-rotated listener;
+    // useTerminalSnapshotPoller owns the single listener per surface.
+    expect(tauriListeners.get('terminal://account-rotated') ?? []).toHaveLength(0);
 
     // Simulate process exit bar appearing on sid-agy
     fireEvent.doubleClick(screen.getByTestId('mock-surface-sid-agy'));
@@ -207,33 +212,11 @@ describe('TerminalView provider-scoped command bus', () => {
     vi.mocked(invokeCommand).mockClear();
 
     // Emitting rotation for sid-codex must NOT clear sid-agy exit bar
-    await act(async () => {
-      for (const listener of tauriListeners.get('terminal://account-rotated') ?? []) {
-        listener({
-          payload: {
-            sessionId: 'sid-codex',
-            provider: 'antigravity',
-            accountLabel: 'Google Work',
-            email: 'work@company.com',
-          },
-        });
-      }
-    });
+    fireEvent.contextMenu(screen.getByTestId('mock-surface-sid-codex'));
     expect(screen.queryByText(/Process exited with code 0/i)).toBeTruthy();
 
     // Emitting rotation for sid-agy clears exit banner and restores running without calling attach/start
-    await act(async () => {
-      for (const listener of tauriListeners.get('terminal://account-rotated') ?? []) {
-        listener({
-          payload: {
-            sessionId: 'sid-agy',
-            provider: 'antigravity',
-            accountLabel: 'Google Work',
-            email: 'work@company.com',
-          },
-        });
-      }
-    });
+    fireEvent.contextMenu(screen.getByTestId('mock-surface-sid-agy'));
 
     await waitFor(() => {
       expect(screen.queryByText(/Process exited with code 0/i)).toBeNull();
@@ -245,7 +228,7 @@ describe('TerminalView provider-scoped command bus', () => {
     ).toHaveLength(0);
   });
 
-  it('useTerminalSnapshotPoller resets exit state, seq, and polls immediately on terminal://account-rotated', async () => {
+  it('useTerminalSnapshotPoller resets exit state, seq, invokes onAccountRotated for matching session only, and polls immediately', async () => {
     vi.mocked(isTauriEnvironment).mockReturnValue(true);
     (invokeCommand as any).mockResolvedValue({ kind: 'unchanged', seq: 42 });
 
@@ -256,6 +239,7 @@ describe('TerminalView provider-scoped command bus', () => {
     const lastSeqRef = { current: 42 };
     const hasNotifiedExitRef = { current: false };
     const onProcessExit = vi.fn();
+    const onAccountRotated = vi.fn();
 
     renderHook(() =>
       useTerminalSnapshotPoller({
@@ -278,6 +262,7 @@ describe('TerminalView provider-scoped command bus', () => {
         lastSeqRef,
         hasNotifiedExitRef,
         onProcessExit,
+        onAccountRotated,
         scheduleRender: vi.fn(),
         preferBinarySnapshot: false,
       })
@@ -299,7 +284,22 @@ describe('TerminalView provider-scoped command bus', () => {
 
     vi.mocked(invokeCommand).mockClear();
 
-    // Planned rotation event resets exit flag & seq and forces snapshot pull
+    // Rotation event for a different session must be ignored
+    await act(async () => {
+      for (const listener of tauriListeners.get('terminal://account-rotated') ?? []) {
+        listener({
+          payload: {
+            sessionId: 'sid-other-poll',
+            provider: 'antigravity',
+            accountLabel: 'Google Work',
+            email: 'work@company.com',
+          },
+        });
+      }
+    });
+    expect(onAccountRotated).not.toHaveBeenCalled();
+
+    // Planned rotation event resets exit flag & seq, invokes onAccountRotated, and forces snapshot pull
     await act(async () => {
       for (const listener of tauriListeners.get('terminal://account-rotated') ?? []) {
         listener({
@@ -315,6 +315,7 @@ describe('TerminalView provider-scoped command bus', () => {
 
     expect(hasNotifiedExitRef.current).toBe(false);
     expect(lastSeqRef.current).toBe(0);
+    expect(onAccountRotated).toHaveBeenCalledTimes(1);
     await waitFor(() => {
       expect(
         vi.mocked(invokeCommand).mock.calls.filter(([cmd]) => cmd === 'poll_terminal_snapshot').length

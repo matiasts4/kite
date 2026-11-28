@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { BrowserView } from './views/BrowserView';
-import { closeBrowserSurfaceSession, getBrowserSurfaceSession } from './views/browser/browserSurfaceRegistry';
+import {
+  closeBrowserSurfaceSession,
+  closeInactiveBrowserSurfaces,
+  getBrowserSurfaceSession,
+} from './views/browser/browserSurfaceRegistry';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT, consumePendingBrowserRequest } from '../lib/terminalLinkNav';
 import {
   OPEN_DIFFS_EVENT,
@@ -17,8 +21,14 @@ const DiffsView = React.lazy(() =>
 import { TicketsView } from './views/TicketsView';
 import { PromptsView } from './views/PromptsView';
 import { SidePanelAppsView } from './views/SidePanelAppsView';
+import { SidecarPanelView } from './views/SidecarPanelView';
 import { AgentDashboardView } from './views/apps/AgentDashboardView';
 import { SubagentInspectorView } from './views/subagents/SubagentInspectorView';
+import { VoiceTranscriptPane } from './views/voice/VoiceTranscriptPane';
+import {
+  consumePendingVoiceTranscriptRequest,
+  type PendingVoiceTranscriptRequest,
+} from './views/chat/VoiceTranscriptCard';
 import { AgentStatusIndicator } from './ui/AgentStatusIndicator';
 import { ErrorBoundary } from './ui/ErrorBoundary';
 import { getActiveAgentTerminals } from '../lib/terminalRegistry';
@@ -27,6 +37,20 @@ import {
   consumePendingSubagentRequest,
   type OpenRightDockSubagentDetail,
 } from '../lib/subagentNav';
+import {
+  OPEN_RIGHT_DOCK_SIDECAR_EVENT,
+  consumePendingSidecarRequest,
+  registerKnownSidecars,
+  type OpenRightDockSidecarDetail,
+} from '../lib/sidecarNav';
+import {
+  listUiSidecars,
+  pluginMcpAppListEntrypoints,
+  runSidecarAction,
+  type McpAppEntrypointDto,
+  type SidecarStatusSnapshot,
+} from '../lib/ipc/pluginRuntime';
+import { McpAppFrame } from './views/plugins/McpAppFrame';
 import { loadChatThread } from '../lib/ipc/chat';
 import { countRunningSubagents } from './views/chat/hooks/useSubagentEvents';
 import { AnimatePresence, motion } from 'motion/react';
@@ -46,6 +70,7 @@ import {
   type TabResolvedDef,
   loadInitialTabs,
   persistTabs,
+  computeResponsiveDockWidth,
   loadInitialWidth,
   persistWidth,
   resolveTabDef,
@@ -79,7 +104,7 @@ export interface RightDockProps {
   onStartAgent?: () => void;
 }
 
-export const RightDock: React.FC<RightDockProps> = ({
+const RightDockInner: React.FC<RightDockProps> = ({
   visible,
   workspaceId,
   selectedThreadId = null,
@@ -109,34 +134,127 @@ export const RightDock: React.FC<RightDockProps> = ({
     });
   }, [selectedThreadId]);
   const [panelWidth, setPanelWidth] = useState<number>(() => loadInitialWidth());
+  const [viewportWidth, setViewportWidth] = useState<number>(() =>
+    typeof window !== 'undefined' ? window.innerWidth : 1366
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+  const effectivePanelWidth = computeResponsiveDockWidth(panelWidth, viewportWidth);
   const [dragging, setDragging] = useState(false);
-  const widthRef = useRef(panelWidth);
-  widthRef.current = panelWidth;
+  const widthRef = useRef(effectivePanelWidth);
+  widthRef.current = effectivePanelWidth;
 
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [isNewTabMenuOpen, setIsNewTabMenuOpen] = useState(false);
   const [highlightedMenuId, setHighlightedMenuId] = useState<string | null>(null);
+  const [uiSidecars, setUiSidecars] = useState<SidecarStatusSnapshot[]>([]);
+  const [mcpAppEntrypoints, setMcpAppEntrypoints] = useState<McpAppEntrypointDto[]>([]);
+  const uiSidecarsRef = useRef<SidecarStatusSnapshot[]>(uiSidecars);
+  uiSidecarsRef.current = uiSidecars;
   const asideRef = useRef<HTMLElement | null>(null);
+
+  const [savedWorkspaceId, setSavedWorkspaceId] = useState<string | null>(() => {
+    if (!visible || workspaceId || typeof window === 'undefined') return null;
+    try {
+      return window.localStorage.getItem('kite.selectedWorkspaceId');
+    } catch {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    if (!visible || workspaceId || typeof window === 'undefined') return;
+    try {
+      const next = window.localStorage.getItem('kite.selectedWorkspaceId');
+      setSavedWorkspaceId((prev) => (prev === next ? prev : next));
+    } catch {
+      setSavedWorkspaceId(null);
+    }
+  }, [visible, workspaceId]);
 
   const effectiveWorkspaceId = useMemo(() => {
     if (workspaceId) return workspaceId;
-    const saved = typeof window !== 'undefined' ? localStorage.getItem('kite.selectedWorkspaceId') : null;
-    if (saved && workspaces?.some((w) => w.id === saved)) return saved;
+    if (savedWorkspaceId && workspaces?.some((w) => w.id === savedWorkspaceId)) {
+      return savedWorkspaceId;
+    }
     return workspaces?.[0]?.id ?? null;
-  }, [workspaceId, workspaces]);
+  }, [workspaceId, savedWorkspaceId, workspaces]);
 
   useEffect(() => {
-    if (!workspaceId && effectiveWorkspaceId && onSelectWorkspace) {
+    if (visible && !workspaceId && effectiveWorkspaceId && onSelectWorkspace) {
       onSelectWorkspace(effectiveWorkspaceId);
     }
-  }, [workspaceId, effectiveWorkspaceId, onSelectWorkspace]);
+  }, [visible, workspaceId, effectiveWorkspaceId, onSelectWorkspace]);
+
+  // Destroy dormant WebView2 browser surfaces belonging to inactive workspaces.
+  useEffect(() => {
+    if (!visible && !workspaceId) return;
+    void closeInactiveBrowserSurfaces(effectiveWorkspaceId);
+  }, [visible, workspaceId, effectiveWorkspaceId]);
+
+  const refreshUiSidecars = useCallback(async () => {
+    try {
+      const sidecars = await listUiSidecars(effectiveWorkspaceId);
+      setUiSidecars(sidecars);
+      registerKnownSidecars(sidecars);
+    } catch (err) {
+      console.warn('[RightDock] Failed to load UI sidecars:', err);
+    }
+  }, [effectiveWorkspaceId]);
+
+  const refreshMcpAppEntrypoints = useCallback(async () => {
+    try {
+      const entrypoints = await pluginMcpAppListEntrypoints(effectiveWorkspaceId);
+      setMcpAppEntrypoints(entrypoints);
+    } catch (err) {
+      console.warn('[RightDock] Failed to load MCP App entrypoints:', err);
+    }
+  }, [effectiveWorkspaceId]);
+
+  useEffect(() => {
+    if (!visible) return;
+    void refreshUiSidecars();
+    const handlePluginsUpdated = () => {
+      void refreshUiSidecars();
+    };
+    window.addEventListener('kite:plugins-updated', handlePluginsUpdated);
+    return () => {
+      window.removeEventListener('kite:plugins-updated', handlePluginsUpdated);
+    };
+  }, [visible, isNewTabMenuOpen, refreshUiSidecars]);
+
+  useEffect(() => {
+    if (!visible || !isNewTabMenuOpen) return;
+    void refreshMcpAppEntrypoints();
+    const handlePluginsUpdated = () => {
+      void refreshMcpAppEntrypoints();
+    };
+    window.addEventListener('kite:plugins-updated', handlePluginsUpdated);
+    return () => {
+      window.removeEventListener('kite:plugins-updated', handlePluginsUpdated);
+    };
+  }, [visible, isNewTabMenuOpen, refreshMcpAppEntrypoints]);
 
   const allMenuItems = useMemo(
     () => [
       ...STANDARD_MENU_TABS.map((t) => ({ id: `std-${t.kind}`, kind: t.kind, type: 'standard' as const })),
       ...APP_MENU_TABS.map((t) => ({ id: `app-${t.appId}`, appId: t.appId, type: 'app' as const })),
+      ...uiSidecars.map((s) => ({
+        id: `sidecar-${s.namespacedId}`,
+        sidecar: s,
+        type: 'sidecar' as const,
+      })),
+      ...mcpAppEntrypoints.map((entry) => ({
+        id: `mcp-app-${entry.id}`,
+        entry,
+        type: 'mcp-app' as const,
+      })),
     ],
-    []
+    [uiSidecars, mcpAppEntrypoints]
   );
 
   // Set inert on background siblings while maximized/fullscreen
@@ -196,6 +314,40 @@ export const RightDock: React.FC<RightDockProps> = ({
     };
   }, [visible]);
 
+  const [requestedVoiceCallId, setRequestedVoiceCallId] = useState<string | null>(null);
+  const [requestedVoiceThreadId, setRequestedVoiceThreadId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const applyVoiceTranscriptRequest = (detail?: PendingVoiceTranscriptRequest | null) => {
+      if (detail?.callId !== undefined) {
+        setRequestedVoiceCallId(detail.callId ?? null);
+      }
+      if (detail?.threadId !== undefined) {
+        setRequestedVoiceThreadId(detail.threadId ?? null);
+      }
+      setTabs((prev) => {
+        if (!prev.some((t) => t.id === 'voice-transcript')) {
+          return [...prev, { id: 'voice-transcript', kind: 'voice-transcript' }];
+        }
+        return prev;
+      });
+      setActiveTabId('voice-transcript');
+    };
+
+    const handleOpenVoiceTranscript = (e: Event) => {
+      const custom = e as CustomEvent<PendingVoiceTranscriptRequest>;
+      consumePendingVoiceTranscriptRequest();
+      applyVoiceTranscriptRequest(custom.detail);
+    };
+
+    const pending = consumePendingVoiceTranscriptRequest();
+    if (pending) {
+      applyVoiceTranscriptRequest(pending);
+    }
+    window.addEventListener('kite:open-voice-transcript', handleOpenVoiceTranscript);
+    return () => window.removeEventListener('kite:open-voice-transcript', handleOpenVoiceTranscript);
+  }, []);
+
   // Listen for open-right-dock-file to switch to the files tab
   useEffect(() => {
     const handleOpenFile = () => {
@@ -246,6 +398,99 @@ export const RightDock: React.FC<RightDockProps> = ({
     window.addEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowser);
     return () => window.removeEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowser);
   }, [effectiveWorkspaceId]);
+
+  const tabsRef = useRef<DockTabItem[]>(tabs);
+  tabsRef.current = tabs;
+
+  const openOrFocusSidecarTab = useCallback((detail: OpenRightDockSidecarDetail) => {
+    const rawId = detail.sidecarId?.trim();
+    if (!rawId) return;
+
+    const known = uiSidecarsRef.current;
+    let matched = known.find(
+      (s) =>
+        s.namespacedId.toLowerCase() === rawId.toLowerCase() ||
+        s.sidecarId.toLowerCase() === rawId.toLowerCase()
+    );
+    let resolvedViewPath = detail.viewPath;
+
+    if (!matched && rawId.includes('/')) {
+      const [head, ...rest] = rawId.split('/');
+      const shortMatch = known.find((s) => s.sidecarId.toLowerCase() === head.toLowerCase());
+      if (shortMatch) {
+        matched = shortMatch;
+        const prefix = `/${rest.join('/')}`;
+        if (!resolvedViewPath || resolvedViewPath === '/') {
+          resolvedViewPath = prefix;
+        }
+      }
+    }
+
+    const resolvedSidecarId = matched?.namespacedId ?? rawId;
+    const defaultTabId = `sidecar:${resolvedSidecarId}`;
+    const resolvedTitle =
+      detail.title?.trim() ||
+      matched?.views[0]?.title?.trim() ||
+      matched?.displayName?.trim() ||
+      null;
+    const nextViewPath = resolvedViewPath ?? matched?.views[0]?.path ?? '/';
+
+    const existingCurrent = tabsRef.current.find(
+      (t) =>
+        t.id === defaultTabId ||
+        (t.kind === 'sidecar' &&
+          matched &&
+          (t.sidecarId?.toLowerCase() === matched.namespacedId.toLowerCase() ||
+            t.sidecarId?.toLowerCase() === matched.sidecarId.toLowerCase()))
+    );
+    const targetTabId = existingCurrent?.id ?? defaultTabId;
+
+    setTabs((prev) => {
+      const existing = prev.find((t) => t.id === targetTabId);
+      if (existing) {
+        const updatedViewPath = resolvedViewPath ?? existing.viewPath ?? nextViewPath;
+        const updatedTitle = detail.title?.trim() || existing.title || resolvedTitle;
+        if (updatedViewPath === existing.viewPath && updatedTitle === existing.title) {
+          return prev;
+        }
+        return prev.map((t) =>
+          t.id === existing.id
+            ? { ...t, viewPath: updatedViewPath, title: updatedTitle }
+            : t
+        );
+      }
+      return [
+        ...prev,
+        {
+          id: defaultTabId,
+          kind: 'sidecar',
+          sidecarId: resolvedSidecarId,
+          viewPath: nextViewPath,
+          title: resolvedTitle,
+        },
+      ];
+    });
+    setActiveTabId(targetTabId);
+  }, []);
+
+  // Listen for open-right-dock-sidecar event and consume any queued mount request
+  useEffect(() => {
+    const handleOpenSidecar = (e: Event) => {
+      const custom = e as CustomEvent<OpenRightDockSidecarDetail>;
+      consumePendingSidecarRequest();
+      if (custom.detail?.sidecarId) {
+        openOrFocusSidecarTab(custom.detail);
+      }
+    };
+
+    const pendingSidecar = consumePendingSidecarRequest();
+    if (pendingSidecar?.sidecarId) {
+      openOrFocusSidecarTab(pendingSidecar);
+    }
+
+    window.addEventListener(OPEN_RIGHT_DOCK_SIDECAR_EVENT, handleOpenSidecar);
+    return () => window.removeEventListener(OPEN_RIGHT_DOCK_SIDECAR_EVENT, handleOpenSidecar);
+  }, [openOrFocusSidecarTab]);
 
   // Listen for open-right-dock-diffs event to switch to or open diffs tab
   useEffect(() => {
@@ -349,27 +594,29 @@ export const RightDock: React.FC<RightDockProps> = ({
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
       return;
     }
+    // One-shot count when the tracked thread changes. Later changes arrive through the
+    // `kite:subagent-activity-count` listener, so lifecycle events never re-download the
+    // whole thread here.
     let cancelled = false;
-    const syncCount = () => {
-      void loadChatThread(trackedSubagentThreadId)
-        .then((thread) => {
-          if (!cancelled) {
-            setLiveSubagentsCount(countRunningSubagents(thread));
-          }
-        })
-        .catch(() => undefined);
-    };
-    syncCount();
-    const onThreadsChanged = () => syncCount();
-    window.addEventListener('kite:threads-changed', onThreadsChanged);
+    void loadChatThread(trackedSubagentThreadId)
+      .then((thread) => {
+        if (!cancelled) {
+          setLiveSubagentsCount(countRunningSubagents(thread));
+        }
+      })
+      .catch(() => undefined);
     return () => {
       cancelled = true;
-      window.removeEventListener('kite:threads-changed', onThreadsChanged);
     };
   }, [trackedSubagentThreadId, activeSubagentsCount]);
 
   // Persistence for tabs & active tab
+  const hasMountedTabsRef = useRef(false);
   useEffect(() => {
+    if (!hasMountedTabsRef.current) {
+      hasMountedTabsRef.current = true;
+      return;
+    }
     persistTabs(tabs, activeTabId);
   }, [tabs, activeTabId]);
 
@@ -480,6 +727,20 @@ export const RightDock: React.FC<RightDockProps> = ({
   });
 
   const handleCloseTab = (tabId: string) => {
+    const closingTab = tabs.find((t) => t.id === tabId);
+    const targetSidecarId =
+      closingTab?.kind === 'sidecar' && closingTab.sidecarId
+        ? closingTab.sidecarId
+        : null;
+    const shouldStopSidecar =
+      targetSidecarId !== null &&
+      !tabs.some(
+        (t) =>
+          t.id !== tabId &&
+          t.kind === 'sidecar' &&
+          t.sidecarId === targetSidecarId
+      );
+
     setTabs((prev) => {
       const tabIndex = prev.findIndex((t) => t.id === tabId);
       if (tabIndex === -1) return prev;
@@ -491,11 +752,28 @@ export const RightDock: React.FC<RightDockProps> = ({
       }
       return next;
     });
-    // Closing the browser tab tears down the native WebView2 surface.
-    if (tabId === 'browser') void closeBrowserSurfaceSession(workspaceId);
+    // Closing the browser tab tears down the native WebView2 surface(s).
+    if (tabId === 'browser') {
+      void closeBrowserSurfaceSession(effectiveWorkspaceId);
+      void closeInactiveBrowserSurfaces(effectiveWorkspaceId);
+    }
+    // Closing the last tab for a UI sidecar stops it to free memory and loopback ports.
+    if (shouldStopSidecar && targetSidecarId) {
+      void runSidecarAction(targetSidecarId, 'stop', {
+        workspaceId: effectiveWorkspaceId,
+      })
+        .then(() => {
+          void refreshUiSidecars();
+        })
+        .catch((err) => {
+          console.warn(`[RightDock] Failed to stop closed sidecar ${targetSidecarId}:`, err);
+        });
+    }
   };
 
-  const handleOpenStandardTab = (kind: 'browser' | 'files' | 'diffs' | 'tasks' | 'prompts' | 'subagents') => {
+  const handleOpenStandardTab = (
+    kind: 'browser' | 'files' | 'diffs' | 'tasks' | 'prompts' | 'subagents' | 'voice-transcript'
+  ) => {
     setTabs((prev) => {
       if (!prev.some((t) => t.id === kind)) return [...prev, { id: kind, kind }];
       return prev;
@@ -513,6 +791,48 @@ export const RightDock: React.FC<RightDockProps> = ({
     setActiveTabId(tabId);
     setIsNewTabMenuOpen(false);
   };
+
+  const handleOpenSidecarTab = useCallback(
+    (sidecar: SidecarStatusSnapshot) => {
+      openOrFocusSidecarTab({
+        sidecarId: sidecar.namespacedId || sidecar.sidecarId,
+        viewPath: sidecar.views[0]?.path ?? '/',
+        title: sidecar.views[0]?.title?.trim() || sidecar.displayName || sidecar.sidecarId,
+        workspaceId: effectiveWorkspaceId,
+      });
+      setIsNewTabMenuOpen(false);
+    },
+    [effectiveWorkspaceId, openOrFocusSidecarTab]
+  );
+
+  const handleOpenMcpAppTab = useCallback(
+    (entry: McpAppEntrypointDto) => {
+      const tabId = `mcp-app:${entry.serverName}:${entry.toolName}`;
+      const tabTitle = entry.title?.trim() || entry.toolName;
+      setTabs((prev) => {
+        if (!prev.some((t) => t.id === tabId)) {
+          return [
+            ...prev,
+            {
+              id: tabId,
+              kind: 'mcp-app',
+              title: tabTitle,
+              mcpAppSpec: {
+                serverName: entry.serverName,
+                toolName: entry.toolName,
+                resourceUri: entry.resourceUri,
+                title: tabTitle,
+              },
+            },
+          ];
+        }
+        return prev;
+      });
+      setActiveTabId(tabId);
+      setIsNewTabMenuOpen(false);
+    },
+    []
+  );
 
   // Keyboard navigation & Escape for New Tab menu
   useEffect(() => {
@@ -545,13 +865,21 @@ export const RightDock: React.FC<RightDockProps> = ({
         const found = allMenuItems.find((item) => item.id === highlightedMenuId);
         if (found) {
           if (found.type === 'standard') handleOpenStandardTab(found.kind);
-          else handleOpenAppTab(found.appId);
+          else if (found.type === 'app') handleOpenAppTab(found.appId);
+          else if (found.type === 'mcp-app') handleOpenMcpAppTab(found.entry);
+          else handleOpenSidecarTab(found.sidecar);
         }
       }
     };
     window.addEventListener('keydown', handleMenuKeyDown);
     return () => window.removeEventListener('keydown', handleMenuKeyDown);
-  }, [isNewTabMenuOpen, allMenuItems, highlightedMenuId]);
+  }, [
+    isNewTabMenuOpen,
+    allMenuItems,
+    highlightedMenuId,
+    handleOpenMcpAppTab,
+    handleOpenSidecarTab,
+  ]);
 
   // When panel becomes hidden, close the new tab menu if open
   useEffect(() => {
@@ -609,7 +937,7 @@ export const RightDock: React.FC<RightDockProps> = ({
     const startWidth = widthRef.current;
     setDragging(true);
     const onMove = (ev: PointerEvent) => {
-      const next = Math.min(Math.max(320, startWidth - (ev.clientX - startX)), Math.round(window.innerWidth * 0.72));
+      const next = computeResponsiveDockWidth(startWidth - (ev.clientX - startX), window.innerWidth);
       setPanelWidth(next);
       widthRef.current = next;
     };
@@ -657,7 +985,7 @@ export const RightDock: React.FC<RightDockProps> = ({
         <div
           aria-hidden="true"
           className="app-browser-sidebar__spacer"
-          style={{ '--app-browser-width': `${panelWidth}px`, width: panelWidth, minWidth: panelWidth, flex: 'none' } as React.CSSProperties}
+          style={{ '--app-browser-width': `${effectivePanelWidth}px`, width: effectivePanelWidth, minWidth: effectivePanelWidth, flex: 'none' } as React.CSSProperties}
         />
       )}
       <AnimatePresence onExitComplete={() => setDockMounted(false)}>
@@ -668,16 +996,16 @@ export const RightDock: React.FC<RightDockProps> = ({
             {...surfaceMotion('panel', { exitMs: MOTION_EXIT_MS })}
             className={`app-browser-sidebar ${isFullScreen ? 'app-browser-sidebar--fullscreen' : ''}${dragging ? ' app-browser-sidebar--resizing' : ''}`}
             data-testid="app-browser-sidebar"
-            style={isFullScreen ? undefined : ({ '--app-browser-width': `${panelWidth}px`, width: panelWidth, minWidth: panelWidth, flex: 'none' } as React.CSSProperties)}
+            style={isFullScreen ? undefined : ({ '--app-browser-width': `${effectivePanelWidth}px`, width: effectivePanelWidth, minWidth: effectivePanelWidth, flex: 'none' } as React.CSSProperties)}
           >
             {!isFullScreen && (
               <hr
                 className="app-browser-sidebar__grip"
                 aria-label="Resize side panel"
                 aria-orientation="vertical"
-                aria-valuemin={320}
-                aria-valuemax={Math.round(window.innerWidth * 0.72)}
-                aria-valuenow={panelWidth}
+                aria-valuemin={viewportWidth < 900 ? 260 : 320}
+                aria-valuemax={computeResponsiveDockWidth(viewportWidth, viewportWidth)}
+                aria-valuenow={effectivePanelWidth}
                 data-dragging={dragging ? 'true' : undefined}
                 onPointerDown={onGripDown}
                 tabIndex={0}
@@ -819,6 +1147,10 @@ export const RightDock: React.FC<RightDockProps> = ({
                   setHighlightedMenuId={setHighlightedMenuId}
                   onOpenStandardTab={handleOpenStandardTab}
                   onOpenAppTab={handleOpenAppTab}
+                  sidecars={uiSidecars}
+                  onOpenSidecarTab={handleOpenSidecarTab}
+                  mcpAppEntrypoints={mcpAppEntrypoints}
+                  onOpenMcpAppTab={handleOpenMcpAppTab}
                 />
               </div>
 
@@ -892,12 +1224,56 @@ export const RightDock: React.FC<RightDockProps> = ({
                       onClearTarget={() => setRequestedSubagentTarget(null)}
                     />
                   )}
+                  {activeTab.kind === 'voice-transcript' && (
+                    <VoiceTranscriptPane
+                      callId={requestedVoiceCallId}
+                      threadId={requestedVoiceThreadId ?? selectedThreadId}
+                    />
+                  )}
                   {activeTab.kind === 'app' && (
                     <SidePanelAppsView
                       app={activeTab.appId ?? undefined}
                       title={activeTab.appId ? resolveTabDef(activeTab).label : undefined}
                     />
                   )}
+                  {activeTab.kind === 'sidecar' && activeTab.sidecarId && (
+                    <SidecarPanelView
+                      key={activeTab.id}
+                      sidecarId={activeTab.sidecarId}
+                      viewPath={activeTab.viewPath ?? undefined}
+                      title={activeTab.title ?? undefined}
+                      workspaceId={effectiveWorkspaceId}
+                      isResizing={dragging}
+                    />
+                  )}
+                  {activeTab.kind === 'mcp-app' &&
+                    (activeTab.mcpAppSpec ? (
+                      <McpAppFrame
+                        key={activeTab.id}
+                        serverName={activeTab.mcpAppSpec.serverName}
+                        resourceUri={activeTab.mcpAppSpec.resourceUri}
+                        toolName={activeTab.mcpAppSpec.toolName}
+                        title={
+                          activeTab.title ||
+                          activeTab.mcpAppSpec.title ||
+                          activeTab.mcpAppSpec.toolName
+                        }
+                        mode="dock"
+                        workspaceId={effectiveWorkspaceId}
+                        isResizing={dragging}
+                      />
+                    ) : (
+                      <div className="ui-status-notice">
+                        <div className="ui-status-notice__copy">
+                          <p className="ui-status-notice__title">
+                            {activeTab.title || 'MCP App'}
+                          </p>
+                          <p className="ui-status-notice__message">
+                            MCP App view is not configured for this tab.
+                          </p>
+                        </div>
+                      </div>
+                    ))}
                 </ErrorBoundary>
               )}
             </div>
@@ -907,3 +1283,5 @@ export const RightDock: React.FC<RightDockProps> = ({
     </>
   );
 };
+
+export const RightDock = React.memo(RightDockInner);

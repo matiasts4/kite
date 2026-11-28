@@ -206,7 +206,7 @@
 }
 
 @container composer-main (width <= 340px) {
-  .kite-composer-control-pill > svg:last-child {
+  .kite-composer-control-pill > svg:not(:first-child):last-child {
     display: none;
   }
 }
@@ -1144,10 +1144,161 @@
   cursor: not-allowed;
 }
 
+.kite-dictate-control--recording,
 .chat-dictate-control--recording {
   color: var(--status-failed, #ef4444);
   background: color-mix(in srgb, var(--status-failed, #ef4444) 14%, transparent);
   border-color: color-mix(in srgb, var(--status-failed, #ef4444) 30%, transparent);
+}
+
+.kite-composer-glow-stage {
+  position: relative;
+  width: 100%;
+}
+
+.kite-voice-speed-btn {
+  width: auto;
+  min-width: var(--vl-control-md, 32px);
+  padding-inline: 0.5rem;
+}
+
+.kite-voice-trigger-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.chat-voice-mode-control {
+  transition:
+    background-color 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease,
+    width 240ms cubic-bezier(0.2, 0, 0, 1),
+    transform 240ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.chat-voice-mode-control[data-voice-starting='true'] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+}
+
+@keyframes kite-voice-error-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-3px);
+  }
+  40% {
+    transform: translateX(3px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(3px);
+  }
+}
+
+.chat-voice-mode-control[data-voice-error='true'] {
+  color: var(--status-failed);
+  background: color-mix(in srgb, var(--status-failed) 14%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed) 36%, transparent);
+  animation: kite-voice-error-shake 350ms cubic-bezier(0.2, 0, 0, 1) 1;
+}
+
+.kite-voice-error-tip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  width: 248px;
+  padding: 10px 12px;
+  border-radius: var(--control-radius, 8px);
+  background: var(--vl-surface-raised, var(--composer));
+  border: 1px solid color-mix(in srgb, var(--status-failed) 42%, var(--vl-stroke-strong));
+  box-shadow: 0 12px 28px -8px var(--vl-shadow-strong, var(--vl-backdrop));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.kite-voice-error-tip__msg {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.kite-voice-error-tip__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.kite-voice-error-tip__btn,
+.kite-voice-error-tip__close {
+  border-radius: var(--vl-radius-xs, 4px);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.kite-voice-error-tip__btn {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, transparent);
+}
+
+.kite-voice-error-tip__close {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--vl-stroke-strong);
+}
+
+.kite-voice-inactivity-notice {
+  width: 100%;
+  max-width: var(--chat-content-max-width, 46rem);
+  margin: 0 auto 6px;
+  padding: 6px 12px;
+  border-radius: var(--control-radius, 8px);
+  background: color-mix(in srgb, var(--status-warning, var(--accent)) 10%, var(--vl-surface-raised, transparent));
+  border: 1px solid color-mix(in srgb, var(--status-warning, var(--accent)) 28%, var(--vl-stroke-strong));
+  color: var(--text-secondary);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.kite-voice-inactivity-notice__dismiss {
+  background: transparent;
+  border: 1px solid var(--vl-stroke-strong);
+  border-radius: var(--vl-radius-xs, 4px);
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-voice-mode-control,
+  .chat-voice-mode-control[data-voice-error='true'] {
+    transition: none;
+    animation: none;
+  }
+}
+
+html[data-motion='reduce'] .chat-voice-mode-control,
+html[data-motion='reduce'] .chat-voice-mode-control[data-voice-error='true'] {
+  transition: none;
+  animation: none;
 }
 
 /* 14. Voice Mode footer — reuses `.kite-composer-footer` geometry; thread-native without Zed badges */
@@ -1350,14 +1501,14 @@ html[data-motion='reduce'] .kite-voice-status__bar {
 
 .kite-voice-ctrl-btn:focus-visible,
 .kite-voice-end-pill:focus-visible {
-  outline: 2px solid var(--vl-focus, var(--accent, #5c8fff));
+  outline: 2px solid var(--vl-focus, var(--accent, rgb(92 143 255)));
   outline-offset: 2px;
 }
 
 .kite-voice-ctrl-btn[data-muted] {
-  color: var(--status-failed, #ef4444);
-  background: color-mix(in srgb, var(--status-failed, #ef4444) 14%, transparent);
-  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 36%, transparent);
+  color: var(--status-failed, rgb(239 68 68));
+  background: color-mix(in srgb, var(--status-failed, rgb(239 68 68)) 14%, transparent);
+  border-color: color-mix(in srgb, var(--status-failed, rgb(239 68 68)) 36%, transparent);
 }
 
 /* Architectural Kite Voice Session End Capsule (32px, glass + accent hairline, danger hint on hover) */
@@ -1369,12 +1520,12 @@ html[data-motion='reduce'] .kite-voice-status__bar {
   align-items: center;
   justify-content: center;
   gap: 0.5rem;
-  background: color-mix(in srgb, var(--accent, #5c8fff) 14%, var(--glass-elevated-bg, var(--chip-fill, rgba(24, 24, 28, 0.9))));
-  color: var(--text-primary, #f4f4f5);
-  border: 1px solid color-mix(in srgb, var(--accent, #5c8fff) 44%, var(--glass-border, var(--vl-stroke, rgba(255, 255, 255, 0.12))));
+  background: rgba(var(--voice-core-rgb, 92, 143, 255), 0.16);
+  color: var(--text-primary, rgb(244 244 245));
+  border: 1px solid rgba(var(--voice-glint-rgb, 180, 225, 255), 0.36);
   box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--text-primary, #ffffff) 12%, transparent),
-    0 6px 16px -8px color-mix(in srgb, var(--accent, #5c8fff) 40%, transparent);
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 6px 18px -8px rgba(var(--voice-core-rgb, 92, 143, 255), 0.45);
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
@@ -1386,12 +1537,12 @@ html[data-motion='reduce'] .kite-voice-status__bar {
 }
 
 .kite-voice-end-pill:hover {
-  background: color-mix(in srgb, var(--status-failed, #ef4444) 16%, var(--glass-elevated-bg, var(--chip-fill, rgba(24, 24, 28, 0.94))));
-  border-color: color-mix(in srgb, var(--status-failed, #ef4444) 52%, var(--glass-border, rgba(255, 255, 255, 0.14)));
-  color: var(--status-failed, #f87171);
+  background: color-mix(in srgb, var(--status-failed, rgb(239 68 68)) 16%, rgba(24, 24, 28, 0.88));
+  border-color: color-mix(in srgb, var(--status-failed, rgb(239 68 68)) 52%, var(--glass-border, rgba(255, 255, 255, 0.14)));
+  color: var(--status-failed, rgb(248 113 113));
   box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--text-primary, #ffffff) 10%, transparent),
-    0 6px 16px -8px color-mix(in srgb, var(--status-failed, #ef4444) 38%, transparent);
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 6px 16px -8px color-mix(in srgb, var(--status-failed, rgb(239 68 68)) 38%, transparent);
 }
 
 .kite-voice-end-pill:active {
@@ -1402,10 +1553,108 @@ html[data-motion='reduce'] .kite-voice-status__bar {
   width: 28px;
   height: 12px;
   flex-shrink: 0;
-  color: var(--accent, #5c8fff);
+  color: rgb(var(--voice-glint-rgb, 180, 225, 255));
   transition: color 0.15s ease;
 }
 
 .kite-voice-end-pill:hover .kite-voice-end-pill__wave {
-  color: var(--status-failed, #f87171);
+  color: var(--status-failed, rgb(248 113 113));
+}
+
+/* 15. Direction A Sculptural Border-Beam Voice Capsule */
+@property --kite-voice-beam-angle {
+  syntax: '<angle>';
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes kite-voice-beam-spin {
+  to {
+    --kite-voice-beam-angle: 360deg;
+  }
+}
+
+.kite-composer-main--voice-active {
+  border-radius: var(--dialog-radius, 14px);
+  background: linear-gradient(
+    180deg,
+    rgba(var(--voice-deep-rgb, 24, 52, 88), 0.22) 0%,
+    rgba(15, 17, 26, 0.72) 100%
+  );
+  -webkit-backdrop-filter: blur(26px) saturate(1.6);
+  backdrop-filter: blur(26px) saturate(1.6);
+  border-color: rgba(var(--voice-core-rgb, 92, 143, 255), 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(var(--voice-glint-rgb, 180, 225, 255), 0.22),
+    0 22px 48px -20px rgba(0, 0, 0, 0.72),
+    0 0 calc(28px + var(--voice-energy, 0) * 24px) -14px rgba(var(--voice-core-rgb, 92, 143, 255), 0.42);
+}
+
+.kite-composer-main--voice-active::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--kite-voice-beam-angle, 0deg),
+    transparent 0deg,
+    rgba(var(--voice-glint-rgb, 180, 225, 255), 0.85) 38deg,
+    rgba(var(--voice-core-rgb, 92, 143, 255), 0.42) 96deg,
+    transparent 165deg,
+    transparent 230deg,
+    rgba(var(--voice-core-rgb, 92, 143, 255), 0.52) 300deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(rgb(0 0 0) 0 0) content-box,
+    linear-gradient(rgb(0 0 0) 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(rgb(0 0 0) 0 0) content-box,
+    linear-gradient(rgb(0 0 0) 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  z-index: 1;
+  animation: kite-voice-beam-spin 9s linear infinite;
+  opacity: 0.82;
+}
+
+.kite-composer-glow-stage[data-voice-state='speaking'] .kite-composer-main--voice-active::before,
+.kite-composer-glow-stage[data-voice-state='listening'] .kite-composer-main--voice-active::before {
+  animation-duration: 5.5s;
+  opacity: 1;
+}
+
+.kite-composer-glow-stage[data-voice-state='muted'] .kite-composer-main--voice-active::before {
+  animation-play-state: paused;
+  opacity: 0.34;
+}
+
+.kite-composer-main--voice-active .kite-composer-textarea {
+  min-height: 44px;
+  padding: 0.75rem 1rem 0.25rem;
+}
+
+[data-theme='light'] .kite-composer-main--voice-active {
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.78) 0%,
+    rgba(246, 249, 255, 0.88) 100%
+  );
+  border-color: rgba(var(--voice-deep-rgb, 28, 86, 168), 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.94),
+    0 18px 40px -20px rgba(15, 23, 42, 0.18),
+    0 0 28px -14px rgba(var(--voice-core-rgb, 56, 128, 232), 0.28);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-composer-main--voice-active::before {
+    animation: none;
+  }
+}
+
+html[data-motion='reduce'] .kite-composer-main--voice-active::before {
+  animation: none;
 }

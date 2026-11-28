@@ -62,4 +62,14 @@ describe('ChatApprovalCard', () => {
     expect(document.querySelector('diffs-container')).toBeNull();
     expect(screen.queryByText('No changes in this diff.')).not.toBeInTheDocument();
   });
+
+  it('renders Always allow button and dispatches alwaysAllow decision', () => {
+    const onDecision = vi.fn();
+    render(<ChatApprovalCard approval={makeApproval()} onDecision={onDecision} />);
+
+    const alwaysAllowBtn = screen.getByRole('button', { name: 'Always allow' });
+    expect(alwaysAllowBtn).toBeInTheDocument();
+    alwaysAllowBtn.click();
+    expect(onDecision).toHaveBeenCalledWith('alwaysAllow', 'req-1');
+  });
 });

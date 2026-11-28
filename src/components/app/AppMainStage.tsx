@@ -1,14 +1,23 @@
-import React, { Suspense, lazy, useEffect, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { isTauriEnvironment } from '../../lib/ipc';
 import { ErrorBoundary } from '../ui/ErrorBoundary';
 import type { WorkMode } from '../Sidebar';
 import type { Workspace, AgentProfile } from '../../types';
 import type { WorkspaceSessionTab } from '../sidebar/types';
 
-const AgentsView = lazy(() => import('../views/AgentsView').then((m) => ({ default: m.AgentsView })));
-const CodeWorkspace = lazy(() => import('../code/CodeWorkspace').then((m) => ({ default: m.CodeWorkspace })));
-const ChatView = lazy(() => import('../views/ChatView').then((m) => ({ default: m.ChatView })));
-const RoutinesView = lazy(() => import('../views/RoutinesView').then((m) => ({ default: m.RoutinesView })));
+const loadAgentsView = () =>
+  import('../views/AgentsView').then((m) => ({ default: m.AgentsView }));
+const loadCodeWorkspace = () =>
+  import('../code/CodeWorkspace').then((m) => ({ default: m.CodeWorkspace }));
+const loadChatView = () =>
+  import('../views/ChatView').then((m) => ({ default: m.ChatView }));
+const loadRoutinesView = () =>
+  import('../views/RoutinesView').then((m) => ({ default: m.RoutinesView }));
+
+const AgentsView = lazy(loadAgentsView);
+const CodeWorkspace = lazy(loadCodeWorkspace);
+const ChatView = lazy(loadChatView);
+const RoutinesView = lazy(loadRoutinesView);
 
 const StageLoadingFallback: React.FC = () => (
   <div
@@ -37,11 +46,14 @@ export interface AppMainStageProps {
   setSelectedWorkspaceId: (id: string | null) => void;
   selectedAgentId: string | null;
   setSelectedAgentId: (id: string | null) => void;
+  selectedAgentThreadId?: string | null;
+  setSelectedAgentThreadId?: React.Dispatch<React.SetStateAction<string | null>>;
   selectedThreadId: string | null;
+  setSelectedThreadId?: (id: string | null) => void;
   agentEditorOpen: boolean;
   setAgentEditorOpen: (open: boolean) => void;
-  agentViewMode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters';
-  setAgentViewMode: (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters') => void;
+  agentViewMode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit';
+  setAgentViewMode: (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => void;
   routinesOpen: boolean;
   setRoutinesOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
@@ -55,7 +67,7 @@ export interface AppMainStageProps {
   newSessionRequest: number;
 }
 
-export const AppMainStage: React.FC<AppMainStageProps> = ({
+const AppMainStageInner: React.FC<AppMainStageProps> = ({
   workMode,
   setWorkMode,
   loading,
@@ -67,7 +79,10 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
   setSelectedWorkspaceId,
   selectedAgentId,
   setSelectedAgentId,
+  selectedAgentThreadId = null,
+  setSelectedAgentThreadId,
   selectedThreadId,
+  setSelectedThreadId,
   agentEditorOpen,
   setAgentEditorOpen,
   agentViewMode,
@@ -94,6 +109,121 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
       setHasOpenedCode(true);
     }
   }, [workMode]);
+
+  useEffect(() => {
+    if (!isTauriEnvironment() || (loading && workspaces.length === 0 && agents.length === 0)) {
+      return;
+    }
+    let cancelled = false;
+    const warmChunks = () => {
+      if (cancelled) return;
+      void loadAgentsView().catch(() => {});
+      void loadCodeWorkspace().catch(() => {});
+      void loadChatView().catch(() => {});
+      void loadRoutinesView().catch(() => {});
+    };
+    const w = typeof window !== 'undefined'
+      ? (window as Window & {
+          requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+          cancelIdleCallback?: (id: number) => void;
+        })
+      : null;
+    if (w?.requestIdleCallback && w?.cancelIdleCallback) {
+      const idleId = w.requestIdleCallback(warmChunks, { timeout: 300 });
+      return () => {
+        cancelled = true;
+        w.cancelIdleCallback!(idleId);
+      };
+    }
+    const timer = window.setTimeout(warmChunks, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [loading, workspaces.length, agents.length]);
+
+  const selectedAgentIdRef = useRef(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
+
+  const handleAgentSelect = useCallback(
+    (id: string) => {
+      if (id !== selectedAgentIdRef.current) {
+        setSelectedAgentThreadId?.(null);
+      }
+      setSelectedAgentId(id);
+      setAgentEditorOpen(false);
+    },
+    [setSelectedAgentThreadId, setSelectedAgentId, setAgentEditorOpen],
+  );
+
+  const handleCloseAgentEditor = useCallback(() => {
+    setAgentEditorOpen(false);
+  }, [setAgentEditorOpen]);
+
+  const handleAgentCreated = useCallback(
+    (agent: AgentProfile) => {
+      setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
+      setSelectedAgentId(agent.id);
+      setAgentEditorOpen(false);
+    },
+    [setAgents, setSelectedAgentId, setAgentEditorOpen],
+  );
+
+  const handleAgentUpdated = useCallback(
+    (updated: AgentProfile) => {
+      setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
+    },
+    [setAgents],
+  );
+
+  const handleAgentDeleted = useCallback(
+    (agentId: string) => {
+      setAgents((prev) => {
+        const remaining = prev.filter((a) => a.id !== agentId);
+        if (selectedAgentIdRef.current === agentId) {
+          setSelectedAgentId(remaining[0]?.id ?? null);
+        }
+        return remaining;
+      });
+    },
+    [setAgents, setSelectedAgentId],
+  );
+
+  const handleOpenRoutines = useCallback(() => {
+    setRoutinesOpen(true);
+    setSettingsOpen(false);
+  }, [setRoutinesOpen, setSettingsOpen]);
+
+  const handleTabRequestedHandled = useCallback(() => {
+    setRequestedCodeTabId(null);
+  }, [setRequestedCodeTabId]);
+
+  const handleCloseRoutines = useCallback(() => {
+    setRoutinesOpen(false);
+  }, [setRoutinesOpen]);
+
+  const handleOpenRoutineThread = useCallback(
+    (agentId: string | null | undefined, threadId: string | null | undefined) => {
+      setRoutinesOpen(false);
+      if (agentId) {
+        setSelectedAgentId(agentId);
+        setSelectedAgentThreadId?.(threadId ?? null);
+        setWorkMode('agent');
+        setAgentViewMode('chats');
+      } else if (threadId) {
+        setSelectedThreadId?.(threadId);
+        setWorkMode('chat');
+      }
+    },
+    [
+      setRoutinesOpen,
+      setSelectedAgentId,
+      setSelectedAgentThreadId,
+      setWorkMode,
+      setAgentViewMode,
+      setSelectedThreadId,
+    ],
+  );
 
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
@@ -165,7 +295,11 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
               workspaceId={selectedWorkspaceId}
               workspaces={workspaces}
               selectedAgentId={selectedAgentId}
+              selectedThreadId={selectedAgentThreadId}
               onSelectAgent={(id) => {
+                if (id !== selectedAgentId) {
+                  setSelectedAgentThreadId?.(null);
+                }
                 setSelectedAgentId(id);
                 setAgentEditorOpen(false);
               }}
@@ -191,8 +325,8 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
               viewMode={agentViewMode}
               onViewModeChange={setAgentViewMode}
               onOpenRoutines={() => {
-                setWorkMode('agent');
-                setAgentViewMode('settings');
+                setRoutinesOpen(true);
+                setSettingsOpen(false);
               }}
             />
           </Suspense>
@@ -235,7 +369,11 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
               workspaceId={selectedWorkspaceId}
               workspaces={workspaces}
               selectedAgentId={selectedAgentId}
+              selectedThreadId={selectedAgentThreadId}
               onSelectAgent={(id) => {
+                if (id !== selectedAgentId) {
+                  setSelectedAgentThreadId?.(null);
+                }
                 setSelectedAgentId(id);
                 setAgentEditorOpen(false);
               }}
@@ -261,8 +399,8 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
               viewMode={agentViewMode}
               onViewModeChange={setAgentViewMode}
               onOpenRoutines={() => {
-                setWorkMode('agent');
-                setAgentViewMode('settings');
+                setRoutinesOpen(true);
+                setSettingsOpen(false);
               }}
             />
           </Suspense>
@@ -288,35 +426,16 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
                     workspaceId={selectedWorkspaceId}
                     workspaces={workspaces}
                     selectedAgentId={selectedAgentId}
-                    onSelectAgent={(id) => {
-                      setSelectedAgentId(id);
-                      setAgentEditorOpen(false);
-                    }}
+                    selectedThreadId={selectedAgentThreadId}
+                    onSelectAgent={handleAgentSelect}
                     agentEditorOpen={agentEditorOpen}
-                    onCloseAgentEditor={() => setAgentEditorOpen(false)}
-                    onAgentCreated={(agent) => {
-                      setAgents((prev) => (prev.some((a) => a.id === agent.id) ? prev : [...prev, agent]));
-                      setSelectedAgentId(agent.id);
-                      setAgentEditorOpen(false);
-                    }}
-                    onAgentUpdated={(updated) => {
-                      setAgents((prev) => prev.map((a) => (a.id === updated.id ? { ...a, ...updated } : a)));
-                    }}
-                    onAgentDeleted={(agentId) => {
-                      setAgents((prev) => {
-                        const remaining = prev.filter((a) => a.id !== agentId);
-                        if (selectedAgentId === agentId) {
-                          setSelectedAgentId(remaining[0]?.id ?? null);
-                        }
-                        return remaining;
-                      });
-                    }}
+                    onCloseAgentEditor={handleCloseAgentEditor}
+                    onAgentCreated={handleAgentCreated}
+                    onAgentUpdated={handleAgentUpdated}
+                    onAgentDeleted={handleAgentDeleted}
                     viewMode={agentViewMode}
                     onViewModeChange={setAgentViewMode}
-                    onOpenRoutines={() => {
-                      setRoutinesOpen(true);
-                      setSettingsOpen(false);
-                    }}
+                    onOpenRoutines={handleOpenRoutines}
                   />
                 </Suspense>
               </ErrorBoundary>
@@ -339,7 +458,7 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
                     selectedAgentId={selectedAgentId}
                     onSessionsChange={handleCodeSessions}
                     requestedTabId={requestedCodeTabId}
-                    onTabRequestedHandled={() => setRequestedCodeTabId(null)}
+                    onTabRequestedHandled={handleTabRequestedHandled}
                     newSessionRequest={newSessionRequest}
                   />
                 </Suspense>
@@ -372,12 +491,8 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
                   <Suspense fallback={<StageLoadingFallback />}>
                     <RoutinesView
                       workspaceId={selectedWorkspaceId}
-                      onOpenThread={(agentId, _threadId) => {
-                        setRoutinesOpen(false);
-                        setSelectedAgentId(agentId);
-                        setWorkMode('agent');
-                        setAgentViewMode('chats');
-                      }}
+                      onBack={handleCloseRoutines}
+                      onOpenThread={handleOpenRoutineThread}
                     />
                   </Suspense>
                 </ErrorBoundary>
@@ -393,3 +508,5 @@ export const AppMainStage: React.FC<AppMainStageProps> = ({
     </main>
   );
 };
+
+export const AppMainStage = React.memo(AppMainStageInner);

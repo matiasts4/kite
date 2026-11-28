@@ -1,6 +1,13 @@
+import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, waitFor, act } from '@testing-library/react';
 import { TerminalCanvasSurface, measureTerminalCanvasGrid } from './TerminalCanvasSurface';
+import {
+  MAX_TERMINAL_CANVAS_DPR,
+  releaseCanvasBackingStore,
+  renderCanvasGrid,
+} from './terminal/canvas/canvasGridRenderer';
+import { DEFAULT_TERMINAL_APPEARANCE_PREFS } from '../../lib/terminalAppearancePrefs';
 import { invokeCommand } from '../../lib/ipc';
 import {
   DEFAULT_THEME_CUSTOMIZATIONS,
@@ -330,5 +337,273 @@ describe('TerminalCanvasSurface', () => {
         live: false,
       });
     });
+  });
+
+  it('stops 166ms replenish_terminal_credit polling while hidden and catches up once when visible again', async () => {
+    vi.useFakeTimers();
+    const prevVisibilityDesc = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    const prevHiddenDesc = Object.getOwnPropertyDescriptor(document, 'hidden');
+    let visState: DocumentVisibilityState = 'visible';
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => visState,
+    });
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => visState === 'hidden',
+    });
+
+    try {
+      (invokeCommand as any).mockResolvedValue({ kind: 'unchanged', seq: 0 });
+      render(<TerminalCanvasSurface sessionId="hidden-heartbeat-1" />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      vi.mocked(invokeCommand).mockClear();
+
+      visState = 'hidden';
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      const hiddenCreditCalls = vi
+        .mocked(invokeCommand)
+        .mock.calls.filter(([cmd]) => cmd === 'replenish_terminal_credit');
+      expect(hiddenCreditCalls).toHaveLength(0);
+      expect(invokeCommand).toHaveBeenCalledWith('set_terminal_presentation', {
+        sessionId: 'hidden-heartbeat-1',
+        live: false,
+      });
+
+      vi.mocked(invokeCommand).mockClear();
+      visState = 'visible';
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(20);
+      });
+
+      expect(invokeCommand).toHaveBeenCalledWith('set_terminal_presentation', {
+        sessionId: 'hidden-heartbeat-1',
+        live: true,
+      });
+      const resumeCreditCalls = vi
+        .mocked(invokeCommand)
+        .mock.calls.filter(([cmd]) => cmd === 'replenish_terminal_credit');
+      expect(resumeCreditCalls).toHaveLength(1);
+      expect(resumeCreditCalls[0]?.[1]).toEqual({ sessionId: 'hidden-heartbeat-1', amount: 1 });
+      expect(invokeCommand).toHaveBeenCalledWith(
+        'poll_terminal_snapshot',
+        expect.objectContaining({ sessionId: 'hidden-heartbeat-1', sinceSeq: 0 }),
+      );
+    } finally {
+      if (prevVisibilityDesc) Object.defineProperty(document, 'visibilityState', prevVisibilityDesc);
+      else delete (document as any).visibilityState;
+      if (prevHiddenDesc) Object.defineProperty(document, 'hidden', prevHiddenDesc);
+      else delete (document as any).hidden;
+      vi.useRealTimers();
+    }
+  });
+
+  it('caps backing store DPR at 1.5 and releases/reallocates hidden canvas backing store after 5000ms grace', async () => {
+    const prevDprDesc = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+    const prevGetContext = HTMLCanvasElement.prototype.getContext;
+    const prevCanvasRect = HTMLCanvasElement.prototype.getBoundingClientRect;
+    const prevDivRect = HTMLDivElement.prototype.getBoundingClientRect;
+
+    const fakeRect = {
+      width: 200,
+      height: 100,
+      top: 0,
+      left: 0,
+      right: 200,
+      bottom: 100,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect;
+
+    const mockCtx = {
+      fillStyle: '',
+      font: '',
+      textBaseline: 'alphabetic',
+      textAlign: 'left',
+      imageSmoothingEnabled: true,
+      strokeStyle: '',
+      lineWidth: 1,
+      globalAlpha: 1,
+      clearRect: vi.fn(),
+      fillRect: vi.fn(),
+      fillText: vi.fn(),
+      measureText: () => ({ width: 8 }),
+      save: vi.fn(),
+      restore: vi.fn(),
+      scale: vi.fn(),
+      translate: vi.fn(),
+      strokeRect: vi.fn(),
+    };
+
+    Object.defineProperty(window, 'devicePixelRatio', {
+      configurable: true,
+      get: () => 2.5,
+    });
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => mockCtx as any);
+    HTMLCanvasElement.prototype.getBoundingClientRect = () => fakeRect;
+    HTMLDivElement.prototype.getBoundingClientRect = () => fakeRect;
+
+    vi.useFakeTimers();
+    try {
+      expect(MAX_TERMINAL_CANVAS_DPR).toBe(1.5);
+
+      const directCanvas = document.createElement('canvas');
+      renderCanvasGrid({
+        canvas: directCanvas,
+        prefs: DEFAULT_TERMINAL_APPEARANCE_PREFS,
+        matrix: [],
+        cursor: { visible: true, col: 0, row: 0, shape: 'bar', blink: false },
+        selection: { start: null, end: null },
+        hoveredLink: null,
+        isFocused: true,
+        scrollbackOffset: 0,
+        cellW: 8,
+        cellH: 16,
+        baseline: 12,
+        gridRows: 4,
+        gridCols: 20,
+        dirtyRows: null,
+      });
+      expect(directCanvas.width).toBe(300);
+      expect(directCanvas.height).toBe(150);
+      expect(releaseCanvasBackingStore(directCanvas)).toBe(true);
+      expect(directCanvas.width).toBe(0);
+      expect(directCanvas.height).toBe(0);
+      expect(releaseCanvasBackingStore(directCanvas)).toBe(false);
+
+      (invokeCommand as any).mockResolvedValue({ kind: 'unchanged', seq: 0 });
+      const { container, rerender } = render(
+        <div className="mode-layer mode-layer--visible" aria-hidden="false">
+          <TerminalCanvasSurface sessionId="backing-release-1" />
+        </div>
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60);
+      });
+
+      const canvas = container.querySelector('canvas.terminal-canvas-surface') as HTMLCanvasElement;
+      expect(canvas.width).toBe(300);
+      expect(canvas.height).toBe(150);
+
+      rerender(
+        <div className="mode-layer" aria-hidden="true">
+          <TerminalCanvasSurface sessionId="backing-release-1" />
+        </div>
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4_500);
+      });
+      expect(canvas.width).toBe(300);
+      expect(canvas.height).toBe(150);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(canvas.width).toBe(0);
+      expect(canvas.height).toBe(0);
+
+      rerender(
+        <div className="mode-layer mode-layer--visible" aria-hidden="false">
+          <TerminalCanvasSurface sessionId="backing-release-1" />
+        </div>
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60);
+      });
+      expect(canvas.width).toBe(300);
+      expect(canvas.height).toBe(150);
+    } finally {
+      vi.useRealTimers();
+      HTMLCanvasElement.prototype.getContext = prevGetContext;
+      HTMLCanvasElement.prototype.getBoundingClientRect = prevCanvasRect;
+      HTMLDivElement.prototype.getBoundingClientRect = prevDivRect;
+      if (prevDprDesc) Object.defineProperty(window, 'devicePixelRatio', prevDprDesc);
+      else delete (window as any).devicePixelRatio;
+    }
+  });
+
+  it('updates aria-live region directly in DOM without triggering React re-renders during streaming', async () => {
+    vi.useFakeTimers();
+    try {
+      let pollSeq = 0;
+      const makeSnapshot = (seq: number, line: string) => ({
+        kind: 'snapshot',
+        snapshot: {
+          seq,
+          cols: 20,
+          rows: 2,
+          alternateScreen: false,
+          applicationCursor: false,
+          bracketedPaste: false,
+          cursor: { visible: true, col: 0, row: 0, shape: 'bar' },
+          dirtyRows: [
+            {
+              rowIdx: 0,
+              cells: Array.from(line).map((ch) => ({
+                ch,
+                width: 1,
+                fg: [250, 250, 250],
+                bg: [10, 10, 10],
+                hasBg: false,
+                bold: false,
+                italic: false,
+                underline: false,
+                inverse: false,
+                dim: false,
+              })),
+            },
+          ],
+          full: true,
+        },
+      });
+
+      (invokeCommand as any).mockImplementation((cmd: string) => {
+        if (cmd === 'poll_terminal_snapshot') {
+          pollSeq += 1;
+          return Promise.resolve(makeSnapshot(pollSeq, pollSeq === 1 ? 'First output' : 'Stream chunk 2'));
+        }
+        return Promise.resolve(null);
+      });
+
+      const onProfilerRender = vi.fn();
+      const { container } = render(
+        <React.Profiler id="terminal-live-region" onRender={onProfilerRender}>
+          <TerminalCanvasSurface sessionId="live-dom-1" />
+        </React.Profiler>
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(350);
+      });
+
+      const liveRegion = container.querySelector('.terminal-canvas-live') as HTMLElement;
+      expect(liveRegion.textContent).toContain('First output');
+
+      const rendersBeforeSecondChunk = onProfilerRender.mock.calls.length;
+      const textarea = container.querySelector('textarea.terminal-canvas-surface__input')!;
+
+      await act(async () => {
+        fireEvent.keyDown(textarea, { key: 'a' });
+        await vi.advanceTimersByTimeAsync(350);
+      });
+
+      expect(liveRegion.textContent).toContain('Stream chunk 2');
+      expect(onProfilerRender.mock.calls.length).toBe(rendersBeforeSecondChunk);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

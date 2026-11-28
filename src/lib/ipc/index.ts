@@ -8,3 +8,5 @@ export * from './agents';
 export * from './git';
 export * from './accounts';
 export * from './operator';
+export * from './remote';
+export * from './pluginRuntime';

@@ -17,7 +17,7 @@ const TOKEN_SOURCE = '\\u{E002}([A-Za-z0-9_-]+)\\u{E003}';
 const TOKEN_RE = new RegExp(TOKEN_SOURCE, 'gu');
 const TOKEN_EXACT_RE = new RegExp(`^${TOKEN_SOURCE}$`, 'u');
 
-export type MentionKind = 'file' | 'thread' | 'model' | 'terminal';
+export type MentionKind = 'file' | 'thread' | 'model' | 'terminal' | 'agent';
 
 export interface MentionPayload {
   kind: MentionKind;
@@ -28,7 +28,7 @@ export interface MentionPayload {
 }
 
 export interface MentionMenuRow {
-  kind: 'file' | 'thread' | 'model';
+  kind: 'file' | 'thread' | 'model' | 'agent';
   id: string;
   label: string;
   menuLabel: string;
@@ -38,6 +38,7 @@ export interface MentionSources {
   files?: readonly string[];
   threads?: readonly { id: string; title?: string }[];
   models?: readonly string[];
+  agents?: readonly { id: string; name?: string; engine?: string }[];
 }
 
 export interface MentionSpan {
@@ -68,7 +69,13 @@ function base64UrlToBytes(value: string): Uint8Array {
 }
 
 function isMentionKind(value: unknown): value is MentionKind {
-  return value === 'file' || value === 'thread' || value === 'model' || value === 'terminal';
+  return (
+    value === 'file' ||
+    value === 'thread' ||
+    value === 'model' ||
+    value === 'terminal' ||
+    value === 'agent'
+  );
 }
 
 export function encodeMention(payload: MentionPayload): string {
@@ -128,6 +135,7 @@ export function mentionChipLabel(mention: MentionPayload): string {
       endLine: mention.endLine ?? mention.startLine ?? 0,
     });
   }
+  if (mention.kind === 'agent') return `@${mention.label || mention.id}`;
   if (mention.kind === 'thread') return mention.id;
   return mention.label || mention.id;
 }
@@ -183,6 +191,7 @@ function mentionHref(mention: MentionPayload): string {
   if (mention.kind === 'file') return mention.id;
   if (mention.kind === 'thread') return `thread:${mention.id}`;
   if (mention.kind === 'model') return `model:${mention.id}`;
+  if (mention.kind === 'agent') return `agent:${mention.id}`;
   const start = mention.startLine ?? 0;
   const end = mention.endLine ?? start;
   return `terminal:${mention.id}#L${start}-L${end}`;
@@ -212,6 +221,17 @@ export function readMentionClipboard(data: DataTransfer): string | null {
 export function filterMentionMenu(query: string, sources: MentionSources = {}): MentionMenuRow[] {
   const needle = query.trim().toLowerCase();
   const matches = (value: string) => needle.length === 0 || value.toLowerCase().includes(needle);
+  const agents = (sources.agents ?? [])
+    .filter((agent) => matches(agent.id) || matches(agent.name ?? ''))
+    .map((agent) => {
+      const name = agent.name?.trim() || agent.id;
+      return {
+        kind: 'agent' as const,
+        id: agent.id,
+        label: name,
+        menuLabel: `@${name}`,
+      };
+    });
   const files = (sources.files ?? [])
     .filter((file) => matches(file))
     .map((file) => ({ kind: 'file' as const, id: file, label: file, menuLabel: file }));
@@ -226,7 +246,7 @@ export function filterMentionMenu(query: string, sources: MentionSources = {}): 
   const models = (sources.models ?? [])
     .filter((model) => matches(model))
     .map((model) => ({ kind: 'model' as const, id: model, label: model, menuLabel: model }));
-  return [...files, ...threads, ...models];
+  return [...agents, ...files, ...threads, ...models];
 }
 
 export function mentionQueryAt(draft: string, caret: number): { start: number; query: string } | null {

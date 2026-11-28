@@ -33,6 +33,23 @@ import { WorkspaceNotices } from './WorkspaceNotices';
 
 export { AGENT_CODENAMES, getNextAgentName, cleanAgentTitle, collectActiveAgentNames };
 
+export function isCodeWorkspaceLayerActive(el: Element | null): boolean {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    return false;
+  }
+  if (!el || !el.isConnected) return false;
+  if (el.closest('[aria-hidden="true"], .mode-layer--hidden')) return false;
+  const modeLayer = el.closest('.mode-layer');
+  if (modeLayer) {
+    if (!modeLayer.classList.contains('mode-layer--visible')) return false;
+    if (modeLayer instanceof HTMLElement && modeLayer.style.display === 'none') return false;
+    if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+      if (window.getComputedStyle(modeLayer).display === 'none') return false;
+    }
+  }
+  return true;
+}
+
 export interface CodeWorkspaceProps {
   workspaces: Workspace[];
   selectedWorkspaceId: string | null;
@@ -51,7 +68,7 @@ export interface CodeWorkspaceProps {
   newSessionRequest?: number;
 }
 
-export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
+const CodeWorkspaceInner: React.FC<CodeWorkspaceProps> = ({
   workspaces,
   selectedWorkspaceId,
   onSelectWorkspace,
@@ -266,11 +283,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
 
   useEffect(() => {
     return startAgentInboxPolling(() => workspaceCwdRef.current, {
-      isActive: () => {
-        const el = containerRef.current;
-        if (!el) return true;
-        return el.closest('.mode-layer--hidden') === null;
-      },
+      isActive: () => isCodeWorkspaceLayerActive(canvasRef.current ?? containerRef.current),
       hasActiveAgents: () => getActiveAgentTerminals().length > 0,
     });
   }, [selectedWorkspace?.id]);
@@ -633,5 +646,7 @@ export const CodeWorkspace: React.FC<CodeWorkspaceProps> = ({
     </section>
   );
 };
+
+export const CodeWorkspace = React.memo(CodeWorkspaceInner);
 
 export default CodeWorkspace;

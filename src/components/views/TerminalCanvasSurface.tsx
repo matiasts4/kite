@@ -20,7 +20,7 @@ import {
   type TerminalSurfaceHandle,
 } from './terminal/canvas/terminalCanvasTypes';
 import type { KiteThemeCustomizations } from '../../lib/themeCustomizations';
-import { renderCanvasGrid } from './terminal/canvas/canvasGridRenderer';
+import { renderCanvasGrid, releaseCanvasBackingStore } from './terminal/canvas/canvasGridRenderer';
 import { cursorPaintPhase } from './terminal/canvas/cursorPaintPhase';
 import { type GridFindHit } from './terminal/canvas/terminalGridText';
 import { normalizePasteText } from './terminal/canvas/terminalInputKeyEncoder';
@@ -33,7 +33,9 @@ import { useTerminalPtyResize } from './terminal/canvas/useTerminalPtyResize';
 import { TerminalFindBar } from './terminal/canvas/TerminalFindBar';
 import { TerminalCanvasScrollbar } from './terminal/canvas/TerminalCanvasScrollbar';
 import { classifyBinaryPollPayload, decodeBinarySnapshot } from './terminal/canvas/binarySnapshotDecoder';
-import { OUTPUT_GAP_HIDDEN_HEARTBEAT_MS, type OutputPace } from './terminal/canvas/outputClock';
+import { type OutputPace } from './terminal/canvas/outputClock';
+
+const HIDDEN_CANVAS_RELEASE_GRACE_MS = 5000;
 
 export { measureTerminalCanvasGrid };
 export type { TerminalCanvasSurfaceProps };
@@ -46,6 +48,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   className = '',
   onTitleChange,
   onProcessExit,
+  onAccountRotated,
   onStageClipboardBlob,
 }, ref) {
   const [prefs, setPrefs] = useState<TerminalAppearancePrefs>(() =>
@@ -57,11 +60,11 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const terminalThemeRef = useRef<TerminalCanvasThemeColors>(terminalTheme);
   terminalThemeRef.current = terminalTheme;
   const [viewport, setViewport] = useState({ offset: 0, depth: 0, alt: false });
-  const [liveText, setLiveText] = useState('');
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const liveRegionRef = useRef<HTMLDivElement>(null);
 
   const isFocusedRef = useRef<boolean>(Boolean(isFocused));
   // Focus is owned by the hidden textarea focus/blur events; the prop only seeds it.
@@ -97,6 +100,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const pendingJumpRef = useRef<number | null>(null);
   const liveTimerRef = useRef<number | null>(null);
   const pendingLiveRef = useRef('');
+  const lastLiveTextRef = useRef('');
   const viewportDepthRef = useRef(0);
   const buttonsDownRef = useRef<number>(0);
   const lastMouseReportRef = useRef<{ col: number; row: number; buttons: number } | null>(null);
@@ -108,6 +112,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   const resizeInFlightRef = useRef<boolean>(false);
   const queuedPtyRef = useRef<{ cols: number; rows: number } | null>(null);
   const reconcilePtySizeRef = useRef<(() => void) | null>(null);
+  const syncGridAndResizePtyRef = useRef<((forceImmediate?: boolean) => void) | null>(null);
   const paintRetryRef = useRef(0);
   const startupRepaintArmedRef = useRef(false);
   const hasFullPaintRef = useRef(false);
@@ -159,6 +164,15 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       window.clearTimeout(startupNudgeTimerRef.current);
       startupNudgeTimerRef.current = null;
     }
+    if (liveTimerRef.current !== null) {
+      window.clearTimeout(liveTimerRef.current);
+      liveTimerRef.current = null;
+    }
+    pendingLiveRef.current = '';
+    lastLiveTextRef.current = '';
+    if (liveRegionRef.current) {
+      liveRegionRef.current.textContent = '';
+    }
     cursorBlinkOnRef.current = true;
     paintRowsRef.current = null;
     cursorRef.current = {
@@ -199,6 +213,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
   }, []);
 
   const renderCanvas = useCallback(() => {
+    if (!surfaceLiveRef.current) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -269,6 +284,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         if (!paintRowsRef.current.includes(row)) paintRowsRef.current.push(row);
       }
     }
+    if (!surfaceLiveRef.current) return;
     if (rafIdRef.current !== null) return;
     rafIdRef.current = window.requestAnimationFrame(() => {
       rafIdRef.current = null;
@@ -292,7 +308,11 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     liveTimerRef.current = window.setTimeout(() => {
       liveTimerRef.current = null;
       const next = pendingLiveRef.current;
-      setLiveText((prev) => (prev === next ? prev : next));
+      if (lastLiveTextRef.current === next) return;
+      lastLiveTextRef.current = next;
+      if (liveRegionRef.current) {
+        liveRegionRef.current.textContent = next;
+      }
     }, 250);
   }, []);
 
@@ -322,6 +342,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     isFocusedRef,
     onTitleChange,
     onProcessExit,
+    onAccountRotated,
     scheduleRender,
     resizeInFlightRef,
     reconcilePtySizeRef,
@@ -333,9 +354,16 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     const el = containerRef.current;
     let seenLayout = false;
     let published: boolean | null = null;
+    let releaseTimer: number | null = null;
+    const cancelReleaseTimer = () => {
+      if (releaseTimer !== null) {
+        window.clearTimeout(releaseTimer);
+        releaseTimer = null;
+      }
+    };
     const compute = () => {
       if (!el || !el.isConnected) return true;
-      if (el.closest('[aria-hidden="true"]')) return false;
+      if (el.closest('[aria-hidden="true"], .mode-layer:not(.mode-layer--visible)')) return false;
       if (document.visibilityState === 'hidden') return false;
       const rect = el.getBoundingClientRect();
       if (rect.width >= 2 && rect.height >= 2) {
@@ -344,32 +372,41 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
       }
       return !seenLayout;
     };
-    let heartbeat: number | null = null;
-    const stopHeartbeat = () => {
-      if (heartbeat !== null) {
-        window.clearInterval(heartbeat);
-        heartbeat = null;
-      }
-    };
     const publish = () => {
       const hidden = document.visibilityState === 'hidden';
       const live = compute();
       const pace: OutputPace = hidden ? 'hidden' : isFocusedRef.current ? 'focused' : 'visible';
       setOutputPace(pace);
-      // A hidden window stops paint. Credit still gets a slow refill so a
-      // streaming agent is not stuck on an empty snapshot budget.
-      if (hidden && heartbeat === null) {
-        heartbeat = window.setInterval(() => {
-          void invokeCommand('replenish_terminal_credit', { sessionId, amount: 1 }).catch(() => {});
-        }, OUTPUT_GAP_HIDDEN_HEARTBEAT_MS);
-      } else if (!hidden) {
-        stopHeartbeat();
+      if (live) {
+        cancelReleaseTimer();
+      } else if (releaseTimer === null) {
+        releaseTimer = window.setTimeout(() => {
+          releaseTimer = null;
+          if (surfaceLiveRef.current) return;
+          if (rafIdRef.current !== null) {
+            window.cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = null;
+          }
+          hasFullPaintRef.current = false;
+          paintRowsRef.current = null;
+          releaseCanvasBackingStore(canvasRef.current);
+        }, HIDDEN_CANVAS_RELEASE_GRACE_MS);
       }
       if (published === live) return;
+      const wasHidden = published === false;
       published = live;
       surfaceLiveRef.current = live;
       setSurfaceLive(live);
-      if (live) scheduleRender();
+      if (live) {
+        if (wasHidden) {
+          cachedRectRef.current = null;
+          hasFullPaintRef.current = false;
+          paintRowsRef.current = null;
+          syncGridAndResizePtyRef.current?.(false);
+          void invokeCommand('replenish_terminal_credit', { sessionId, amount: 1 }).catch(() => {});
+        }
+        scheduleRender();
+      }
       void invokeCommand('set_terminal_presentation', { sessionId, live }).catch(() => {});
     };
     publish();
@@ -390,14 +427,14 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         if (ancestor.hasAttribute('aria-hidden') || ancestor.classList.contains('mode-layer')) {
           mutObserver.observe(ancestor, {
             attributes: true,
-            attributeFilter: ['aria-hidden'],
+            attributeFilter: ['aria-hidden', 'class'],
           });
         }
         ancestor = ancestor.parentElement;
       }
     }
     return () => {
-      stopHeartbeat();
+      cancelReleaseTimer();
       document.removeEventListener('visibilitychange', publish);
       window.removeEventListener('resize', publish);
       observer?.disconnect();
@@ -622,6 +659,7 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
     queuedPtyRef,
     reconcilePtySizeRef,
   });
+  syncGridAndResizePtyRef.current = syncGridAndResizePty;
 
   const jumpToOffset = useCallback(
     (offset: number) => {
@@ -840,9 +878,12 @@ export const TerminalCanvasSurface = forwardRef<TerminalSurfaceHandle, TerminalC
         onStepFind={stepFind}
         onClose={closeFind}
       />
-      <div className="terminal-canvas-live" aria-live="polite" aria-atomic="true">
-        {liveText}
-      </div>
+      <div
+        ref={liveRegionRef}
+        className="terminal-canvas-live"
+        aria-live="polite"
+        aria-atomic="true"
+      />
       <textarea
         ref={inputRef}
         className="terminal-canvas-surface__input"

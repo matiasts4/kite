@@ -23,9 +23,9 @@
 
 /* ── Buttons / inputs / chips ───────────────────────────── */
 .qt-button {
-  height: 28px;
+  height: var(--control-row, 28px);
   padding: 0 12px;
-  border: 1px solid var(--block-stroke);
+  border: 1px solid var(--vl-stroke, var(--block-stroke));
   border-radius: var(--control-radius, 8px);
   background: var(--chip-fill);
   color: var(--text-primary);
@@ -72,9 +72,10 @@
   width: 100%;
   min-width: 0;
   padding: 7px 10px;
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-chip);
-  background: var(--glass-elevated-bg, var(--composer));
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke, var(--block-stroke)));
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-field-bg, var(--vl-surface-canvas, var(--composer)));
+  box-shadow: var(--vl-inset-field);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   color: var(--text-primary);
@@ -133,15 +134,110 @@
 .qt-banner[data-tone='ok'] { background: color-mix(in srgb, var(--status-running) 16%, transparent); color: var(--status-running); }
 .qt-banner[data-tone='warn'] { background: var(--warning-tint); color: var(--warning-text); }
 
+/* ── CLI Lifecycle & Update section in ProviderConnectionPanel ─ */
+.qt-lifecycle {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--separator);
+}
+.qt-lifecycle__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.qt-lifecycle__title {
+  font-weight: var(--weight-semibold, 600);
+}
+.qt-lifecycle__body {
+  margin-top: 8px;
+}
+.qt-lifecycle__desc {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.qt-lifecycle__ver {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-primary);
+}
+.qt-lifecycle__ver-next {
+  color: var(--accent);
+}
+.qt-lifecycle__actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.qt-lifecycle__spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--pill-radius, 9999px);
+  border: 2px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-top-color: currentColor;
+  animation: spin 0.8s linear infinite;
+}
+.qt-lifecycle__log {
+  margin-top: 8px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-secondary);
+  background: var(--glass-field-bg, var(--block-fill));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
+  padding: 4px 8px;
+  border-radius: var(--vl-radius-sm, 6px);
+  word-break: break-word;
+}
+.qt-lifecycle__error {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.qt-lifecycle__uptodate {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.qt-lifecycle__uptodate-ver {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.qt-lifecycle__uptodate-ver strong {
+  color: var(--text-primary);
+}
+.qt-lifecycle__check-btn {
+  height: var(--vl-control-sm, 26px);
+  font-size: 11px;
+  padding: 0 8px;
+}
+.qt-lifecycle__install-copy {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.qt-cli-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
 /* ── Segmented control ──────────────────────────────────── */
 .qt-segment {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 2px;
   padding: 3px;
-  border-radius: var(--radius-card);
-  background: var(--glass-elevated-bg, var(--block-fill));
-  border: 1px solid var(--glass-border, var(--block-stroke));
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-field-bg, var(--chip-fill, var(--block-fill)));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   align-self: flex-start;
@@ -150,20 +246,22 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
+  height: 26px;
   padding: 0 12px;
-  border: 0;
-  border-radius: var(--radius-row);
+  border: 1px solid transparent;
+  border-radius: var(--vl-radius-sm, 6px);
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 .qt-segment__item:hover { color: var(--text-primary); }
 .qt-segment__item[data-active] {
-  background: var(--selected-fill);
+  background: var(--glass-elevated-bg, var(--selected-fill));
+  border-color: var(--glass-card-border, var(--block-stroke));
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
   color: var(--text-primary);
   font-weight: var(--weight-semibold, 600);
 }
@@ -204,9 +302,10 @@
   flex-direction: column;
   gap: var(--space-3);
   padding: var(--space-4);
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-card);
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
+  border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, var(--block-fill));
+  box-shadow: var(--vl-inset);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   min-width: 0;
@@ -313,9 +412,10 @@
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-4);
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-card);
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
+  border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, var(--block-fill));
+  box-shadow: var(--vl-inset);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
@@ -467,9 +567,10 @@
 .qt-providers-container {
   display: grid;
   grid-template-columns: 260px 1fr;
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-card);
-  background: var(--glass-nested-bg, var(--pane));
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
+  border-radius: var(--card-radius, 12px);
+  background: var(--glass-elevated-bg, var(--pane));
+  box-shadow: var(--vl-inset);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   overflow: hidden;
@@ -483,39 +584,52 @@
 
 .qt-providers-sidebar {
   border-right: 1px solid var(--separator);
-  background: var(--glass-nested-bg, color-mix(in srgb, var(--block-fill) 60%, transparent));
+  background: color-mix(in srgb, var(--background, #0a0a0a) 22%, transparent);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   display: flex;
   flex-direction: column;
+}
+html[data-theme='light'] .qt-providers-sidebar {
+  background: color-mix(in srgb, var(--text-primary) 2.5%, transparent);
 }
 .qt-providers-sidebar__scroll {
   flex: 1;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+  gap: 2px;
+  padding: 8px;
 }
 .qt-providers-sidebar__item {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: 11px 14px;
-  border: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--separator) 50%, transparent);
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--control-radius, 8px);
   background: transparent;
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 120ms ease, border-color 120ms ease;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 .qt-providers-sidebar__item:hover {
   background: var(--hover-fill);
+  color: var(--text-primary);
 }
 .qt-providers-sidebar__item[data-selected] {
   background: var(--selected-fill);
-  border-left: 3px solid var(--accent);
-  font-weight: var(--weight-medium, 500);
+  border-color: var(--glass-card-border, var(--block-stroke));
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold, 600);
+}
+.qt-providers-detail .ui-card,
+.settings-master-detail .ui-card {
+  background: var(--glass-field-bg, var(--vl-surface-canvas)) !important;
+  border-color: var(--glass-inner-border, var(--block-stroke)) !important;
+  box-shadow: none !important;
 }
 .qt-providers-sidebar__name {
   font-size: 13px;
@@ -607,9 +721,9 @@
 }
 .qt-spec-card {
   padding: var(--space-3);
-  border-radius: var(--radius-row);
-  background: var(--glass-elevated-bg, var(--composer));
-  border: 1px solid var(--glass-border, var(--block-stroke));
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-field-bg, var(--vl-surface-canvas, var(--composer)));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   display: flex;
@@ -652,14 +766,15 @@
 .qt-conn-panel__tabs {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 2px;
   padding: 3px;
-  border-radius: var(--radius-chip);
-  background: var(--glass-elevated-bg, var(--composer));
-  border: 1px solid var(--glass-border, var(--block-stroke));
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-field-bg, var(--chip-fill, var(--composer)));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   margin-top: 4px;
+  align-self: flex-start;
 }
 .qt-conn-panel__tab-btn {
   display: inline-flex;
@@ -667,8 +782,8 @@
   gap: 6px;
   height: 26px;
   padding: 0 10px;
-  border: 0;
-  border-radius: var(--radius-chip);
+  border: 1px solid transparent;
+  border-radius: var(--vl-radius-sm, 6px);
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
@@ -682,9 +797,10 @@
   background: var(--hover-fill);
 }
 .qt-conn-panel__tab-btn[data-active] {
-  background: var(--selected-fill);
+  background: var(--glass-elevated-bg, var(--selected-fill));
+  border-color: var(--glass-card-border, var(--block-stroke));
   color: var(--text-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
 }
 .qt-conn-panel__body {
   display: flex;
@@ -701,9 +817,10 @@
 }
 .qt-usage-card {
   padding: var(--space-4);
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-card);
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
+  border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, var(--block-fill));
+  box-shadow: var(--vl-inset);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   display: flex;
@@ -712,7 +829,7 @@
   transition: border-color 150ms ease;
 }
 .qt-usage-card:hover {
-  border-color: color-mix(in srgb, var(--block-stroke) 80%, var(--accent));
+  border-color: var(--glass-card-border-hover, var(--vl-stroke-strong));
 }
 .qt-usage-card__head {
   display: flex;
@@ -838,8 +955,8 @@
   overflow-y: auto;
   padding: 8px 10px;
   border-radius: var(--control-radius, 8px);
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  background: var(--glass-elevated-bg, var(--block-fill));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
+  background: var(--glass-field-bg, var(--block-fill));
 }
 .qt-busy-item {
   display: flex;
@@ -926,11 +1043,12 @@
 }
 .qt-modal-search-input {
   width: 100%;
-  height: 32px;
+  height: var(--vl-control-md, 32px);
   padding: 0 28px 0 32px;
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-chip);
-  background: var(--glass-elevated-bg, var(--composer));
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-field-bg, var(--vl-surface-canvas));
+  box-shadow: var(--vl-inset-field);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   color: var(--text-primary);
@@ -996,8 +1114,8 @@
   align-items: flex-start;
   gap: var(--space-3);
   padding: 12px 14px;
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  border-radius: var(--radius-card);
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
+  border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, var(--block-fill));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -1103,8 +1221,8 @@
   align-items: center;
   justify-content: space-between;
   padding: 10px 14px;
-  border-radius: var(--radius-card);
-  border: 1px solid var(--glass-border, var(--block-stroke));
+  border-radius: var(--card-radius, 12px);
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
   background: var(--glass-elevated-bg, var(--block-fill));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -1204,9 +1322,9 @@
 .qt-save-card {
   margin-top: 8px;
   padding: 14px;
-  border-radius: var(--radius-card);
+  border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, color-mix(in srgb, var(--block-fill) 80%, transparent));
-  border: 1px solid var(--glass-border, var(--block-stroke));
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   display: flex;
@@ -1303,8 +1421,9 @@
    ------------------------------------------------------------------------- */
 .qt-auto-panel {
   border-radius: var(--card-radius, 12px);
-  border: 1px solid var(--glass-border, var(--block-stroke));
+  border: 1px solid var(--glass-card-border, var(--block-stroke));
   background: var(--glass-elevated-bg, color-mix(in srgb, var(--block-fill) 78%, transparent));
+  box-shadow: var(--vl-inset);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   padding: 12px 14px;
@@ -1466,10 +1585,10 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 5px 8px;
+  padding: 6px 10px;
   border-radius: var(--control-radius, 8px);
-  border: 1px solid var(--glass-border, var(--block-stroke));
-  background: var(--glass-elevated-bg, color-mix(in srgb, var(--pane) 65%, transparent));
+  border: 1px solid var(--glass-inner-border, var(--block-stroke));
+  background: var(--glass-field-bg, color-mix(in srgb, var(--pane) 65%, transparent));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
@@ -1529,8 +1648,9 @@
   gap: 8px;
   padding: 7px 9px;
   border-radius: var(--control-radius, 8px);
-  border: 1px solid rgba(251, 191, 36, 0.35);
-  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 35%, transparent);
+  background: var(--warning-tint, rgba(251, 191, 36, 0.08));
+  color: var(--warning-text, inherit);
   flex-wrap: wrap;
 }
 

@@ -150,27 +150,34 @@ export const GeneralTab: React.FC<GeneralTabProps> = ({
             <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {updateInfo?.available && onUpdateAndRestart && (
                 <button
-                  className="settings-control ui-button"
+                  className="primary-button"
                   onClick={onUpdateAndRestart}
                   type="button"
                   style={{
-                    height: '28px',
+                    height: 'var(--vl-control-md, 32px)',
                     padding: '0 12px',
                     fontSize: '12px',
-                    backgroundColor: 'var(--accent, #5c8fff)',
-                    color: '#fff',
                     fontWeight: 600,
+                    display: 'inline-flex',
+                    alignItems: 'center',
                   }}
                 >
                   Actualizar y Reiniciar
                 </button>
               )}
               <button
-                className="settings-control ui-button secondary-button"
+                className="secondary-button"
                 disabled={isCheckingUpdate}
                 onClick={onCheckUpdate}
                 type="button"
-                style={{ height: '28px', padding: '0 12px', fontSize: '12px' }}
+                style={{
+                  height: 'var(--vl-control-md, 32px)',
+                  padding: '0 12px',
+                  fontSize: '12px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
               >
                 {isCheckingUpdate ? (
                   <>

@@ -113,10 +113,10 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
             <div className="settings-row__control settings-row__control--menu">
               <input
                 aria-label="Filtrar atajos de teclado"
-                className="settings-control ui-button"
+                className="ui-field settings-control"
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Buscar atajos por nombre o tecla…"
-                style={{ textAlign: 'left', minWidth: '220px' }}
+                style={{ textAlign: 'left', minWidth: '220px', padding: '0 10px' }}
                 type="text"
                 value={query}
               />
@@ -206,7 +206,7 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
                           className="ghost-button action-button--row"
                           onClick={() => handleReset(item.id)}
                           title="Restablecer este atajo al valor predeterminado"
-                          style={{ padding: '0 8px', height: '26px', fontSize: '11px' }}
+                          style={{ padding: '0 8px', height: 'var(--vl-control-sm, 26px)', fontSize: '11px' }}
                         >
                           Restablecer
                         </button>
@@ -216,7 +216,7 @@ export const KeybindingsTab: React.FC<KeybindingsTabProps> = ({ platform: propPl
                         type="button"
                         className="secondary-button action-button--row"
                         onClick={() => setEditingShortcut(item)}
-                        style={{ height: '28px', padding: '0 10px', fontSize: '12px' }}
+                        style={{ height: 'var(--vl-control-md, 32px)', padding: '0 12px', fontSize: '12px' }}
                         title="Cambiar combinación de teclas"
                       >
                         Editar

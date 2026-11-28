@@ -15,6 +15,7 @@ import {
   PuzzleIcon,
   ScrollTextIcon,
   GaugeIcon,
+  SmartphoneIcon,
 } from './settings/icons';
 import { invokeCommand } from '../../lib/ipc';
 import { OPEN_SETTINGS_EVENT, type OpenSettingsDetail } from '../../lib/settingsNav';
@@ -67,6 +68,7 @@ const tabLoaders = {
   zed: () => import('./settings/ZedTab').then((m) => ({ default: m.ZedTab })),
   terminal: () => import('./settings/TerminalTab').then((m) => ({ default: m.TerminalTab })),
   notifications: () => import('./settings/NotificationsTab').then((m) => ({ default: m.NotificationsTab })),
+  remote: () => import('./settings/RemoteTab').then((m) => ({ default: m.RemoteTab })),
   plugins: () => import('./PluginsView').then((m) => ({ default: m.PluginsView })),
   routines: () => import('./RoutinesView').then((m) => ({ default: m.RoutinesView })),
 } as const;
@@ -86,6 +88,7 @@ const QuotasTab = lazy(tabLoaders.quotas);
 const ZedTab = lazy(tabLoaders.zed);
 const TerminalTab = lazy(tabLoaders.terminal);
 const NotificationsTab = lazy(tabLoaders.notifications);
+const RemoteTab = lazy(tabLoaders.remote);
 const PluginsView = lazy(tabLoaders.plugins);
 const RoutinesView = lazy(tabLoaders.routines);
 
@@ -266,6 +269,12 @@ const SETTINGS_TABS: SettingsTabConfig[] = [
   { id: 'zed', label: 'Asistente Zed', blurb: 'Personalidad de Zed, síntesis de voz, pasarela multi-modelo, latencia y memoria.', icon: AudioWaveformIcon },
   { id: 'quotas', label: 'Cuentas y Proveedores', blurb: 'Bóveda de credenciales, cuentas CLI y límites de cuota.', icon: GaugeIcon },
   { id: 'plugins', label: 'Plugins', blurb: 'Herramientas y servicios para los agentes.', icon: PuzzleIcon },
+  {
+    id: 'remote',
+    label: 'Control Remoto',
+    blurb: 'Emparejamiento móvil por QR, pasarela WebSocket y voz remota.',
+    icon: SmartphoneIcon,
+  },
   { id: 'keybindings', label: 'Atajos', blurb: 'Atajos de teclado y comandos rápidos.', icon: SquareTerminalIcon },
   { id: 'changelog', label: 'Novedades', blurb: 'Novedades y notas de cada versión.', icon: ScrollTextIcon, hasDividerBefore: true },
 ];
@@ -987,6 +996,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
                 {activeTab === 'notifications' && <NotificationsTab />}
 
+                {activeTab === 'remote' && <RemoteTab />}
+
                 {activeTab === 'zed' && <ZedTab />}
 
                 {(activeTab === 'plugins' || (activeTab as string) === 'integrations') && (
@@ -997,7 +1008,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
                 {activeTab === 'routines' && (
                   <section className="settings-group">
-                    <RoutinesView workspaceId={null} />
+                    <RoutinesView embedded workspaceId={null} />
                   </section>
                 )}
               </motion.div>

@@ -13,16 +13,15 @@ const RISK_LABELS: Record<string, string> = {
   unknown: 'Approval needed',
 };
 
+export type ApprovalDecision = 'allowOnce' | 'allowForSession' | 'alwaysAllow' | 'deny' | 'denyAndStop';
+
 interface ChatApprovalCardProps {
   approval: ApprovalRequest;
   busy?: boolean;
   disabled?: boolean;
   allowLabel?: string;
   denyLabel?: string;
-  onDecision: (
-    decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
-    requestId: string
-  ) => void;
+  onDecision(decision: ApprovalDecision, requestId: string): void;
 }
 
 export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
@@ -93,6 +92,14 @@ export const ChatApprovalCard: React.FC<ChatApprovalCardProps> = ({
           className="chat-approval-card__button ghost-button"
         >
           Allow for session
+        </button>
+        <button
+          type="button"
+          disabled={isLocked}
+          onClick={() => onDecision('alwaysAllow', approval.id)}
+          className="chat-approval-card__button ghost-button"
+        >
+          Always allow
         </button>
         <span aria-hidden="true" className="chat-approval-card__spacer" />
         <button

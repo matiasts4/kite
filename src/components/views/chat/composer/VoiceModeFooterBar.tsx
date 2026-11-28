@@ -7,6 +7,7 @@ import { useVoiceSession } from '../../../../lib/operator/voice/voiceSessionStor
 import { ttsNarrator } from '../../../../lib/operator/ttsNarrator';
 import { formatVoicePlaybackSpeed } from '../../../../lib/operator/voice/callResilience';
 import { loadOperatorConfig } from '../../../../lib/operator/operatorConfig';
+import { VoiceSpeedPopover } from './VoiceSpeedPopover';
 
 export interface VoiceModeFooterBarProps {
   threadId?: string | null;
@@ -15,6 +16,7 @@ export interface VoiceModeFooterBarProps {
   onEndSession?: () => void;
   playbackSpeed?: number;
   onCyclePlaybackSpeed?: () => void;
+  onChangePlaybackSpeed?: (speed: number) => void;
   micFlatlined?: boolean;
   onReconnectMic?: () => void;
   className?: string;
@@ -39,6 +41,7 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   onEndSession,
   playbackSpeed,
   onCyclePlaybackSpeed,
+  onChangePlaybackSpeed,
   micFlatlined = false,
   onReconnectMic,
   className = '',
@@ -87,8 +90,10 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
   const showFlatlineWarning = Boolean(
     micFlatlined && !voice.micMuted && !voice.isPausedForDictation
   );
-  const showSpeedControl = playbackSpeed !== undefined || Boolean(onCyclePlaybackSpeed);
+  const showSpeedControl =
+    playbackSpeed !== undefined || Boolean(onCyclePlaybackSpeed) || Boolean(onChangePlaybackSpeed);
   const formattedSpeed = formatVoicePlaybackSpeed(playbackSpeed ?? 1);
+  const effectiveTransport = voice.activeTransport ?? transportMode;
 
   const statusText = (() => {
     if (voice.micMuted) return 'Micrófono en pausa';
@@ -221,7 +226,7 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
     <div
       data-testid="voice-mode-footer-bar"
       data-thread-id={threadId || undefined}
-      data-transport={transportMode}
+      data-transport={effectiveTransport}
       className={`kite-composer-footer kite-voice-footer ${className}`.trim()}
     >
       {/* Left cluster — clean live voice status without Zed or technical badges */}
@@ -322,22 +327,24 @@ export const VoiceModeFooterBar: React.FC<VoiceModeFooterBarProps> = ({
             </button>
 
             {showSpeedControl ? (
-              <button
-                type="button"
-                onClick={onCyclePlaybackSpeed}
-                disabled={!onCyclePlaybackSpeed}
-                data-testid="voice-playback-speed-btn"
-                title={`Velocidad de reproducción: ${formattedSpeed}`}
-                aria-label={`Velocidad de reproducción ${formattedSpeed}`}
-                className="kite-voice-ctrl-btn h-8 rounded-control text-xs font-medium tabular-nums"
-                style={{
-                  width: 'auto',
-                  minWidth: 'var(--vl-control-md, 32px)',
-                  paddingInline: '0.5rem',
-                }}
-              >
-                {formattedSpeed}
-              </button>
+              onChangePlaybackSpeed && !onCyclePlaybackSpeed ? (
+                <VoiceSpeedPopover
+                  playbackSpeed={playbackSpeed ?? 1}
+                  onChangePlaybackSpeed={onChangePlaybackSpeed}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={onCyclePlaybackSpeed}
+                  disabled={!onCyclePlaybackSpeed}
+                  data-testid="voice-playback-speed-btn"
+                  title={`Velocidad de reproducción: ${formattedSpeed}`}
+                  aria-label={`Velocidad de reproducción ${formattedSpeed}`}
+                  className="kite-voice-ctrl-btn kite-voice-speed-btn h-8 rounded-control text-xs font-medium tabular-nums"
+                >
+                  {formattedSpeed}
+                </button>
+              )
             ) : null}
 
             <button

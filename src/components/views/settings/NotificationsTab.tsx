@@ -21,14 +21,14 @@ export function notificationOsLabel(): string {
 
 export function notificationAuthorizationDetail(authorization: string, osEnabled: boolean): string {
   if (authorization === 'notDetermined') {
-    return 'Muestra un aviso cuando un agente termine o te necesite fuera de la tarea que estás viendo.';
+    return 'Muestra notificaciones del sistema fuera de Kite cuando un agente termina o requiere confirmación.';
   }
   if (authorization === 'denied') {
     return 'Desactivadas en la configuración del sistema. La campana y la lista interna siguen funcionando.';
   }
   return osEnabled
-    ? 'Los avisos se muestran para trabajo finalizado y preguntas que aún no has visto.'
-    : 'La campana y la lista interna siguen funcionando mientras los avisos estén desactivados.';
+    ? 'Las notificaciones del sistema se muestran fuera de Kite cuando un agente termina o requiere confirmación.'
+    : 'La campana, el sonido y la lista interna siguen funcionando mientras los avisos estén desactivados.';
 }
 
 export const NotificationsTab: React.FC = () => {
@@ -69,22 +69,36 @@ export const NotificationsTab: React.FC = () => {
       const snap = await invokeCommand<NotificationCenterSnapshot>(
         'notifications_set_preferences',
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           ...next,
         }
       );
       if (snap) applyNotificationSnapshot(snap);
+      window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
     } catch (err) {
       console.warn('[NotificationsTab] Failed to save notification settings:', err);
     }
   };
 
   const handlePlayNotificationSample = async () => {
+    playCompletionChime(true, true);
     try {
-      playCompletionChime(true, true);
       await invokeCommand('notifications_play_sample');
     } catch (err) {
       console.warn('[NotificationsTab] Failed to play the notification sample:', err);
+    }
+    if (notifOs && notifAuthorization === 'authorized') {
+      try {
+        await invokeCommand('notifications_send_os', {
+          title: 'Kite Code',
+          body: 'Las notificaciones de Windows están activas.',
+          tag: 'kite-test-sample',
+          silent: true,
+          forceTest: true,
+        });
+      } catch (err) {
+        console.warn('[NotificationsTab] Failed to send Windows sample notification:', err);
+      }
     }
   };
 
@@ -94,6 +108,7 @@ export const NotificationsTab: React.FC = () => {
         'notifications_request_authorization'
       );
       if (snap) applyNotificationSnapshot(snap);
+      window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
     } catch (err) {
       console.warn('[NotificationsTab] Failed to request notification permission:', err);
     }
@@ -106,6 +121,7 @@ export const NotificationsTab: React.FC = () => {
         'notifications_refresh_authorization'
       );
       if (snap) applyNotificationSnapshot(snap);
+      window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
     } catch (err) {
       console.warn('[NotificationsTab] Failed to open notification settings:', err);
     }
@@ -143,7 +159,7 @@ export const NotificationsTab: React.FC = () => {
         <div className="ui-card__row settings-row">
           <div className="settings-row__copy">
             <h3 className="settings-row__title">Avisos sonoros</h3>
-            <p>Un tono suave cuando un agente termine o te necesite mientras miras otra ventana.</p>
+            <p>Suena un tono cuando un agente termina o solicita confirmación; los avisos internos aparecen solo si estás en otro módulo.</p>
           </div>
           <div className="settings-row__control">
             <button

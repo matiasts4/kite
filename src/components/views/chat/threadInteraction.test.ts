@@ -29,6 +29,7 @@ import {
   compactSendText,
   sidebarThreads,
   slashIntent,
+  sortThreadsChronologically,
   visibleRosterThreads,
   stashDraft,
   stashFileRestorable,
@@ -764,5 +765,18 @@ describe('file restore on the thread row', () => {
     expect(children[0]).toMatchObject({ id: 'child-1', subagentId: 'sub-backed' });
     expect(children[1]).toMatchObject({ id: 'sub-native', subagentId: 'sub-native' });
     expect(childDisplayLabel(children[1])).toBe('Audit router bindings');
+  });
+
+  it('sorts threads newest-first using lastTurnAtUnixMs and keeps anchored working threads stable', () => {
+    const anchors = new Map<string, number>([['run-a', 2_000]]);
+    const sorted = sortThreadsChronologically(
+      [
+        { id: 'old', lastTurnAtUnixMs: 1_000, updatedAtUnixMs: 1_100, createdAtUnixMs: 900 },
+        { id: 'run-a', lastTurnAtUnixMs: null, updatedAtUnixMs: 9_999, createdAtUnixMs: 1_900 },
+        { id: 'run-b', lastTurnAtUnixMs: 3_000, updatedAtUnixMs: 3_200, createdAtUnixMs: 2_900 },
+      ],
+      (id) => anchors.get(id),
+    );
+    expect(sorted.map((item) => item.id)).toEqual(['run-b', 'run-a', 'old']);
   });
 });

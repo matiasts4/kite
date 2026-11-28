@@ -70,9 +70,9 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
       case 'changed':
         return '--accent';
       case 'fixed':
-        return '--status-waiting';
+        return '--warning-text';
       case 'security':
-        return '--danger-fill';
+        return '--danger-ink';
       default:
         return '--text-secondary';
     }
@@ -89,7 +89,7 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
               <h3 className="settings-row__title">Kite Code v{currentVersion}</h3>
               <p>
                 {updateError ? (
-                  <span style={{ color: 'var(--danger-fill, #ef4444)' }}>
+                  <span style={{ color: 'var(--danger-ink, var(--status-failed, #ef4444))' }}>
                     {updateError}
                   </span>
                 ) : updateInfo?.available ? (
@@ -104,23 +104,34 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
             <div className="settings-row__control" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {updateInfo?.available && onUpdateAndRestart && (
                 <button
-                  className="settings-control ui-button"
+                  className="primary-button"
                   onClick={onUpdateAndRestart}
                   type="button"
                   style={{
-                    backgroundColor: 'var(--accent, #5c8fff)',
-                    color: '#fff',
+                    height: 'var(--vl-control-md, 32px)',
+                    padding: '0 12px',
+                    fontSize: '12px',
                     fontWeight: 600,
+                    display: 'inline-flex',
+                    alignItems: 'center',
                   }}
                 >
                   Actualizar y reiniciar
                 </button>
               )}
               <button
-                className="settings-control ui-button"
+                className="secondary-button"
                 disabled={isCheckingUpdate}
                 onClick={onCheckUpdate}
                 type="button"
+                style={{
+                  height: 'var(--vl-control-md, 32px)',
+                  padding: '0 12px',
+                  fontSize: '12px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
               >
                 {isCheckingUpdate ? (
                   <>
@@ -172,12 +183,10 @@ export const ChangelogTab: React.FC<ChangelogTabProps> = ({
               {rel.isIncoming && (
                 <span
                   className="settings-badge"
+                  data-tone="accent"
                   style={{
                     fontSize: '11px',
                     padding: '1px 8px',
-                    backgroundColor: 'rgba(92, 143, 255, 0.2)',
-                    color: 'var(--accent, #5c8fff)',
-                    border: '1px solid rgba(92, 143, 255, 0.3)',
                   }}
                 >
                   Disponible

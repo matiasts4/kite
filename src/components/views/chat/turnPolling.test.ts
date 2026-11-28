@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ExtendedChatThread } from './types';
 import { pollTurnUpdates } from './turnPolling';
 import { invokeCommand } from '../../../lib/ipc';
+import { playApprovalChime } from '../../../lib/notifications/audioCues';
 
 vi.mock('../../../lib/ipc', () => ({
   invokeCommand: vi.fn(),
@@ -648,5 +649,179 @@ describe('pollTurnUpdates synchronization & settlement', () => {
     const items = threadsMap['thread-sync-1'].items;
     expect(items.map((it) => it.id)).toEqual(['u-1', 'sub-1', 'asst-1']);
     expect(items[2]?.text).toBe('Listo.\n\nDetalle final.');
+  });
+
+  it('preserves active async child-thread subagent items as running when the parent turn settles', async () => {
+    const threadWithActiveChild: ExtendedChatThread = {
+      id: 'thread-sync-sub',
+      title: 'Parent with Async Subagent',
+      provider: 'antigravity',
+      mode: 'fullAccess',
+      status: 'running',
+      subagentRuns: [
+        {
+          subagentId: 'sub-run-1',
+          parentThreadId: 'thread-sync-sub',
+          parentToolCallId: 'tool-sub-1',
+          role: 'Code Explorer',
+          status: 'running',
+          childThreadId: 'child-thread-1',
+          stepCount: 2,
+          items: [],
+          startedAtUnixMs: 1000,
+          updatedAtUnixMs: 1200,
+        },
+      ],
+      items: [
+        {
+          id: 'u-1',
+          kind: 'user',
+          text: 'Inspect repo',
+          title: null,
+          detail: null,
+          status: 'completed',
+          streaming: false,
+          exitCode: null,
+          createdAtUnixMs: 1000,
+          attachments: [],
+        },
+        {
+          id: 'tool-sub-1',
+          kind: 'tool',
+          toolKind: 'subagent',
+          toolName: 'kite_subagent_run',
+          text: 'Working on module A',
+          title: 'Subagent · Code Explorer',
+          detail: null,
+          status: 'running',
+          streaming: true,
+          exitCode: null,
+          createdAtUnixMs: 1001,
+          attachments: [],
+          subagentMeta: {
+            subagentId: 'sub-run-1',
+            role: 'Code Explorer',
+            childThreadId: 'child-thread-1',
+            status: 'running',
+          },
+        },
+        {
+          id: 'tool-cmd-1',
+          kind: 'tool',
+          toolKind: 'commandExecution',
+          toolName: 'run_command',
+          text: '',
+          title: 'Run check',
+          detail: null,
+          status: 'running',
+          streaming: true,
+          exitCode: null,
+          createdAtUnixMs: 1002,
+          attachments: [],
+        },
+      ],
+    } as unknown as ExtendedChatThread;
+
+    let threadsMap: Record<string, ExtendedChatThread> = {
+      'thread-sync-sub': threadWithActiveChild,
+    };
+    const setThreadsMap = vi.fn((updater) => {
+      threadsMap = typeof updater === 'function' ? updater(threadsMap) : updater;
+    });
+    const activePollRunsRef = { current: new Set<string>(['run-sub-parent']) };
+
+    vi.mocked(invokeCommand).mockResolvedValueOnce({
+      schemaVersion: 1,
+      runId: 'run-sub-parent',
+      nextSequence: 2,
+      finished: true,
+      hasMore: false,
+      resyncRequired: false,
+      events: [{ sequence: 2, kind: 'finished', ok: true, stoppedByBuilder: false }],
+    });
+
+    await pollTurnUpdates({
+      runId: 'run-sub-parent',
+      threadId: 'thread-sync-sub',
+      afterSeq: 0,
+      agentId: null,
+      isMountedRef: { current: true },
+      activePollRunsRef,
+      setThreadsMap,
+      setIsRunning: vi.fn(),
+      notifyThreadsChanged: vi.fn(),
+    });
+
+    const updated = threadsMap['thread-sync-sub'];
+    const subagentItem = updated.items.find((it) => it.id === 'tool-sub-1');
+    const cmdItem = updated.items.find((it) => it.id === 'tool-cmd-1');
+    expect(subagentItem?.status).toBe('running');
+    expect(subagentItem?.streaming).toBe(true);
+    expect(cmdItem?.status).toBe('completed');
+    expect(cmdItem?.streaming).toBe(false);
+  });
+
+  it('dispatches kite:notifications-refresh on approvalOpened and finished instead of calling playApprovalChime directly', async () => {
+    const refreshEvents: Event[] = [];
+    const onRefresh = (e: Event) => refreshEvents.push(e);
+    window.addEventListener('kite:notifications-refresh', onRefresh);
+
+    try {
+      let threadsMap: Record<string, ExtendedChatThread> = {
+        'thread-sync-1': makeRunningThread(),
+      };
+      const setThreadsMap = vi.fn((updater) => {
+        threadsMap = typeof updater === 'function' ? updater(threadsMap) : updater;
+      });
+      const activePollRunsRef = { current: new Set<string>(['run-notif-1']) };
+
+      vi.mocked(invokeCommand)
+        .mockResolvedValueOnce({
+          schemaVersion: 1,
+          runId: 'run-notif-1',
+          nextSequence: 1,
+          finished: false,
+          hasMore: false,
+          resyncRequired: false,
+          events: [
+            {
+              sequence: 1,
+              kind: 'approvalOpened',
+              approval: { requestId: 'req-9', title: 'Approve write' },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          schemaVersion: 1,
+          runId: 'run-notif-1',
+          nextSequence: 2,
+          finished: true,
+          hasMore: false,
+          resyncRequired: false,
+          events: [{ sequence: 2, kind: 'finished', ok: true, stoppedByBuilder: false }],
+        });
+
+      await pollTurnUpdates({
+        runId: 'run-notif-1',
+        threadId: 'thread-sync-1',
+        afterSeq: 0,
+        agentId: null,
+        isMountedRef: { current: true },
+        activePollRunsRef,
+        setThreadsMap,
+        setIsRunning: vi.fn(),
+        notifyThreadsChanged: vi.fn(),
+      });
+
+      expect(refreshEvents).toHaveLength(1);
+      expect(playApprovalChime).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(450);
+
+      expect(refreshEvents).toHaveLength(2);
+      expect(playApprovalChime).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('kite:notifications-refresh', onRefresh);
+    }
   });
 });

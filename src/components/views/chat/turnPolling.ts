@@ -1,10 +1,9 @@
 import type React from 'react';
-import type { ChatItem } from '../../../types';
+import type { ChatItem, SubagentRun } from '../../../types';
 import { invokeCommand } from '../../../lib/ipc';
 import { ExtendedChatThread, ReflectionCandidate } from './types';
 import { isInternalDispatchItem } from './chatItemHelpers';
 import { withTimeout } from './chatSessionUtils';
-import { playApprovalChime } from '../../../lib/notifications/audioCues';
 
 export interface PollTurnOptions {
   runId: string;
@@ -31,12 +30,54 @@ const IN_FLIGHT_ITEM_STATUSES = new Set([
 
 const MAX_TRANSIENT_POLL_RETRIES = 5;
 
+const TERMINAL_SUBAGENT_STATUSES = new Set([
+  'completed',
+  'failed',
+  'killed',
+  'cancelled',
+  'canceled',
+  'stopped',
+  'interrupted',
+]);
+
+function isActiveAsyncSubagentItem(
+  it: ChatItem,
+  subagentRuns?: SubagentRun[] | null
+): boolean {
+  const isSubagent = it.toolKind === 'subagent' || Boolean(it.subagentMeta);
+  if (!isSubagent) return false;
+  const meta = it.subagentMeta;
+  const childThreadId = meta?.childThreadId?.trim();
+  const subagentId = meta?.subagentId?.trim();
+  if (!childThreadId && !subagentId) return false;
+  const matchedRun = (subagentRuns ?? []).find(
+    (run) =>
+      (childThreadId && run.childThreadId === childThreadId) ||
+      (subagentId && (run.subagentId === subagentId || run.parentToolCallId === it.id))
+  );
+  if (matchedRun) {
+    const runStatus = String(matchedRun.status ?? '').toLowerCase();
+    return (
+      Boolean(matchedRun.childThreadId?.trim() || childThreadId) &&
+      !TERMINAL_SUBAGENT_STATUSES.has(runStatus)
+    );
+  }
+  if (!childThreadId) return false;
+  const metaStatus = String(meta?.status ?? it.status ?? '').toLowerCase();
+  return !TERMINAL_SUBAGENT_STATUSES.has(metaStatus);
+}
+
 function settleInFlightItems(
   items: ChatItem[],
-  finalItemStatus: 'completed' | 'failed'
+  finalItemStatus: 'completed' | 'failed',
+  subagentRuns?: SubagentRun[] | null,
+  preserveAsyncSubagents = true
 ): ChatItem[] {
   let changed = false;
   const next = items.map((it) => {
+    if (preserveAsyncSubagents && isActiveAsyncSubagentItem(it, subagentRuns)) {
+      return it;
+    }
     const isStreaming = Boolean(it.streaming);
     const isInFlightStatus = IN_FLIGHT_ITEM_STATUSES.has(String(it.status ?? ''));
     if (!isStreaming && !isInFlightStatus) {
@@ -170,7 +211,9 @@ export async function pollTurnUpdates({
               if (ev.status === 'idle' || ev.status === 'error') {
                 items = settleInFlightItems(
                   items,
-                  ev.status === 'error' ? 'failed' : 'completed'
+                  ev.status === 'error' ? 'failed' : 'completed',
+                  target.subagentRuns,
+                  !stoppedByBuilder
                 );
               }
             } else if (ev.kind === 'upsert' && ev.item) {
@@ -242,7 +285,6 @@ export async function pollTurnUpdates({
             } else if (ev.kind === 'approvalOpened' && ev.approval) {
               pendingApproval = ev.approval;
               status = 'waiting';
-              playApprovalChime();
             } else if (ev.kind === 'approvalResolved') {
               pendingApproval = null;
             } else if (ev.kind === 'reflectionCandidate' && ev.candidate) {
@@ -252,7 +294,9 @@ export async function pollTurnUpdates({
               stoppedByBuilder = Boolean(ev.stoppedByBuilder);
               items = settleInFlightItems(
                 items,
-                ev.ok === false && !ev.stoppedByBuilder ? 'failed' : 'completed'
+                ev.ok === false && !ev.stoppedByBuilder ? 'failed' : 'completed',
+                target.subagentRuns,
+                !stoppedByBuilder
               );
             }
           }
@@ -264,7 +308,9 @@ export async function pollTurnUpdates({
             if (status !== 'waiting') {
               items = settleInFlightItems(
                 items,
-                status === 'error' || stoppedByBuilder ? 'failed' : 'completed'
+                status === 'error' || stoppedByBuilder ? 'failed' : 'completed',
+                target.subagentRuns,
+                !stoppedByBuilder
               );
             }
           }
@@ -281,6 +327,13 @@ export async function pollTurnUpdates({
             },
           };
         });
+
+        const shouldRefreshNotifications = events.some(
+          (ev) => (ev.kind === 'approvalOpened' && Boolean(ev.approval)) || ev.kind === 'finished'
+        );
+        if (shouldRefreshNotifications && typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+        }
       }
 
       if (isTerminal) {

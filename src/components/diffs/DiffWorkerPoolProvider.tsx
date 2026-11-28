@@ -22,6 +22,11 @@ function canUseWorkers(): boolean {
   return typeof window !== 'undefined' && typeof Worker !== 'undefined';
 }
 
+function getDocumentVisible(): boolean {
+  if (typeof document === 'undefined') return true;
+  return !document.hidden && document.visibilityState !== 'hidden';
+}
+
 function createDiffWorkerPoolSize(): number {
   if (typeof navigator !== 'undefined' && typeof navigator.hardwareConcurrency === 'number') {
     return Math.max(1, Math.min(2, Math.floor(navigator.hardwareConcurrency / 2) || 2));
@@ -85,30 +90,62 @@ export function __resetDiffWorkerPoolForTests(): void {
 /**
  * Provides a shared, ref-counted `@pierre/diffs` syntax-highlighting WorkerPool
  * capped at 1–2 workers when running in browser/Tauri environments, and disposes
- * idle workers after 60s of inactivity once all consumers unmount.
+ * idle workers after 60s of inactivity once all consumers unmount or go hidden.
  */
-export function DiffWorkerPoolProvider({ children }: { children: ReactNode }) {
+export function DiffWorkerPoolProvider({
+  children,
+  active = true,
+}: {
+  children: ReactNode;
+  active?: boolean;
+}) {
   const existingPool = useWorkerPool();
-  const [poolManager] = useState<WorkerPoolManager | undefined>(() => {
-    if (existingPool) return undefined;
+  const [docVisible, setDocVisible] = useState<boolean>(() => getDocumentVisible());
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const handleVisibility = () => {
+      setDocVisible(getDocumentVisible());
+    };
+    handleVisibility();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, []);
+
+  const isEffectivelyActive = active && docVisible;
+  const [poolManager, setPoolManager] = useState<WorkerPoolManager | undefined>(() => {
+    if (existingPool || !isEffectivelyActive) return undefined;
     return acquireSharedWorkerPool();
   });
 
+  const activePool =
+    !existingPool && isEffectivelyActive
+      ? (poolManager ?? acquireSharedWorkerPool())
+      : undefined;
+
   useEffect(() => {
-    if (existingPool || !poolManager) return;
+    if (existingPool || !isEffectivelyActive) {
+      setPoolManager(undefined);
+      return;
+    }
+    const acquired = acquireSharedWorkerPool();
+    setPoolManager((prev) => (prev === acquired ? prev : acquired));
+    if (!acquired) return;
     activeConsumers += 1;
     clearIdleDisposeTimer();
     return () => {
       releaseSharedWorkerPool();
     };
-  }, [existingPool, poolManager]);
+  }, [existingPool, isEffectivelyActive]);
 
-  if (existingPool || !poolManager) {
+  if (existingPool || !activePool) {
     return <>{children}</>;
   }
 
   return (
-    <WorkerPoolContext.Provider value={poolManager}>
+    <WorkerPoolContext.Provider value={activePool}>
       {children}
     </WorkerPoolContext.Provider>
   );

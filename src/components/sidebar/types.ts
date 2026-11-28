@@ -7,7 +7,9 @@ export interface ChatThreadSummary {
   id: string;
   title: string;
   workspaceId?: string | null;
+  createdAtUnixMs?: number;
   updatedAtUnixMs?: number;
+  lastTurnAtUnixMs?: number | null;
   isPinned?: boolean;
   pinned?: boolean;
   status?: 'idle' | 'running' | 'waiting' | 'error';
@@ -192,6 +194,17 @@ function isNoisyActivityLine(line: string): boolean {
   return false;
 }
 
+const CONTRACT_HEADING_RE =
+  /^#+\s*(?:Role\s*&\s*Charter|Role|Charter|Job|Sources|Never-List|Deliverable|First\s*Task|Autonomy|Brief|Summary|Operating\s*Contract|Execution\s*Standards|Standards|Context|Propósito|Rol|Misión)\s*:?\s*$/gim;
+
+function stripContractHeadings(text: string): string {
+  return text
+    .replace(CONTRACT_HEADING_RE, '')
+    .replace(/^\s*[#>*-]+\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function formatAgentPurpose(
   agent: AgentProfile,
   activity?: { line?: string },
@@ -201,11 +214,12 @@ export function formatAgentPurpose(
   if (!isInstalled) return `${engineName} not installed`;
   const line = activity?.line?.trim() ?? '';
   if (line.length > 0 && !isNoisyActivityLine(line)) return line;
-  const cleaned = (agent.purpose || '')
-    .replace(/^#+\s*(?:Role\s*&\s*Charter|Role|Execution\s*Standards|Standards|Context|Propósito|Rol|Misión)\s*$/gim, '')
-    .replace(/^\s*[#>*-]+\s+/gm, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const normalized = (agent.purpose || '').replace(/\r\n?/g, '\n').trim();
+  const sections = normalized
+    .split(/\n(?=#{1,6}\s+)/)
+    .map(stripContractHeadings)
+    .filter(Boolean);
+  const cleaned = sections[0] ?? stripContractHeadings(normalized);
   if (cleaned.length === 0) return `Powered by ${engineName}`;
   return cleaned.length > 120 ? `${cleaned.slice(0, 120)}…` : cleaned;
 }

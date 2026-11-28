@@ -128,32 +128,9 @@ export function useSubagentInspectorThread({
     };
   }, [activeThreadId]);
 
-  useEffect(() => {
-    if (!activeThreadId || typeof window === 'undefined') {
-      return;
-    }
-    let cancelled = false;
-    let refreshing = false;
-    const handleThreadsChanged = () => {
-      if (refreshing) return;
-      refreshing = true;
-      void loadChatThread(activeThreadId)
-        .then((loaded) => {
-          if (!cancelled && loaded) {
-            setThread(loaded);
-          }
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          refreshing = false;
-        });
-    };
-    window.addEventListener('kite:threads-changed', handleThreadsChanged);
-    return () => {
-      cancelled = true;
-      window.removeEventListener('kite:threads-changed', handleThreadsChanged);
-    };
-  }, [activeThreadId]);
+  // Live updates arrive through `chat-subagent-event` / `chat-swarm-event` above and step
+  // transcripts hydrate lazily via `getThreadSubagentDetail`, so `kite:threads-changed`
+  // never re-downloads the whole parent thread here.
 
   const runs = useMemo(
     () => dedupeSubagentRuns(thread?.subagentRuns),

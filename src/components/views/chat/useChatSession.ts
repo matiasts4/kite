@@ -11,6 +11,7 @@ import {
   engineToChatProvider,
 } from './types';
 import { expandCitations } from './citationChip';
+import { reconcileEffortForModel } from './driverDeclaration';
 import { useChatAttachments } from './hooks/useChatAttachments';
 import { useChatModels } from './hooks/useChatModels';
 import { useChatAgents } from './hooks/useChatAgents';
@@ -21,7 +22,7 @@ import {
   type ChatConfigPatch,
   type ChatDraftConfig,
 } from './hooks/useChatDraftConfig';
-import { getSavedSelectedProvider } from './modelPersistence';
+import { getSavedSelectedProvider, saveSelectedEffort } from './modelPersistence';
 import { holdThreadSelection, registerNewThreadHandler } from '../../../lib/newThreadRequest';
 import {
   useChatConnectionBindings,
@@ -34,9 +35,11 @@ import {
   loadChatSummariesWithFallback,
   loadSavedGrid,
   loadThreadWithFallback,
+  MAX_CACHED_THREADS_IN_MEMORY,
   pruneThreadsMapLru,
   readCachedThread,
   sortAgentSummariesByTabOrder,
+  threadMatchesAgentScope,
   toThreadSummary,
 } from './hooks/useChatGridPersistence';
 import { useChatTurnActions } from './hooks/useChatTurnActions';
@@ -48,6 +51,35 @@ function areStringArraysEqual(a: readonly string[], b: readonly string[]): boole
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i += 1) {
     if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Structural check over the lifecycle fields that drive subagent cards. Step
+ * transcripts are intentionally ignored: IPC snapshots omit them and live events
+ * merge them in locally, so comparing `items` would always report a difference.
+ */
+export function areSubagentRunsEquivalent(
+  current: ExtendedChatThread['subagentRuns'] | null,
+  incoming: ExtendedChatThread['subagentRuns'] | null
+): boolean {
+  const a = current ?? [];
+  const b = incoming ?? [];
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.subagentId !== y.subagentId ||
+      x.status !== y.status ||
+      x.stepCount !== y.stepCount ||
+      x.updatedAtUnixMs !== y.updatedAtUnixMs ||
+      x.latestActivity !== y.latestActivity ||
+      (x.childThreadId ?? null) !== (y.childThreadId ?? null)
+    ) {
+      return false;
+    }
   }
   return true;
 }
@@ -91,8 +123,7 @@ function areThreadSnapshotsEquivalent(
     incoming.reflectionCandidate ||
     (current.queuedRuns?.length ?? 0) > 0 ||
     (incoming.queuedRuns?.length ?? 0) > 0 ||
-    (current.subagentRuns?.length ?? 0) > 0 ||
-    (incoming.subagentRuns?.length ?? 0) > 0
+    !areSubagentRunsEquivalent(current.subagentRuns, incoming.subagentRuns)
   ) {
     return false;
   }
@@ -248,6 +279,27 @@ export function useChatSession({
     fetchDynamicModels,
     refreshModels,
   } = useChatModels(defaultProvider);
+  const dynamicModelsMapRef = useRef(dynamicModelsMap);
+  dynamicModelsMapRef.current = dynamicModelsMap;
+
+  const reconcileEffortForSelection = useCallback(
+    (provider: ChatProvider, modelId: string | null, candidateEffort: string | null): string | null => {
+      if (!candidateEffort) return null;
+      if (modelId === null) {
+        return null;
+      }
+      const catalog = dynamicModelsMapRef.current[provider];
+      if (!catalog || catalog.length === 0) {
+        return candidateEffort;
+      }
+      const modelMeta = catalog.find((entry) => entry.id === modelId);
+      if (!modelMeta) {
+        return candidateEffort;
+      }
+      return reconcileEffortForModel(modelMeta, candidateEffort);
+    },
+    []
+  );
 
   const { dynamicAgentsMap, ensureDynamicAgents, refreshAgents } = useChatAgents(defaultProvider);
 
@@ -306,6 +358,8 @@ export function useChatSession({
 
   const focusedThreadIdRef = useRef(focusedThreadId);
   focusedThreadIdRef.current = focusedThreadId;
+  const knownThreadsListRef = useRef(knownThreadsList);
+  knownThreadsListRef.current = knownThreadsList;
   const threadsMapRef = useRef(threadsMap);
   threadsMapRef.current = threadsMap;
   const gridThreadIdsRef = useRef(gridThreadIds);
@@ -323,6 +377,9 @@ export function useChatSession({
       persistLayout,
     }: { updateLayout: boolean; persistLayout: boolean }
   ) => {
+    if (!threadMatchesAgentScope(rawThread, agentId)) {
+      return;
+    }
     const boundBase = threadWithResolvedBinding(rawThread);
     const inFlightQueue = pendingQueuedRunsRef.current[threadId];
     const boundThread =
@@ -389,7 +446,8 @@ export function useChatSession({
     const requestSeq = ++switchRequestSeqRef.current;
     setShowHistoryPopover(false);
 
-    const cached = threadsMapRef.current[threadId] ?? readCachedThread(threadId);
+    const rawCached = threadsMapRef.current[threadId] ?? readCachedThread(threadId);
+    const cached = threadMatchesAgentScope(rawCached, agentId) ? rawCached : null;
     const hasImmediateSnapshot = Boolean(cached && cached.id);
     if (cached && cached.id) {
       applySwitchedThread(threadId, cached, {
@@ -403,7 +461,7 @@ export function useChatSession({
       if (!isMountedRef.current || switchRequestSeqRef.current !== requestSeq) {
         return;
       }
-      if (fresh && fresh.id) {
+      if (fresh && fresh.id && threadMatchesAgentScope(fresh, agentId)) {
         applySwitchedThread(threadId, fresh, {
           updateLayout: !hasImmediateSnapshot,
           persistLayout: !agentId && !hasImmediateSnapshot,
@@ -418,6 +476,15 @@ export function useChatSession({
     window.dispatchEvent(new CustomEvent('kite:threads-changed'));
     onThreadsChanged?.();
   };
+
+  const getProtectedThreadIds = useCallback(
+    (extraId?: string | null): string[] => [
+      ...gridThreadIdsRef.current,
+      ...(focusedThreadIdRef.current ? [focusedThreadIdRef.current] : []),
+      ...(extraId ? [extraId] : []),
+    ],
+    []
+  );
 
   const {
     isRunning,
@@ -445,13 +512,23 @@ export function useChatSession({
     activePollRunsRef,
     activePollThreadsRef,
     reconcileThread: (tid) => reconcileThreadRef.current(tid),
+    getProtectedThreadIds,
   });
 
   const reconcileThread = useCallback(
     async (threadId: string) => {
       try {
+        const configSeqAtStart = configUpdateSeqRef.current[threadId] ?? 0;
         const fresh = await loadThreadWithFallback(threadId, agentId);
-        if (!isMountedRef.current || !fresh || !fresh.id) return;
+        if (
+          !isMountedRef.current ||
+          !fresh ||
+          !fresh.id ||
+          !threadMatchesAgentScope(fresh, agentId) ||
+          (configUpdateSeqRef.current[threadId] ?? 0) !== configSeqAtStart
+        ) {
+          return;
+        }
         const boundBase = threadWithResolvedBinding(fresh);
         const inFlightQueue = pendingQueuedRunsRef.current[threadId];
         const bound =
@@ -583,9 +660,6 @@ export function useChatSession({
           },
         };
       });
-      setKnownThreadsList((prev) =>
-        prev.map((t) => (t.id === threadId ? { ...t, queuedRuns: nextQueue } : t))
-      );
       void invokeCommand<ExtendedChatThread>('update_chat_configuration', {
         threadId,
         queuedRuns: nextQueue,
@@ -664,7 +738,7 @@ export function useChatSession({
       try {
         handleUpdateQueuedRuns(threadId, rest);
         if (isRunningRef.current[threadId] || isRunning[threadId] || thread.status === 'running') {
-          const cancelled = await handleCancelTurn(threadId);
+          const cancelled = await handleCancelTurn(threadId, { preserveChildren: true });
           if (!cancelled) {
             handleUpdateQueuedRuns(threadId, currentQueue);
             return;
@@ -698,7 +772,7 @@ export function useChatSession({
       autoDispatchingQueueRef.current.add(threadId);
       try {
         if (isRunningRef.current[threadId] || isRunning[threadId] || thread.status === 'running') {
-          const cancelled = await handleCancelTurn(threadId);
+          const cancelled = await handleCancelTurn(threadId, { preserveChildren: true });
           if (!cancelled) return false;
         }
         setPromptMap((prev) => ({ ...prev, [threadId]: '' }));
@@ -842,7 +916,14 @@ export function useChatSession({
         const nextHydration = hydrateInitialChatState(agentId, initialThreadId);
         skipInitialSpinnerRef.current = nextHydration.hydrated;
         setKnownThreadsList(nextHydration.summaries);
-        setThreadsMap((prev) => ({ ...prev, ...nextHydration.threadsMap }));
+        setThreadsMap((prev) => {
+          const merged = { ...prev, ...nextHydration.threadsMap };
+          const protectedIds = [
+            ...nextHydration.grid.threadIds,
+            ...(nextHydration.grid.focusedThreadId ? [nextHydration.grid.focusedThreadId] : []),
+          ];
+          return pruneThreadsMapLru(merged, protectedIds);
+        });
         gridThreadIdsRef.current = nextHydration.grid.threadIds;
         setGridThreadIds(nextHydration.grid.threadIds);
         focusedThreadIdRef.current = nextHydration.grid.focusedThreadId;
@@ -896,13 +977,19 @@ export function useChatSession({
           const ordered = sortAgentSummariesByTabOrder(summaries);
           summaries = ordered;
           void persistAgentTabOrder(ordered.map((thread) => thread.id).filter(Boolean));
-          const first = ordered[0];
-          if (first?.id) {
-            const thread = await loadThreadWithFallback(first.id, agentId);
+          const preferred =
+            (initialThreadId ? ordered.find((thread) => thread.id === initialThreadId) : undefined) ??
+            ordered[0];
+          if (preferred?.id) {
+            const thread = await loadThreadWithFallback(preferred.id, agentId);
             if (!isMountedRef.current || switchRequestSeqRef.current !== requestSeq) return;
             if (thread?.id) {
               const boundThread = threadWithResolvedBinding(thread);
-              setThreadsMap((prev) => ({ ...prev, [thread.id]: boundThread }));
+              setThreadsMap((prev) => {
+                const { [thread.id]: _reordered, ...rest } = prev;
+                const updated = { ...rest, [thread.id]: boundThread };
+                return pruneThreadsMapLru(updated, [thread.id]);
+              });
               gridThreadIdsRef.current = [thread.id];
               setGridThreadIds([thread.id]);
               focusedThreadIdRef.current = thread.id;
@@ -949,20 +1036,33 @@ export function useChatSession({
           setIsLoadingInitial(false);
           return;
         }
+        const nextFocused =
+          validIds.length > 0
+            ? (validIds.includes(focused!) ? focused : validIds[0])
+            : null;
+        const protectedIds = [
+          ...validIds,
+          ...(nextFocused ? [nextFocused] : []),
+        ];
         setThreadsMap((prev) => {
           let changed = false;
           const next = { ...prev };
           for (const [id, loadedThread] of Object.entries(loadedMap)) {
             if ((configUpdateSeqRef.current[id] ?? 0) > 0) continue;
             if (!areThreadSnapshotsEquivalent(prev[id], loadedThread)) {
+              delete next[id];
               next[id] = loadedThread;
               changed = true;
             }
           }
-          return changed ? next : prev;
+          if (!changed) {
+            return Object.keys(prev).length > MAX_CACHED_THREADS_IN_MEMORY
+              ? pruneThreadsMapLru(prev, protectedIds)
+              : prev;
+          }
+          return pruneThreadsMapLru(next, protectedIds);
         });
         if (validIds.length > 0) {
-          const nextFocused = validIds.includes(focused!) ? focused : validIds[0];
           if (!areStringArraysEqual(gridThreadIdsRef.current, validIds)) {
             gridThreadIdsRef.current = validIds;
             setGridThreadIds(validIds);
@@ -1025,18 +1125,33 @@ export function useChatSession({
       if (!isMountedRef.current || switchRequestSeqRef.current !== requestSeq) return;
       const tid = thread.id;
       const boundThread = threadWithResolvedBinding(thread);
+      const summaryThread = toThreadSummary(boundThread);
       holdThreadSelection(tid);
-      setThreadsMap((prev) => ({ ...prev, [tid]: boundThread }));
-      setKnownThreadsList((prev) => [boundThread, ...prev.filter((t) => t.id !== tid)]);
+      setThreadsMap((prev) => {
+        const { [tid]: _reordered, ...rest } = prev;
+        const updated = { ...rest, [tid]: boundThread };
+        return pruneThreadsMapLru(updated, [tid]);
+      });
+      setKnownThreadsList((prev) => [summaryThread, ...prev.filter((t) => t.id !== tid)]);
       gridThreadIdsRef.current = [tid];
       setGridThreadIds([tid]);
       focusedThreadIdRef.current = tid;
       setFocusedThreadId(tid);
       setIsLoadingInitial(false);
-      void persistGrid([tid], tid);
-      window.dispatchEvent(
-        new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
-      );
+      if (agentId) {
+        void persistAgentTabOrder([
+          tid,
+          ...knownThreadsListRef.current.map((t) => t.id).filter((id) => id !== tid),
+        ]);
+        window.dispatchEvent(
+          new CustomEvent('kite:select-thread', { detail: { threadId: tid, agentId, mode: 'agent' } })
+        );
+      } else {
+        void persistGrid([tid], tid);
+        window.dispatchEvent(
+          new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
+        );
+      }
       notifyThreadsChanged();
 
       setTimeout(() => {
@@ -1048,6 +1163,7 @@ export function useChatSession({
   };
 
   useEffect(() => {
+    if (agentId) return;
     const handleOpenTask = (e: Event) => {
       const custom = e as CustomEvent<{ taskId: string; title: string; description: string }>;
       if (!custom.detail) return;
@@ -1083,8 +1199,6 @@ export function useChatSession({
       currentAgent?.defaultModel || draftConfig.model || null,
       draftConfig.agent ?? null,
       currentAgent ?? {
-        defaultMode: draftConfig.mode,
-        defaultPlan: draftConfig.plan,
         defaultEffort: draftConfig.effort,
       }
     );
@@ -1121,7 +1235,11 @@ export function useChatSession({
       setIsLoadingInitial(false);
       holdThreadSelection(currentThread.id);
       window.dispatchEvent(
-        new CustomEvent('kite:select-thread', { detail: { threadId: currentThread.id, mode: 'chat' } })
+        new CustomEvent('kite:select-thread', {
+          detail: agentId
+            ? { threadId: currentThread.id, agentId, mode: 'agent' }
+            : { threadId: currentThread.id, mode: 'chat' },
+        })
       );
       if (scopeWorkspaceId && (embedded || agentId)) {
         window.dispatchEvent(
@@ -1145,9 +1263,14 @@ export function useChatSession({
       if (!isMountedRef.current || switchRequestSeqRef.current !== requestSeq) return;
       const tid = thread.id;
       const boundThread = threadWithResolvedBinding(thread);
+      const summaryThread = toThreadSummary(boundThread);
       holdThreadSelection(tid);
-      setThreadsMap((prev) => ({ ...prev, [tid]: boundThread }));
-      setKnownThreadsList((prev) => [boundThread, ...prev.filter((t) => t.id !== tid)]);
+      setThreadsMap((prev) => {
+        const { [tid]: _reordered, ...rest } = prev;
+        const updated = { ...rest, [tid]: boundThread };
+        return pruneThreadsMapLru(updated, [tid]);
+      });
+      setKnownThreadsList((prev) => [summaryThread, ...prev.filter((t) => t.id !== tid)]);
 
       const nextGrid = [tid];
       gridThreadIdsRef.current = nextGrid;
@@ -1155,11 +1278,21 @@ export function useChatSession({
       focusedThreadIdRef.current = tid;
       setFocusedThreadId(tid);
       setIsLoadingInitial(false);
-      void persistGrid(nextGrid, tid);
       setShowHistoryPopover(false);
-      window.dispatchEvent(
-        new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
-      );
+      if (agentId) {
+        void persistAgentTabOrder([
+          tid,
+          ...knownThreadsListRef.current.map((t) => t.id).filter((id) => id !== tid),
+        ]);
+        window.dispatchEvent(
+          new CustomEvent('kite:select-thread', { detail: { threadId: tid, agentId, mode: 'agent' } })
+        );
+      } else {
+        void persistGrid(nextGrid, tid);
+        window.dispatchEvent(
+          new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
+        );
+      }
       if (scopeWorkspaceId && (embedded || agentId)) {
         window.dispatchEvent(
           new CustomEvent('kite:select-workspace', { detail: { workspaceId: scopeWorkspaceId } })
@@ -1196,8 +1329,9 @@ export function useChatSession({
         pinned: nextPinned,
       });
       if (!isMountedRef.current) return;
+      const summaryUpdated = toThreadSummary(updated);
       setThreadsMap((prev) => ({ ...prev, [threadId]: updated }));
-      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? updated : t)));
+      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? summaryUpdated : t)));
       notifyThreadsChanged();
     } catch (err) {
       console.error('[ChatView] set_chat_thread_pinned failed:', err);
@@ -1241,8 +1375,9 @@ export function useChatSession({
             title: finalTitle,
           });
       if (!isMountedRef.current) return;
+      const summaryUpdated = toThreadSummary(updated);
       setThreadsMap((prev) => ({ ...prev, [threadId]: updated }));
-      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? updated : t)));
+      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? summaryUpdated : t)));
       setEditingTitleId(null);
       notifyThreadsChanged();
     } catch (err) {
@@ -1257,7 +1392,17 @@ export function useChatSession({
       void ensureDynamicAgents(patch.provider);
       void fetchDynamicModels(patch.provider);
     }
-    setDraftConfig((prev) => applyDraftPatch(prev, patch));
+    setDraftConfig((prev) => {
+      const next = applyDraftPatch(prev, patch);
+      if (patch.model !== undefined || patch.provider !== undefined || patch.effort !== undefined) {
+        const reconciled = reconcileEffortForSelection(next.provider, next.model, next.effort);
+        if (reconciled !== next.effort) {
+          saveSelectedEffort(next.provider, next.model, reconciled);
+          return { ...next, effort: reconciled };
+        }
+      }
+      return next;
+    });
   };
 
   const handleUpdateConfig = async (
@@ -1284,7 +1429,14 @@ export function useChatSession({
       effort: thread.effort ?? null,
       agent: (thread as any).agent || (thread as any).workMode || null,
     };
-    const { provider, mode, model, effort, agent } = applyDraftPatch(currentConfig, patch);
+    const { provider, mode, model, effort: patchedEffort, agent } = applyDraftPatch(currentConfig, patch);
+    const effort =
+      patch.model !== undefined || patch.provider !== undefined || patch.effort !== undefined
+        ? reconcileEffortForSelection(provider, model, patchedEffort)
+        : patchedEffort;
+    if (effort !== patchedEffort) {
+      saveSelectedEffort(provider, model, effort);
+    }
     const providerChanged = provider !== thread.provider;
     const connectionOnly =
       patch.connectionId !== undefined &&
@@ -1320,7 +1472,7 @@ export function useChatSession({
         effort: effort ?? null,
         plan: patch.plan !== undefined ? patch.plan : thread.plan,
         agent: agent ?? (thread as any).agent ?? (thread as any).workMode,
-        providerOptions: effort ? [{ id: 'effort', value: effort }] : undefined,
+        providerOptions: effort ? [{ id: 'effort', value: effort }] : [],
         workspaceId: patch.workspaceId !== undefined ? patch.workspaceId : (thread.workspaceId ?? null),
       });
       if (agentId && (patch.provider !== undefined || patch.model !== undefined)) {
@@ -1341,9 +1493,14 @@ export function useChatSession({
         });
       }
       if (!isMountedRef.current || configUpdateSeqRef.current[threadId] !== seq) return;
+      const resolvedBackendEffort =
+        updated.effort !== undefined ? updated.effort : (effort ?? null);
+      if (updated.effort !== undefined && updated.effort !== effort) {
+        saveSelectedEffort(provider, model, updated.effort);
+      }
       const mergedThread = threadWithResolvedBinding({
         ...updated,
-        effort: effort ?? updated.effort,
+        effort: resolvedBackendEffort,
       });
       const pendingQueue = pendingQueuedRunsRef.current[threadId];
       const currentSnapshot = threadsMapRef.current[threadId];
@@ -1382,7 +1539,8 @@ export function useChatSession({
           ),
         };
       });
-      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? nextThread : t)));
+      const summaryNext = toThreadSummary(nextThread);
+      setKnownThreadsList((prev) => prev.map((t) => (t.id === threadId ? summaryNext : t)));
       notifyThreadsChanged();
       if (patch.workspaceId !== undefined) {
         window.dispatchEvent(

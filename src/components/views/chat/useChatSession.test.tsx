@@ -4,8 +4,9 @@ import {
   CHAT_GRID_STORAGE_KEY,
   CHAT_SUMMARIES_STORAGE_KEY,
   CHAT_THREAD_STORAGE_PREFIX,
+  MAX_CACHED_THREADS_IN_MEMORY,
 } from './hooks/useChatGridPersistence';
-import { useChatSession } from './useChatSession';
+import { areSubagentRunsEquivalent, useChatSession } from './useChatSession';
 import type { AgentProfile } from '../../../types';
 import { invokeCommand } from '../../../lib/ipc';
 import { requestNewThread } from '../../../lib/newThreadRequest';
@@ -1044,7 +1045,10 @@ describe('useChatSession instant hydration', () => {
 
     await waitFor(() => {
       expect(result.current.focusedThreadId).toBe('t-race');
+      expect(invokeCommand).toHaveBeenCalledWith('load_chat_thread', expect.anything());
+      expect(invokeCommand).toHaveBeenCalledWith('list_live_chat_runs');
     });
+    await act(async () => {});
 
     // Overlapping config updates: second completes first, slower first resolves later and must NOT clobber second
     await act(async () => {
@@ -1156,5 +1160,547 @@ describe('useChatSession instant hydration', () => {
       effort: 'high',
       workspaceId: 'ws-agent-repo',
     });
+  });
+
+  it('passes preserveChildren: true on Send now and Steer while keeping explicit Stop cascading without preserveChildren (S2, S9)', async () => {
+    const runningThread = {
+      id: 't-sub-live',
+      title: 'Subagent Parent',
+      provider: 'antigravity',
+      mode: 'fullAccess',
+      status: 'running',
+      items: [{ id: 'u1', kind: 'user', text: 'Run subagent' }],
+      queuedRuns: [{ id: 'q-now', text: 'Consider one more detail' }],
+      subagentRuns: [
+        {
+          subagentId: 'sub-live-1',
+          parentThreadId: 't-sub-live',
+          parentToolCallId: 'tool-sub-1',
+          role: 'Explorer',
+          status: 'running',
+          childThreadId: 'child-live-1',
+          stepCount: 1,
+          items: [],
+          startedAtUnixMs: 1,
+          updatedAtUnixMs: 2,
+        },
+      ],
+      createdAtUnixMs: 1,
+      updatedAtUnixMs: 2,
+    };
+
+    localStorage.setItem(CHAT_SUMMARIES_STORAGE_KEY, JSON.stringify([runningThread]));
+    localStorage.setItem(
+      CHAT_GRID_STORAGE_KEY,
+      JSON.stringify({ threadIds: ['t-sub-live'], focusedThreadId: 't-sub-live' })
+    );
+    localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}t-sub-live`, JSON.stringify(runningThread));
+
+    const cancelPayloads: Array<Record<string, unknown>> = [];
+    vi.mocked(invokeCommand).mockImplementation(async (cmd, args) => {
+      const params = (args ?? {}) as Record<string, unknown>;
+      if (cmd === 'list_chat_summaries') return { summaries: [runningThread] };
+      if (cmd === 'load_thread_grid') {
+        return { grid: { threadIds: ['t-sub-live'], focusedThreadId: 't-sub-live' } };
+      }
+      if (cmd === 'load_chat_thread') return runningThread;
+      if (cmd === 'list_live_chat_runs') {
+        return [{ threadId: 't-sub-live', runId: 'run-sub-live', nextSequence: 0 }];
+      }
+      if (cmd === 'read_chat_turn_updates') return new Promise(() => {});
+      if (cmd === 'cancel_chat_turn') {
+        cancelPayloads.push(params);
+        return undefined;
+      }
+      if (cmd === 'update_chat_configuration') {
+        return { ...runningThread, queuedRuns: params.queuedRuns ?? [] };
+      }
+      if (cmd === 'start_chat_turn') {
+        return {
+          schemaVersion: 1,
+          runId: `run-next-${cancelPayloads.length}`,
+          thread: { ...runningThread, status: 'running', queuedRuns: [] },
+        };
+      }
+      if (cmd === 'list_chat_provider_models') return { models: [] };
+      if (cmd === 'list_provider_agents') return { agents: [] };
+      return null;
+    });
+
+    const { result } = renderHook(() =>
+      useChatSession({
+        workspaceId: 'ws-1',
+        threadId: 't-sub-live',
+        agents: [],
+        ownsNewThreadRequests: true,
+      })
+    );
+
+    await waitFor(() => {
+      expect(result.current.focusedThreadId).toBe('t-sub-live');
+    });
+
+    // 1. Send now must preserve running child subagents
+    await act(async () => {
+      await result.current.handleSendNowQueuedRun('t-sub-live', 'q-now');
+    });
+    expect(cancelPayloads[0]).toEqual({ threadId: 't-sub-live', preserveChildren: true });
+
+    // 2. Steer must also preserve running child subagents
+    await act(async () => {
+      await result.current.handleSteerPrompt('t-sub-live', 'Also check edge cases');
+    });
+    expect(cancelPayloads[1]).toEqual({ threadId: 't-sub-live', preserveChildren: true });
+
+    // 3. Explicit Stop (handleCancelTurn without options) must NOT set preserveChildren
+    await act(async () => {
+      await result.current.handleCancelTurn('t-sub-live');
+    });
+    expect(cancelPayloads[2]).toEqual({ threadId: 't-sub-live' });
+  });
+
+  it('sanitizes knownThreadsList to summaries without items or subagentRuns items across create, home, pin, rename, and config updates', async () => {
+    let createdCount = 0;
+    const backendThreads = new Map<string, any>();
+    const makeFullThread = (id: string, title: string) => ({
+      id,
+      title,
+      provider: 'claude',
+      mode: 'acceptEdits',
+      status: 'idle',
+      pinned: false,
+      items: [{ id: `item-${id}`, kind: 'user', text: 'LEAKED_FULL_ITEM' }],
+      subagentRuns: [
+        {
+          subagentId: `sub-${id}`,
+          parentThreadId: id,
+          parentToolCallId: `call-${id}`,
+          role: 'Explorer',
+          status: 'completed',
+          stepCount: 1,
+          startedAtUnixMs: 1,
+          updatedAtUnixMs: 2,
+          items: [{ id: `sub-item-${id}`, kind: 'assistant', text: 'LEAKED_SUBAGENT_ITEM' }],
+        },
+      ],
+    });
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd, args) => {
+      const params = (args ?? {}) as Record<string, any>;
+      if (cmd === 'list_chat_summaries') {
+        return { summaries: Array.from(backendThreads.values()) };
+      }
+      if (cmd === 'load_thread_grid') return { grid: null };
+      if (cmd === 'list_live_chat_runs') return [];
+      if (cmd === 'list_chat_provider_models') return { models: [] };
+      if (cmd === 'list_provider_agents') return { agents: [] };
+      if (cmd === 'create_general_chat') {
+        createdCount += 1;
+        const created = makeFullThread(`t-sum-${createdCount}`, `Created ${createdCount}`);
+        backendThreads.set(created.id, created);
+        return created;
+      }
+      if (cmd === 'start_chat_turn') {
+        const next = makeFullThread(params.threadId, 'Started From Home');
+        backendThreads.set(next.id, next);
+        return {
+          schemaVersion: 1,
+          runId: `run-${params.threadId}`,
+          thread: next,
+        };
+      }
+      if (cmd === 'read_chat_turn_updates') {
+        return {
+          schemaVersion: 1,
+          runId: params.runId,
+          nextSequence: 1,
+          finished: true,
+          resyncRequired: false,
+          events: [],
+        };
+      }
+      if (cmd === 'load_chat_thread') {
+        return backendThreads.get(params.threadId) ?? makeFullThread(params.threadId, 'Loaded Thread');
+      }
+      if (cmd === 'set_chat_thread_pinned') {
+        const next = { ...makeFullThread(params.threadId, 'Pinned Thread'), pinned: params.pinned };
+        backendThreads.set(next.id, next);
+        return next;
+      }
+      if (cmd === 'rename_chat_thread') {
+        const next = makeFullThread(params.threadId, params.title);
+        backendThreads.set(next.id, next);
+        return next;
+      }
+      if (cmd === 'update_chat_configuration') {
+        const next = {
+          ...makeFullThread(params.threadId, 'Configured Thread'),
+          model: params.model ?? null,
+        };
+        backendThreads.set(next.id, next);
+        return next;
+      }
+      return null;
+    });
+
+    const { result } = renderHook(() =>
+      useChatSession({
+        workspaceId: 'ws-1',
+        threadId: null,
+        agents: [],
+        ownsNewThreadRequests: true,
+      })
+    );
+
+    await waitFor(() => {
+      expect(result.current.isLoadingInitial).toBe(false);
+    });
+
+    const assertKnownSummariesClean = () => {
+      expect(result.current.knownThreadsList.length).toBeGreaterThan(0);
+      for (const entry of result.current.knownThreadsList) {
+        expect(entry.items).toBeUndefined();
+        for (const run of entry.subagentRuns ?? []) {
+          expect(run.items).toEqual([]);
+        }
+      }
+    };
+
+    // 1. handleStartThreadFromHome
+    await act(async () => {
+      await result.current.handleStartThreadFromHome('Start from home');
+      await new Promise((r) => setTimeout(r, 50));
+    });
+    assertKnownSummariesClean();
+
+    // 2. handleCreateNewThread
+    await act(async () => {
+      await result.current.handleCreateNewThread('ws-1');
+    });
+    assertKnownSummariesClean();
+
+    // 3. handlePinThread
+    await act(async () => {
+      await result.current.handlePinThread('t-sum-2', { stopPropagation: () => {} } as unknown as React.MouseEvent);
+    });
+    assertKnownSummariesClean();
+
+    // 4. handleRenameThread
+    await act(async () => {
+      await result.current.handleRenameThread('t-sum-2', 'Renamed Clean');
+    });
+    assertKnownSummariesClean();
+
+    // 5. handleUpdateConfig
+    await act(async () => {
+      await result.current.handleUpdateConfig('t-sum-2', { model: 'claude-sonnet-4' });
+    });
+    assertKnownSummariesClean();
+
+    await waitFor(() => {
+      const persisted = localStorage.getItem(CHAT_SUMMARIES_STORAGE_KEY) || '';
+      expect(persisted).toContain('t-sum-2');
+      expect(persisted).not.toContain('LEAKED_FULL_ITEM');
+      expect(persisted).not.toContain('LEAKED_SUBAGENT_ITEM');
+    });
+  });
+
+  it('enforces pruneThreadsMapLru across handleCreateNewThread, handleStartThreadFromHome, handleSendPrompt, and agent initChatView transitions', async () => {
+    let seq = 0;
+    const makeIdleThread = (id: string, profileId: string | null = null) => ({
+      id,
+      title: `Thread ${id}`,
+      provider: 'claude',
+      mode: 'acceptEdits',
+      profileId,
+      status: 'idle',
+      items: [{ id: `u-${id}`, kind: 'user', text: 'non-empty' }],
+    });
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd, args) => {
+      const params = (args ?? {}) as Record<string, any>;
+      if (cmd === 'list_chat_summaries' || cmd === 'list_agent_chat_summaries') {
+        return {
+          summaries: params.agentId
+            ? [makeIdleThread(`agent-init-${params.agentId}`, params.agentId)]
+            : [],
+        };
+      }
+      if (cmd === 'load_thread_grid') return { grid: null };
+      if (cmd === 'list_live_chat_runs') return [];
+      if (cmd === 'list_chat_provider_models') return { models: [] };
+      if (cmd === 'list_provider_agents') return { agents: [] };
+      if (cmd === 'create_general_chat' || cmd === 'create_agent_chat') {
+        seq += 1;
+        return makeIdleThread(`t-lru-gen-${seq}`, params.agentId ?? null);
+      }
+      if (cmd === 'load_agent_chat_thread') {
+        return makeIdleThread(params.threadId, params.agentId);
+      }
+      if (cmd === 'start_chat_turn' || cmd === 'start_agent_chat_turn') {
+        return {
+          schemaVersion: 1,
+          runId: `run-${params.threadId}`,
+          thread: makeIdleThread(params.threadId, params.agentId ?? null),
+        };
+      }
+      if (cmd === 'read_chat_turn_updates') {
+        return {
+          schemaVersion: 1,
+          runId: params.runId,
+          nextSequence: 1,
+          finished: true,
+          resyncRequired: false,
+          events: [],
+        };
+      }
+      return null;
+    });
+
+    const { result, rerender } = renderHook(
+      ({ agentId }: { agentId?: string | null }) =>
+        useChatSession({
+          workspaceId: 'ws-1',
+          agentId: agentId ?? null,
+          threadId: null,
+          agents: [],
+          ownsNewThreadRequests: true,
+        }),
+      { initialProps: { agentId: null as string | null } }
+    );
+
+    await waitFor(() => {
+      expect(result.current.isLoadingInitial).toBe(false);
+    });
+
+    // Create more than MAX_CACHED_THREADS_IN_MEMORY threads via create + home + send
+    for (let i = 0; i < MAX_CACHED_THREADS_IN_MEMORY + 2; i += 1) {
+      await act(async () => {
+        if (i % 2 === 0) {
+          await result.current.handleCreateNewThread('ws-1');
+        } else {
+          await result.current.handleStartThreadFromHome(`Prompt ${i}`);
+          await new Promise((r) => setTimeout(r, 45));
+        }
+      });
+    }
+    expect(Object.keys(result.current.threadsMap).length).toBeLessThanOrEqual(
+      MAX_CACHED_THREADS_IN_MEMORY
+    );
+
+    // handleSendPrompt with an overrideThread that was not yet in threadsMap still respects LRU cap
+    const extraThread = makeIdleThread('t-send-overflow');
+    await act(async () => {
+      await result.current.handleSendPrompt('t-send-overflow', 'Overflow prompt', extraThread as any);
+    });
+    expect(result.current.threadsMap['t-send-overflow']).toBeDefined();
+    expect(Object.keys(result.current.threadsMap).length).toBeLessThanOrEqual(
+      MAX_CACHED_THREADS_IN_MEMORY
+    );
+
+    // Switching agents triggers agentChanged + initChatView and keeps threadsMap capped
+    rerender({ agentId: 'agent-switch-a' });
+    await waitFor(() => {
+      expect(result.current.threadsMap['agent-init-agent-switch-a']).toBeDefined();
+    });
+    expect(Object.keys(result.current.threadsMap).length).toBeLessThanOrEqual(
+      MAX_CACHED_THREADS_IN_MEMORY
+    );
+  });
+
+  it('clears effort when switching to a non-effort model and clamps effort when switching to a narrower-tier model', async () => {
+    const updateCalls: Array<Record<string, any>> = [];
+    const initialThread = {
+      id: 't-effort-reconcile',
+      title: 'Effort Switch',
+      provider: 'antigravity',
+      mode: 'fullAccess',
+      model: 'gemini-4-neon',
+      effort: 'xhigh',
+      status: 'idle',
+      items: [],
+    };
+    const agyModels = [
+      {
+        id: 'gemini-4-neon',
+        name: 'Gemini 4 Neon',
+        supportsEffort: true,
+        effortLevels: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+      },
+      {
+        id: 'gemini-4-argon',
+        name: 'Gemini 4 Argon',
+        supportsEffort: true,
+        effortLevels: ['low', 'medium', 'high'],
+        defaultEffort: 'medium',
+      },
+      {
+        id: 'gemini-pro-orchestrator-neon',
+        name: 'Orchestrator (Neon)',
+        supportsEffort: false,
+      },
+    ];
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd, args) => {
+      const params = (args ?? {}) as Record<string, any>;
+      if (cmd === 'list_chat_summaries') return { summaries: [initialThread] };
+      if (cmd === 'load_thread_grid') {
+        return { grid: { threadIds: [initialThread.id], focusedThreadId: initialThread.id } };
+      }
+      if (cmd === 'load_chat_thread') return initialThread;
+      if (cmd === 'list_live_chat_runs') return [];
+      if (cmd === 'list_chat_provider_models') {
+        return { provider: 'antigravity', catalogState: 'ready', models: agyModels };
+      }
+      if (cmd === 'update_chat_configuration') {
+        updateCalls.push(params);
+        return {
+          ...initialThread,
+          model: params.model,
+          effort: params.effort ?? null,
+          providerOptions: params.providerOptions ?? [],
+        };
+      }
+      return null;
+    });
+
+    const { result } = renderHook(() =>
+      useChatSession({
+        workspaceId: 'ws-1',
+        agentId: null,
+        threadId: initialThread.id,
+        agents: [],
+      })
+    );
+
+    await waitFor(() => {
+      expect(result.current.threadsMap[initialThread.id]?.model).toBe('gemini-4-neon');
+      expect(result.current.dynamicModelsMap.antigravity?.length).toBe(3);
+    });
+
+    // Switch to gemini-pro-orchestrator-neon (supportsEffort: false) -> effort must become null!
+    await act(async () => {
+      await result.current.handleUpdateConfig(initialThread.id, {
+        model: 'gemini-pro-orchestrator-neon',
+      });
+    });
+
+    expect(updateCalls[0]?.model).toBe('gemini-pro-orchestrator-neon');
+    expect(updateCalls[0]?.effort).toBeNull();
+    expect(result.current.threadsMap[initialThread.id]?.effort).toBeNull();
+
+    // Switch back to gemini-4-neon with xhigh, then switch to gemini-4-argon (low|medium|high) -> clamps to high!
+    await act(async () => {
+      await result.current.handleUpdateConfig(initialThread.id, {
+        model: 'gemini-4-neon',
+        effort: 'xhigh',
+      });
+    });
+    await act(async () => {
+      await result.current.handleUpdateConfig(initialThread.id, {
+        model: 'gemini-4-argon',
+      });
+    });
+
+    const argonCall = updateCalls[updateCalls.length - 1];
+    expect(argonCall?.model).toBe('gemini-4-argon');
+    expect(argonCall?.effort).toBe('high');
+    expect(result.current.threadsMap[initialThread.id]?.effort).toBe('high');
+  });
+
+  it('preserves backend-reconciled null effort when frontend model catalog is cold', async () => {
+    const initialThread = {
+      id: 't-cold-catalog-effort',
+      title: 'Cold Catalog Effort',
+      provider: 'antigravity',
+      mode: 'fullAccess',
+      model: 'gemini-4-neon',
+      effort: 'high',
+      status: 'idle',
+      items: [],
+    };
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd, args) => {
+      const params = (args ?? {}) as Record<string, any>;
+      if (cmd === 'list_chat_summaries') return { summaries: [initialThread] };
+      if (cmd === 'load_thread_grid') {
+        return { grid: { threadIds: [initialThread.id], focusedThreadId: initialThread.id } };
+      }
+      if (cmd === 'load_chat_thread') return initialThread;
+      if (cmd === 'list_live_chat_runs') return [];
+      if (cmd === 'list_chat_provider_models') {
+        // Cold / empty catalog on the frontend
+        return { provider: 'antigravity', catalogState: 'ready', models: [] };
+      }
+      if (cmd === 'update_chat_configuration') {
+        // Backend reconciles gemini-pro-orchestrator-neon to effort: null
+        return {
+          ...initialThread,
+          model: params.model,
+          effort: params.model === 'gemini-pro-orchestrator-neon' ? null : (params.effort ?? null),
+          providerOptions: [],
+        };
+      }
+      return null;
+    });
+
+    const { result } = renderHook(() =>
+      useChatSession({
+        workspaceId: 'ws-1',
+        agentId: null,
+        threadId: initialThread.id,
+        agents: [],
+      })
+    );
+
+    await waitFor(() => {
+      expect(result.current.threadsMap[initialThread.id]?.model).toBe('gemini-4-neon');
+    });
+
+    await act(async () => {
+      await result.current.handleUpdateConfig(initialThread.id, {
+        model: 'gemini-pro-orchestrator-neon',
+      });
+    });
+
+    expect(result.current.threadsMap[initialThread.id]?.model).toBe('gemini-pro-orchestrator-neon');
+    expect(result.current.threadsMap[initialThread.id]?.effort).toBeNull();
+  });
+});
+
+describe('areSubagentRunsEquivalent', () => {
+  const baseRun = {
+    subagentId: 'sub-1',
+    parentThreadId: 'thread-1',
+    parentToolCallId: 'call-1',
+    childThreadId: 'child-1',
+    role: 'Explorer',
+    status: 'running',
+    stepCount: 4,
+    latestActivity: 'Reading file',
+    startedAtUnixMs: 1,
+    updatedAtUnixMs: 10,
+    items: [] as never[],
+  };
+
+  it('treats empty and missing run lists as equivalent', () => {
+    expect(areSubagentRunsEquivalent(undefined, [])).toBe(true);
+    expect(areSubagentRunsEquivalent(null, undefined)).toBe(true);
+  });
+
+  it('ignores step transcripts because IPC snapshots omit them', () => {
+    const local = [{ ...baseRun, items: [{ id: 'a' }, { id: 'b' }] as never[] }];
+    expect(areSubagentRunsEquivalent(local, [{ ...baseRun }])).toBe(true);
+  });
+
+  it('detects lifecycle and progress changes', () => {
+    const current = [{ ...baseRun }];
+    expect(areSubagentRunsEquivalent(current, [{ ...baseRun, status: 'completed' }])).toBe(false);
+    expect(areSubagentRunsEquivalent(current, [{ ...baseRun, stepCount: 5 }])).toBe(false);
+    expect(areSubagentRunsEquivalent(current, [{ ...baseRun, updatedAtUnixMs: 11 }])).toBe(false);
+    expect(areSubagentRunsEquivalent(current, [{ ...baseRun, latestActivity: 'Done' }])).toBe(false);
+    expect(areSubagentRunsEquivalent(current, [{ ...baseRun, subagentId: 'sub-2' }])).toBe(false);
+    expect(areSubagentRunsEquivalent(current, [])).toBe(false);
   });
 });

@@ -37,7 +37,31 @@ vi.mock('./components/TitleBar', () => ({
 }));
 
 vi.mock('./components/Sidebar', () => ({
-  Sidebar: ({ mode }: { mode: string }) => <div data-testid="mock-sidebar" data-mode={mode} />,
+  Sidebar: ({
+    mode,
+    routinesOpen,
+    onOpenRoutines,
+    onShowModeHome,
+    onSelectAgent,
+    onSelectWorkspace,
+    onSelectThread,
+  }: {
+    mode: string;
+    routinesOpen?: boolean;
+    onOpenRoutines?: () => void;
+    onShowModeHome?: () => void;
+    onSelectAgent?: (id: string) => void;
+    onSelectWorkspace?: (id: string) => void;
+    onSelectThread?: (id: string) => void;
+  }) => (
+    <div data-testid="mock-sidebar" data-mode={mode} data-routines-open={String(Boolean(routinesOpen))}>
+      <button type="button" onClick={onOpenRoutines}>Sidebar Routines</button>
+      <button type="button" onClick={onShowModeHome}>Sidebar Home</button>
+      <button type="button" onClick={() => onSelectAgent?.('agent-1')}>Sidebar Agent</button>
+      <button type="button" onClick={() => onSelectWorkspace?.('ws-1')}>Sidebar Workspace</button>
+      <button type="button" onClick={() => onSelectThread?.('thread-1')}>Sidebar Thread</button>
+    </div>
+  ),
 }));
 
 vi.mock('./components/RightDock', () => ({
@@ -48,14 +72,17 @@ vi.mock('./components/app/AppMainStage', () => ({
   AppMainStage: ({
     workMode,
     hasOpenedChat,
+    routinesOpen,
   }: {
     workMode: string;
     hasOpenedChat: boolean;
+    routinesOpen?: boolean;
   }) => (
     <div
       data-testid="mock-main-stage"
       data-work-mode={workMode}
       data-has-opened-chat={String(hasOpenedChat)}
+      data-routines-open={String(Boolean(routinesOpen))}
     />
   ),
 }));
@@ -170,5 +197,46 @@ describe('App startup workMode persistence and single bootstrap', () => {
 
     await new Promise((r) => setTimeout(r, 20));
     expect(mockGetBootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes routinesOpen when switching work mode, toggling Sidebar Routines, clicking mode home, or selecting an item', async () => {
+    localStorage.setItem('kite.workMode', 'agent');
+    render(<App />);
+
+    await waitFor(() => expect(mockGetBootstrap).toHaveBeenCalledTimes(1));
+    const stage = screen.getByTestId('mock-main-stage');
+    expect(stage.getAttribute('data-routines-open')).toBe('false');
+
+    // Open Routines -> click Switch Code closes Routines
+    fireEvent.click(screen.getByText('Sidebar Routines'));
+    expect(stage.getAttribute('data-routines-open')).toBe('true');
+    fireEvent.click(screen.getByText('Switch Code'));
+    expect(stage.getAttribute('data-routines-open')).toBe('false');
+
+    // Open Routines -> click Switch Chat closes Routines
+    fireEvent.click(screen.getByText('Sidebar Routines'));
+    expect(stage.getAttribute('data-routines-open')).toBe('true');
+    fireEvent.click(screen.getByText('Switch Chat'));
+    expect(stage.getAttribute('data-routines-open')).toBe('false');
+
+    // Open Routines -> click Sidebar Home closes Routines
+    fireEvent.click(screen.getByText('Sidebar Routines'));
+    expect(stage.getAttribute('data-routines-open')).toBe('true');
+    fireEvent.click(screen.getByText('Sidebar Home'));
+    expect(stage.getAttribute('data-routines-open')).toBe('false');
+
+    // Open Routines -> clicking Sidebar Routines again toggles closed
+    fireEvent.click(screen.getByText('Sidebar Routines'));
+    expect(stage.getAttribute('data-routines-open')).toBe('true');
+    fireEvent.click(screen.getByText('Sidebar Routines'));
+    expect(stage.getAttribute('data-routines-open')).toBe('false');
+
+    // Open Routines -> clicking Agent / Workspace / Thread closes Routines
+    for (const label of ['Sidebar Agent', 'Sidebar Workspace', 'Sidebar Thread']) {
+      fireEvent.click(screen.getByText('Sidebar Routines'));
+      expect(stage.getAttribute('data-routines-open')).toBe('true');
+      fireEvent.click(screen.getByText(label));
+      expect(stage.getAttribute('data-routines-open')).toBe('false');
+    }
   });
 });

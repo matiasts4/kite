@@ -15,8 +15,13 @@ import {
 } from '../../lib/subagentNav';
 import { sendUiAck, type UiBusRequestPayload } from '../../lib/operator/executor/ui-bus';
 import { registerToastNavigator, toast } from '../../lib/toast';
-import { closeResidualProviderProcesses } from '../../lib/ipc';
+import { closeResidualProviderProcesses, invokeCommand } from '../../lib/ipc';
 import { accountVaultStore } from '../../lib/accounts/accountVaultStore';
+import { voiceSessionStore } from '../../lib/operator/voice/voiceSessionStore';
+import { voiceTurnArbitrator } from '../../lib/operator/voice/turnArbitrator';
+import { ttsNarrator } from '../../lib/operator/ttsNarrator';
+import { normalizeForVoiceSpeech } from '../../lib/operator/voice/speechProsody';
+import { loadOperatorConfig } from '../../lib/operator/operatorConfig';
 import type { WorkMode } from '../Sidebar';
 import type {
   AgentProfile,
@@ -31,7 +36,11 @@ export interface UseAppGlobalEventsOptions {
   setRoutinesOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setSelectedWorkspaceId: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedAgentId: React.Dispatch<React.SetStateAction<string | null>>;
+  setSelectedAgentThreadId?: React.Dispatch<React.SetStateAction<string | null>>;
   setSelectedThreadId: React.Dispatch<React.SetStateAction<string | null>>;
+  setAgentViewMode?: React.Dispatch<
+    React.SetStateAction<'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit'>
+  >;
   setRightDockVisible: React.Dispatch<React.SetStateAction<boolean>>;
   setIsCommandPaletteOpen?: React.Dispatch<React.SetStateAction<boolean>>;
   onAddWorkspace?: (targetThreadId?: string) => Promise<void> | void;
@@ -47,7 +56,9 @@ export function useAppGlobalEvents({
   setRoutinesOpen,
   setSelectedWorkspaceId,
   setSelectedAgentId,
+  setSelectedAgentThreadId,
   setSelectedThreadId,
+  setAgentViewMode,
   setRightDockVisible,
   setIsCommandPaletteOpen,
   onAddWorkspace,
@@ -63,25 +74,115 @@ export function useAppGlobalEvents({
   }, [setSettingsOpen]);
 
   useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    let tauriMinimized = false;
+    const applyWindowState = (focusedOverride?: boolean) => {
+      const hidden = document.visibilityState === 'hidden' || tauriMinimized;
+      const focused =
+        focusedOverride !== undefined
+          ? focusedOverride
+          : typeof document.hasFocus === 'function'
+            ? document.hasFocus()
+            : true;
+      const nextState = hidden ? 'minimized' : focused ? 'focused' : 'blurred';
+      if (document.documentElement.getAttribute('data-window-state') !== nextState) {
+        document.documentElement.setAttribute('data-window-state', nextState);
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tauriMinimized = false;
+      applyWindowState();
+    };
+    const onFocus = () => {
+      tauriMinimized = false;
+      applyWindowState(true);
+    };
+    const onBlur = () => applyWindowState(false);
+
+    applyWindowState();
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+
+    let unlistenTauri: (() => void) | undefined;
+    let cancelled = false;
+    const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+    if (host.__TAURI_INTERNALS__ || host.__TAURI__) {
+      void listen<{ minimized?: boolean; focused?: boolean }>('kite:window-state', (ev) => {
+        if (cancelled) return;
+        tauriMinimized = Boolean(ev.payload?.minimized);
+        applyWindowState(ev.payload?.focused);
+      })
+        .then((stop) => {
+          if (cancelled) stop();
+          else unlistenTauri = stop;
+        })
+        .catch(() => undefined);
+    }
+    return () => {
+      cancelled = true;
+      unlistenTauri?.();
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+
+  useEffect(() => {
     return registerToastNavigator({
       onNavigateAgent: (id) => {
         setSelectedAgentId(id);
+        setAgentViewMode?.('chats');
         setWorkMode('agent');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
       },
       onNavigateThread: (threadId, agentId) => {
         if (agentId) {
           setSelectedAgentId(agentId);
+          setAgentViewMode?.('chats');
+          if (setSelectedAgentThreadId) {
+            setSelectedAgentThreadId(threadId);
+          } else {
+            setSelectedThreadId(threadId);
+          }
           setWorkMode('agent');
         } else {
-          setWorkMode('code');
+          setWorkMode('chat');
+          setSelectedThreadId(threadId);
         }
-        setSelectedThreadId(threadId);
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+      },
+      onNavigateTerminal: (sessionId, workspaceId) => {
+        if (workspaceId) {
+          setSelectedWorkspaceId(workspaceId);
+        }
+        setWorkMode('code');
+        window.dispatchEvent(
+          new CustomEvent('kite:focus-terminal-session', {
+            detail: { sessionId, workspaceId },
+          })
+        );
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
       },
       onNavigateMode: (m) => {
         setWorkMode(m);
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
       },
     });
-  }, [setSelectedAgentId, setSelectedThreadId, setWorkMode]);
+  }, [
+    setSelectedAgentId,
+    setSelectedAgentThreadId,
+    setSelectedThreadId,
+    setSelectedWorkspaceId,
+    setAgentViewMode,
+    setWorkMode,
+    setSettingsOpen,
+    setRoutinesOpen,
+  ]);
 
   useEffect(() => {
     const handleNavigate = (e: Event) => {
@@ -113,13 +214,41 @@ export function useAppGlobalEvents({
     };
 
     const handleSelectThread = (e: Event) => {
-      const custom = e as CustomEvent<string | { threadId?: string; mode?: WorkMode }>;
-      const threadId =
-        typeof custom.detail === 'string' ? custom.detail : custom.detail?.threadId;
-      if (threadId) {
-        setSelectedThreadId(threadId);
-        const targetMode =
-          typeof custom.detail === 'object' && custom.detail?.mode ? custom.detail.mode : 'chat';
+      const custom = e as CustomEvent<
+        string | { threadId?: string; mode?: WorkMode; agentId?: string }
+      >;
+      const detail = custom.detail;
+      const threadId = typeof detail === 'string' ? detail : detail?.threadId;
+      const targetAgentId = typeof detail === 'object' ? detail?.agentId : undefined;
+      const targetMode =
+        typeof detail === 'object' && detail?.mode
+          ? detail.mode
+          : targetAgentId
+            ? 'agent'
+            : 'chat';
+      if (targetAgentId && targetMode === 'agent') {
+        setSelectedAgentId(targetAgentId);
+        setAgentViewMode?.('chats');
+        if (threadId) {
+          if (setSelectedAgentThreadId) {
+            setSelectedAgentThreadId(threadId);
+          } else {
+            setSelectedThreadId(threadId);
+          }
+        }
+        setWorkMode('agent');
+        setSettingsOpen(false);
+        setRoutinesOpen(false);
+        return;
+      }
+      if (targetAgentId) {
+        setSelectedAgentId(targetAgentId);
+        setAgentViewMode?.('chats');
+      }
+      if (threadId || targetAgentId) {
+        if (threadId) {
+          setSelectedThreadId(threadId);
+        }
         setWorkMode(targetMode);
         setSettingsOpen(false);
         setRoutinesOpen(false);
@@ -148,6 +277,10 @@ export function useAppGlobalEvents({
       if (custom.detail?.workspaceId) {
         setSelectedWorkspaceId(custom.detail.workspaceId);
       }
+    };
+
+    const handleOpenVoiceTranscriptInDock = () => {
+      setRightDockVisible(true);
     };
 
     const handleOpenDiffsInDock = (e: Event) => {
@@ -219,6 +352,7 @@ export function useAppGlobalEvents({
     window.addEventListener('kite:open-right-dock-file', handleOpenFilePreview);
     window.addEventListener(OPEN_RIGHT_DOCK_BROWSER_EVENT, handleOpenBrowserInDock);
     window.addEventListener(OPEN_RIGHT_DOCK_SUBAGENT_EVENT, handleOpenSubagentInDock);
+    window.addEventListener('kite:open-voice-transcript', handleOpenVoiceTranscriptInDock);
     window.addEventListener('kite:open-right-dock-diffs', handleOpenDiffsInDock);
     window.addEventListener('kite:open-diffs', handleOpenDiffsInDock);
     window.addEventListener('keydown', handleDockShortcutKeyDown);
@@ -237,6 +371,7 @@ export function useAppGlobalEvents({
       window.removeEventListener('kite:open-right-dock-diffs', handleOpenDiffsInDock);
       window.removeEventListener('kite:open-diffs', handleOpenDiffsInDock);
       window.removeEventListener('keydown', handleDockShortcutKeyDown);
+      window.removeEventListener('kite:open-voice-transcript', handleOpenVoiceTranscriptInDock);
       window.removeEventListener('kite:spawn-agent-terminal', handleSpawnAgentTerminal);
       window.removeEventListener('kite:op-request', handleOpRequest);
       window.removeEventListener('kite:add-workspace', handleAddWorkspaceEvent);
@@ -246,7 +381,10 @@ export function useAppGlobalEvents({
     setWorkMode,
     setSettingsOpen,
     setSelectedWorkspaceId,
+    setSelectedAgentId,
+    setSelectedAgentThreadId,
     setSelectedThreadId,
+    setAgentViewMode,
     setRoutinesOpen,
     setRightDockVisible,
     onAddWorkspace,
@@ -676,4 +814,166 @@ export function useAppGlobalEvents({
       stopExhausted?.();
     };
   }, []);
+
+  useEffect(() => {
+    interface ThreadCreatedPayload {
+      threadId?: string;
+      open?: boolean;
+    }
+
+    interface AgentAnnouncePayload {
+      source?: string;
+      agentId?: string;
+      agentName?: string;
+      status?: string;
+      message?: string;
+      summary?: string;
+      threadId?: string | null;
+      threadTitle?: string | null;
+      workspaceId?: string | null;
+      failed?: boolean;
+      alreadyPersisted?: boolean;
+    }
+
+    const handleAgentAnnounce = (payload: AgentAnnouncePayload | null | undefined) => {
+      if (!payload || typeof payload !== 'object') return;
+      const {
+        source,
+        agentId,
+        agentName,
+        status,
+        message,
+        summary,
+        threadId,
+        threadTitle,
+        workspaceId,
+        failed,
+        alreadyPersisted,
+      } = payload;
+      const actor =
+        (agentName || '').trim() ||
+        (source === 'routine'
+          ? 'Routine'
+          : source === 'autopilot'
+            ? 'AutoPilot'
+            : 'Agent');
+      const isError =
+        Boolean(failed) ||
+        status === 'failed' ||
+        status === 'error' ||
+        status === 'stuck';
+      const rawDetail = (summary || message || '').trim();
+      const title =
+        (message || '').trim() ||
+        (isError ? `${actor} needs attention` : `${actor} finished`);
+
+      if (alreadyPersisted) {
+        window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+      } else if (typeof invokeCommand === 'function') {
+        void Promise.resolve(
+          invokeCommand('notifications_report_attention', {
+            payload: {
+              kind: isError ? 'error' : 'settled',
+              source: agentId ? 'agentChat' : 'terminal',
+              module: agentId ? 'agent' : 'code',
+              profileId: agentId || undefined,
+              actorName: actor,
+              threadId: threadId || undefined,
+              ...(threadTitle ? { threadTitle } : {}),
+              ...(workspaceId ? { workspaceId } : {}),
+              title,
+              body: rawDetail || title,
+              sessionId: threadId || agentId || 'agent',
+            },
+          })
+        )
+          .then(() => {
+            window.dispatchEvent(new CustomEvent('kite:notifications-refresh'));
+          })
+          .catch((err) => {
+            console.warn('[useAppGlobalEvents] notifications_report_attention failed:', err);
+          });
+      }
+
+      const vs = voiceSessionStore.getSnapshot();
+      const isVoiceActive = vs.phase === 'active' || vs.phase === 'starting';
+      if (isVoiceActive && !vs.speakerMuted) {
+        const spoken = normalizeForVoiceSpeech(rawDetail || title, { maxSentences: 2 });
+        if (spoken) {
+          const opCfg = loadOperatorConfig();
+          voiceTurnArbitrator.requestProactiveSpeech(
+            spoken,
+            (text) => {
+              void ttsNarrator
+                .speak(text, {
+                  voiceName: opCfg.persona?.voice || 'Ara',
+                  rate: opCfg.ttsRate || 1.0,
+                  lang: opCfg.persona?.language === 'en' ? 'en-US' : 'es-ES',
+                })
+                .catch((err) => {
+                  console.warn('[useAppGlobalEvents] Failed to speak agent announcement:', err);
+                });
+            },
+            Date.now(),
+            { role: actor, summary: spoken, foldable: true }
+          );
+        }
+      }
+    };
+
+    const onWindowAnnounce = (event: Event) => {
+      const custom = event as CustomEvent<AgentAnnouncePayload>;
+      handleAgentAnnounce(custom.detail);
+    };
+
+    window.addEventListener('kite:agent-announce', onWindowAnnounce);
+
+    let cancelled = false;
+    const unlisteners: Array<() => void> = [];
+    const register = (stop: () => void) => {
+      if (cancelled) stop();
+      else unlisteners.push(stop);
+    };
+
+    void Promise.resolve()
+      .then(async () => {
+        const stopThreadCreated = await listen<ThreadCreatedPayload>(
+          'chat:thread-created',
+          (event) => {
+            const payload = event?.payload;
+            void loadThreadsRef.current();
+            window.dispatchEvent(new CustomEvent('kite:threads-changed'));
+            if (payload?.open && payload?.threadId) {
+              setWorkMode('chat');
+              setSelectedThreadId(payload.threadId);
+              setSettingsOpen(false);
+              setRoutinesOpen(false);
+            }
+          }
+        );
+        register(stopThreadCreated);
+
+        const stopAnnounce = await listen<AgentAnnouncePayload>(
+          'kite:agent-announce',
+          (event) => {
+            handleAgentAnnounce(event?.payload);
+          }
+        );
+        register(stopAnnounce);
+      })
+      .catch((err) => {
+        const host = window as Window & { __TAURI_INTERNALS__?: unknown; __TAURI__?: unknown };
+        if (host.__TAURI_INTERNALS__ || host.__TAURI__) {
+          console.warn('[useAppGlobalEvents] Failed to subscribe to thread/announce events:', err);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kite:agent-announce', onWindowAnnounce);
+      for (const stop of unlisteners) {
+        stop();
+      }
+    };
+  }, [setWorkMode, setSelectedAgentThreadId, setSelectedThreadId, setSelectedAgentId, setAgentViewMode, setSettingsOpen, setRoutinesOpen]);
 }

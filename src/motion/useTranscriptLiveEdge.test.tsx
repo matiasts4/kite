@@ -301,4 +301,22 @@ describe('useTranscriptLiveEdge', () => {
 
     getSelectionSpy.mockRestore();
   });
+
+  it('skips ResizeObserver work when mounted inside a hidden mode-layer', () => {
+    const HiddenHarness = () => {
+      const transcriptRef = useRef<HTMLDivElement>(null);
+      const atLiveEdgeRef = useRef(true);
+      const { handleScroll } = useTranscriptLiveEdge(transcriptRef, 'thread-hidden', atLiveEdgeRef);
+      return (
+        <div className="mode-layer" aria-hidden={true}>
+          <div className="chat-transcript" ref={transcriptRef} onScroll={handleScroll}>
+            <div className="chat-transcript__column" />
+          </div>
+        </div>
+      );
+    };
+
+    render(<HiddenHarness />);
+    expect(observers).toHaveLength(0);
+  });
 });

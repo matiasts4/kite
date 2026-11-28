@@ -96,6 +96,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 setWorkMode('code');
                 setSettingsOpen(false);
               }
+              setRoutinesOpen(false);
               window.dispatchEvent(
                 new CustomEvent('kite:shortcut-pane-action', {
                   detail: { action: 'launch-agent', engineId, engineName: displayName },
@@ -106,6 +107,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
               setSelectedAgentId(agentId);
               setWorkMode('agent');
               setSettingsOpen(false);
+              setRoutinesOpen(false);
             }}
             onSelectMode={(mode) => {
               setWorkMode(mode);
@@ -125,12 +127,14 @@ export const AppModals: React.FC<AppModalsProps> = ({
             }}
             onNewTerminal={() => {
               if (workMode !== 'code') setWorkMode('code');
+              setRoutinesOpen(false);
               window.dispatchEvent(
                 new CustomEvent('kite:shortcut-pane-action', { detail: { action: 'new-terminal' } })
               );
             }}
             onSplitPane={(axis) => {
               if (workMode !== 'code') setWorkMode('code');
+              setRoutinesOpen(false);
               window.dispatchEvent(
                 new CustomEvent('kite:shortcut-pane-action', {
                   detail: { action: 'split-pane', axis },

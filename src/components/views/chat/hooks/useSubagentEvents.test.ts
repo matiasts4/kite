@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ExtendedChatThread } from '../types';
 import {
   applySubagentEvent,
+  countRunningSubagents,
   shouldDispatchThreadsChanged,
   useSubagentEvents,
   type ChatSubagentEventPayload,
@@ -285,6 +286,108 @@ describe('shouldDispatchThreadsChanged and useSubagentEvents sync', () => {
     }
   });
 
+  it('only fires for run creation and lifecycle transitions when signatures are tracked', () => {
+    const seen = new Map<string, string>();
+    const created: ChatSubagentEventPayload = {
+      kind: 'subagentRunUpdated',
+      threadId: 'thread-1',
+      run: {
+        subagentId: 'sub-1',
+        parentThreadId: 'thread-1',
+        parentToolCallId: 'call-1',
+        childThreadId: 'child-1',
+        role: 'Explorer',
+        status: 'running',
+        stepCount: 0,
+        items: [],
+        startedAtUnixMs: 1,
+        updatedAtUnixMs: 1,
+      },
+    };
+    const progress: ChatSubagentEventPayload = {
+      kind: 'subagentStepsUpdated',
+      threadId: 'thread-1',
+      subagentId: 'sub-1',
+      childThreadId: 'child-1',
+      status: 'running',
+      stepCount: 7,
+    };
+    expect(shouldDispatchThreadsChanged(created, seen)).toBe(true);
+    for (let i = 0; i < 25; i += 1) {
+      expect(shouldDispatchThreadsChanged({ ...progress, stepCount: 7 + i }, seen)).toBe(false);
+      expect(shouldDispatchThreadsChanged(created, seen)).toBe(false);
+    }
+    expect(shouldDispatchThreadsChanged({ ...progress, status: 'completed' }, seen)).toBe(true);
+    expect(shouldDispatchThreadsChanged({ ...progress, status: 'completed' }, seen)).toBe(false);
+
+    const removal: ChatSubagentEventPayload = {
+      kind: 'subagentRunRemoved',
+      threadId: 'thread-1',
+      subagentId: 'sub-1',
+    };
+    expect(shouldDispatchThreadsChanged(removal, seen)).toBe(true);
+    expect(shouldDispatchThreadsChanged(created, seen)).toBe(true);
+  });
+
+  it('dispatches kite:threads-changed once for a burst of subagent progress events', async () => {
+    vi.useFakeTimers();
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const onThreadsChanged = vi.fn();
+    window.addEventListener('kite:threads-changed', onThreadsChanged);
+    let threadsMap: Record<string, ExtendedChatThread> = { 'thread-1': makeThread() };
+    const setThreadsMap = vi.fn((updater: React.SetStateAction<Record<string, ExtendedChatThread>>) => {
+      threadsMap = typeof updater === 'function' ? updater(threadsMap) : updater;
+    });
+    const isMountedRef = { current: true };
+
+    try {
+      const { unmount } = renderHook(() => useSubagentEvents({ setThreadsMap, isMountedRef }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const subHandler = listenHandlers.get('chat-subagent-event');
+      expect(subHandler).toBeDefined();
+
+      act(() => {
+        for (let i = 0; i < 50; i += 1) {
+          subHandler?.({
+            payload: {
+              kind: 'subagentStepsUpdated',
+              threadId: 'thread-1',
+              subagentId: 'sub-burst',
+              childThreadId: 'child-burst',
+              status: 'running',
+              stepCount: i,
+            },
+          });
+        }
+      });
+      act(() => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(onThreadsChanged).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        subHandler?.({
+          payload: {
+            kind: 'subagentStepsUpdated',
+            threadId: 'thread-1',
+            subagentId: 'sub-burst',
+            childThreadId: 'child-burst',
+            status: 'completed',
+            stepCount: 51,
+          },
+        });
+        vi.advanceTimersByTime(500);
+      });
+      expect(onThreadsChanged).toHaveBeenCalledTimes(2);
+      unmount();
+    } finally {
+      window.removeEventListener('kite:threads-changed', onThreadsChanged);
+    }
+  });
+
   it('removes a retracted unspawned subagent placeholder run on subagentRunRemoved', () => {
     const base = makeThread();
     const withRuns: ExtendedChatThread = {
@@ -325,5 +428,103 @@ describe('shouldDispatchThreadsChanged and useSubagentEvents sync', () => {
     expect(shouldDispatchThreadsChanged(removalPayload)).toBe(true);
     const updated = applySubagentEvent(withRuns, removalPayload);
     expect(updated.subagentRuns?.map((r) => r.subagentId)).toEqual(['child-1']);
+  });
+
+  it('never overwrites or merges sibling steps when two parallel runs share a collided parentToolCallId', () => {
+    const base = makeThread();
+    const withCollidedParallelRuns: ExtendedChatThread = {
+      ...base,
+      subagentRuns: [
+        {
+          subagentId: 'child-audit',
+          parentThreadId: 'thread-1',
+          parentToolCallId: 't_call_242',
+          childThreadId: 'child-audit',
+          role: 'Kite-Ctx & Zed Conversational Audit',
+          status: 'completed',
+          stepCount: 58,
+          items: [
+            {
+              id: 'step-audit-1',
+              kind: 'tool',
+              text: '',
+              title: 'Read zedVoice.ts',
+              detail: '',
+              status: 'completed',
+              streaming: false,
+              exitCode: null,
+              createdAtUnixMs: 100,
+              attachments: [],
+            },
+          ],
+          startedAtUnixMs: 1_000,
+          updatedAtUnixMs: 2_000,
+          completedAtUnixMs: 2_000,
+        },
+        {
+          subagentId: 'child-grok',
+          parentThreadId: 'thread-1',
+          parentToolCallId: 't_call_242',
+          childThreadId: 'child-grok',
+          role: 'Grok Bot Desktop RE',
+          status: 'running',
+          stepCount: 10,
+          items: [],
+          startedAtUnixMs: 1_015,
+          updatedAtUnixMs: 1_500,
+        },
+        {
+          subagentId: 'child-audit',
+          parentThreadId: 'thread-1',
+          parentToolCallId: 'dispatch-subagent-child-audit',
+          childThreadId: 'child-audit',
+          role: 'Kite-Ctx & Zed Conversational Audit',
+          status: 'running',
+          stepCount: 0,
+          items: [],
+          startedAtUnixMs: 1_050,
+          updatedAtUnixMs: 1_050,
+        },
+      ],
+    };
+
+    const updated = applySubagentEvent(withCollidedParallelRuns, {
+      kind: 'subagentRunUpdated',
+      threadId: 'thread-1',
+      subagentId: 'child-grok',
+      run: {
+        subagentId: 'child-grok',
+        parentThreadId: 'thread-1',
+        parentToolCallId: 't_call_242',
+        childThreadId: 'child-grok',
+        role: 'Grok Bot Desktop RE',
+        status: 'running',
+        stepCount: 11,
+        items: [
+          {
+            id: 'step-grok-11',
+            kind: 'tool',
+            text: '',
+            title: 'Inspect workspace bundle',
+            detail: '',
+            status: 'completed',
+            streaming: false,
+            exitCode: null,
+            createdAtUnixMs: 2_100,
+            attachments: [],
+          },
+        ],
+        startedAtUnixMs: 1_015,
+        updatedAtUnixMs: 2_100,
+      },
+    });
+
+    expect(updated.subagentRuns?.[0]?.subagentId).toBe('child-audit');
+    expect(updated.subagentRuns?.[0]?.status).toBe('completed');
+    expect(updated.subagentRuns?.[0]?.items?.map((it) => it.id)).toEqual(['step-audit-1']);
+    expect(updated.subagentRuns?.[1]?.subagentId).toBe('child-grok');
+    expect(updated.subagentRuns?.[1]?.stepCount).toBe(11);
+    expect(updated.subagentRuns?.[1]?.items?.map((it) => it.id)).toEqual(['step-grok-11']);
+    expect(countRunningSubagents(updated)).toBe(1);
   });
 });

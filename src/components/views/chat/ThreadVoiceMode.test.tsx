@@ -2,7 +2,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { ChatComposer } from './ChatComposer';
 import { ChatItemRow } from './ChatItemRow';
-import { liveVoiceStageItem, mergeTimeline, voiceTurnsToChatItems } from './voiceTranscript';
+import {
+  buildVoiceSessionBoundaryItem,
+  buildVoiceSessionSummaryItem,
+  computeKaraokeWordProgress,
+  flushPendingVoiceTranscriptTail,
+  formatWorkedForLabel,
+  liveVoiceStageItem,
+  mergeTimeline,
+  voiceTurnsToChatItems,
+} from './voiceTranscript';
+import { ConsultativeDraftCard } from './ConsultativeDraftCard';
 import { ZedStripHost } from '../../ZedStrip';
 import { voiceSessionStore } from '../../../lib/operator/voice/voiceSessionStore';
 import { declarationFromCatalog } from './driverDeclaration';
@@ -125,6 +135,36 @@ describe('Thread Voice Mode — Integration & Surface Tests', () => {
 
     fireEvent.click(sendBtn);
     expect(onSendVoiceTurn).toHaveBeenCalledWith('Abrime dos terminales con Grok');
+  });
+
+  it('mounts ComposerVoiceGlow when active and displays voice-error-tip with permission recovery (S1, S4)', async () => {
+    const { invokeCommand } = await import('../../../lib/ipc');
+    render(<ChatComposer {...baseComposerProps} />);
+
+    expect(screen.queryByTestId('voice-speaking-glow')).not.toBeInTheDocument();
+
+    act(() => {
+      voiceSessionStore.setVoiceError({
+        message: 'Permiso de micrófono requerido',
+        at: Date.now(),
+        openPrivacySettings: true,
+      });
+    });
+
+    const tip = screen.getByTestId('voice-error-tip');
+    expect(tip).toHaveTextContent('Permiso de micrófono requerido');
+    const permBtn = screen.getByRole('button', { name: 'Permiso de micrófono' });
+    fireEvent.click(permBtn);
+    expect(invokeCommand).toHaveBeenCalledWith('request_dictation_permission');
+
+    const closeBtn = screen.getByLabelText('Cerrar aviso de micrófono');
+    fireEvent.click(closeBtn);
+    expect(screen.queryByTestId('voice-error-tip')).not.toBeInTheDocument();
+
+    act(() => {
+      voiceSessionStore.startSession('thread-test-vm', 'thread');
+    });
+    expect(screen.getByTestId('voice-speaking-glow')).toHaveAttribute('data-active', 'true');
   });
 
   it('pauses continuous voice microphone during one-shot dictation and resumes after (S1)', async () => {
@@ -354,6 +394,407 @@ describe('Thread Voice Mode — Integration & Surface Tests', () => {
     expect(selected).toEqual([
       { threadId: 'sub-thread-101', mode: 'chat' },
       { threadId: 'agent-thread-202', mode: 'agents' },
+    ]);
+  });
+
+  it('orders live SubagentActivityCard between user/actions and assistant reply and deduplicates spawn_subagent receipt (S4, S10)', () => {
+    const voiceItems = voiceTurnsToChatItems([
+      {
+        turnId: 'vt-sub-order',
+        userPrompt: 'Lanza un subagente ODD Planner',
+        source: 'voz',
+        durationMs: 900,
+        receipts: [
+          {
+            actionIdx: 0,
+            type: 'open_terminals',
+            ok: true,
+            summaryEs: '1 terminal abierta',
+            durationMs: 120,
+          },
+          {
+            actionIdx: 1,
+            type: 'spawn_subagent',
+            ok: true,
+            summaryEs: 'Subagente «ODD Planner» iniciado.',
+            durationMs: 150,
+            data: { role: 'ODD Planner', provider: 'antigravity', oddMode: true, threadId: 'child-sub-1' },
+          },
+        ],
+        reply: 'Listo, lancé al subagente ODD Planner.',
+        createdAt: 1000,
+        completedAt: 1900,
+      },
+    ]);
+
+    const providerItems = [
+      {
+        id: 'dispatch-subagent-child-sub-1',
+        kind: 'tool' as const,
+        text: '',
+        title: 'ODD Planner',
+        detail: 'Audit voice mode',
+        status: 'running' as const,
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: 1450,
+        attachments: [],
+        toolName: 'dispatch_subagent',
+        toolKind: 'subagent',
+        subagentMeta: {
+          subagentId: 'child-sub-1',
+          childThreadId: 'child-sub-1',
+          action: 'spawn' as const,
+          role: 'ODD Planner',
+          status: 'running' as const,
+          stepCount: 0,
+        },
+      },
+    ];
+
+    const merged = mergeTimeline(providerItems, voiceItems);
+    expect(merged.map((i) => i.id)).toEqual([
+      'vt-sub-order:user',
+      'vt-sub-order:action:0',
+      'dispatch-subagent-child-sub-1',
+      'vt-sub-order:assistant',
+    ]);
+  });
+
+  it('anchors legacy subagent cards missing createdAtUnixMs between user and assistant instead of floating to top (S4)', () => {
+    const voiceItems = voiceTurnsToChatItems([
+      {
+        turnId: 'vt-legacy',
+        userPrompt: 'Revisa el roadmap con un subagente',
+        source: 'voz',
+        durationMs: 600,
+        receipts: [
+          {
+            actionIdx: 0,
+            type: 'spawn_subagent',
+            ok: true,
+            summaryEs: 'Subagente iniciado.',
+            data: { role: 'ODD Planner', threadId: 'legacy-child-1' },
+          },
+        ],
+        reply: 'Inicié el subagente.',
+        createdAt: 2000,
+      },
+    ]);
+
+    const legacyProviderItems = [
+      {
+        id: 'dispatch-subagent-legacy-child-1',
+        kind: 'tool' as const,
+        text: '',
+        title: 'ODD Planner',
+        detail: 'Legacy task',
+        status: 'completed' as const,
+        streaming: false,
+        exitCode: null,
+        createdAtUnixMs: undefined as unknown as number,
+        attachments: [],
+        toolName: 'dispatch_subagent',
+        toolKind: 'subagent',
+        subagentMeta: {
+          subagentId: 'legacy-child-1',
+          childThreadId: 'legacy-child-1',
+          action: 'spawn' as const,
+          role: 'ODD Planner',
+          status: 'completed' as const,
+          stepCount: 1,
+        },
+      },
+    ];
+
+    const merged = mergeTimeline(legacyProviderItems, voiceItems);
+    expect(merged.map((i) => i.id)).toEqual([
+      'vt-legacy:user',
+      'dispatch-subagent-legacy-child-1',
+      'vt-legacy:assistant',
+    ]);
+  });
+
+  it('keeps failed or terminal spawn_subagent receipts when no live SubagentActivityCard exists (S4, S10)', () => {
+    const voiceItems = voiceTurnsToChatItems([
+      {
+        turnId: 'vt-failed-sub',
+        userPrompt: 'Lanza subagente',
+        source: 'voz',
+        receipts: [
+          {
+            actionIdx: 0,
+            type: 'spawn_subagent',
+            ok: false,
+            summaryEs: 'No pude iniciar el subagente.',
+            data: { threadId: 'missing-child' },
+          },
+        ],
+        reply: 'Falló el lanzamiento.',
+        createdAt: 5000,
+        completedAt: 5200,
+      },
+    ]);
+
+    const merged = mergeTimeline(
+      [
+        {
+          id: 'other-provider-item',
+          kind: 'assistant',
+          text: 'previo',
+          title: null,
+          detail: null,
+          status: 'completed',
+          streaming: false,
+          exitCode: null,
+          createdAtUnixMs: 1000,
+          attachments: [],
+        },
+      ],
+      voiceItems
+    );
+
+    expect(merged.map((i) => i.id)).toEqual([
+      'other-provider-item',
+      'vt-failed-sub:user',
+      'vt-failed-sub:action:0',
+      'vt-failed-sub:assistant',
+    ]);
+  });
+
+  it('renders ConsultativeDraftCard when awaiting confirmation and wires Confirmar / Cancelar actions (S3.2)', () => {
+    const onConfirm = vi.fn();
+    act(() => {
+      voiceSessionStore.startSession('thread-draft-1', 'thread');
+      voiceSessionStore.setDraftProposal('thread-draft-1', {
+        proposalId: 'prop-thread-1',
+        status: 'awaiting_confirmation',
+        targetKind: 'subagent',
+        title: 'Implementar notificaciones',
+        taskBrief: 'Crear el servicio de notificaciones push con tests.',
+        role: 'Backend Builder',
+        provider: 'claude',
+        oddMode: true,
+        questionForUser: '¿Lo lanzamos con Claude en modo ODD?',
+        revision: 1,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+
+    try {
+      render(<ConsultativeDraftCard threadId="thread-draft-1" onConfirm={onConfirm} />);
+
+      const card = screen.getByTestId('consultative-draft-card');
+      expect(card).toBeInTheDocument();
+      expect(card).toHaveTextContent('Subagente');
+      expect(card).toHaveTextContent('Backend Builder');
+      expect(card).toHaveTextContent('Implementar notificaciones');
+      expect(card).toHaveTextContent('¿Lo lanzamos con Claude en modo ODD?');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Confirmar' }));
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }));
+      expect(voiceSessionStore.getSnapshot().draftProposal).toBeNull();
+      expect(screen.queryByTestId('consultative-draft-card')).not.toBeInTheDocument();
+    } finally {
+      voiceSessionStore.clearDraftProposal('thread-draft-1');
+      voiceSessionStore.stopSession();
+    }
+  });
+
+  it('formats worked-for duration labels cleanly only for >= 1000 ms and projects them onto receipts and turns (S4.2)', () => {
+    expect(formatWorkedForLabel(undefined)).toBeNull();
+    expect(formatWorkedForLabel(0)).toBeNull();
+    expect(formatWorkedForLabel(999)).toBeNull();
+    expect(formatWorkedForLabel(1500)).toBe('Trabajó 1.5 s');
+    expect(formatWorkedForLabel(4000)).toBe('Trabajó 4 s');
+
+    const items = voiceTurnsToChatItems([
+      {
+        turnId: 'vt-worked-1',
+        userPrompt: 'Ejecuta los tests',
+        source: 'voz',
+        durationMs: 4000,
+        receipts: [
+          {
+            actionIdx: 0,
+            type: 'open_terminals',
+            ok: true,
+            summaryEs: '1 terminal abierta',
+            durationMs: 1500,
+          },
+        ],
+        reply: 'Listo, terminó en cuatro segundos.',
+        createdAt: 1000,
+        completedAt: 5000,
+      },
+    ]);
+
+    const receiptItem = items.find((item) => item.id === 'vt-worked-1:action:0');
+    const assistantItem = items.find((item) => item.id === 'vt-worked-1:assistant');
+    expect(receiptItem?.detail).toBe('open_terminals · Trabajó 1.5 s');
+    expect(receiptItem?.durationSeconds).toBe(1.5);
+    expect(assistantItem?.detail).toBe('Trabajó 4 s');
+    expect(assistantItem?.durationSeconds).toBe(4);
+  });
+
+  it('builds a post-call summary receipt card and appends it when includeSessionSummary is enabled (S4.2)', () => {
+    expect(buildVoiceSessionSummaryItem([])).toBeNull();
+    expect(
+      buildVoiceSessionSummaryItem([
+        {
+          turnId: 'vt-aborted',
+          userPrompt: 'hola',
+          source: 'voz',
+          interrupted: true,
+          createdAt: 1000,
+        },
+      ]),
+    ).toBeNull();
+
+    const turns = [
+      {
+        turnId: 'vt-sum-1',
+        userPrompt: 'Lanza al planificador',
+        source: 'voz' as const,
+        durationMs: 1500,
+        overallSuccess: true,
+        receipts: [
+          {
+            actionIdx: 0,
+            type: 'spawn_subagent',
+            ok: true,
+            summaryEs: 'Subagente ODD Planner iniciado',
+            durationMs: 800,
+            data: { role: 'ODD Planner' },
+          },
+        ],
+        reply: 'Subagente iniciado.',
+        createdAt: 1000,
+        completedAt: 2500,
+      },
+      {
+        turnId: 'vt-sum-2',
+        userPrompt: 'Abre una terminal',
+        source: 'voz' as const,
+        durationMs: 2500,
+        overallSuccess: true,
+        receipts: [
+          {
+            actionIdx: 0,
+            type: 'open_terminals',
+            ok: true,
+            summaryEs: '1 terminal abierta',
+            durationMs: 300,
+          },
+        ],
+        reply: 'Terminal abierta.',
+        createdAt: 3000,
+        completedAt: 5500,
+      },
+    ];
+
+    const summary = buildVoiceSessionSummaryItem(turns, 6000);
+    expect(summary).toMatchObject({
+      id: 'voice-session-summary',
+      kind: 'tool',
+      toolName: 'voice_session_summary',
+      toolKind: 'dynamicToolCall',
+      title: 'Resumen de sesión de voz · 2 turnos · 2 acciones',
+      createdAtUnixMs: 6000,
+    });
+    expect(summary?.detail).toContain('Subagente ODD Planner iniciado');
+    expect(summary?.detail).toContain('1 terminal abierta');
+    expect(summary?.detail).toContain('Trabajó 4 s');
+
+    const projectedWithSummary = voiceTurnsToChatItems(turns, {
+      includeSessionSummary: true,
+      sessionEndedAt: 6000,
+    });
+    expect(projectedWithSummary[projectedWithSummary.length - 1]?.id).toBe('voice-session-summary');
+  });
+
+  it('creates session boundary divider markers for start and end phases (S4.2)', () => {
+    const startItem = buildVoiceSessionBoundaryItem('sess-1', 'started', 1000);
+    const endItem = buildVoiceSessionBoundaryItem('sess-1', 'ended', 5000, 4000);
+    const endNoDuration = buildVoiceSessionBoundaryItem('sess-2', 'ended', 7000);
+
+    expect(startItem).toMatchObject({
+      id: 'voice-session:sess-1:started',
+      kind: 'note',
+      title: 'Sesión de voz iniciada',
+      text: 'Sesión de voz iniciada',
+      createdAtUnixMs: 1000,
+    });
+    expect(endItem).toMatchObject({
+      id: 'voice-session:sess-1:ended',
+      kind: 'note',
+      title: 'Sesión de voz finalizada · 4 s',
+      text: 'Sesión de voz finalizada · 4 s',
+      createdAtUnixMs: 5000,
+    });
+    expect(endNoDuration.title).toBe('Sesión de voz finalizada');
+  });
+
+  it('flushes pending transcript tail only when non-empty and not duplicating the last turn (S4.2)', () => {
+    const existing = [
+      {
+        turnId: 'vt-last',
+        userPrompt: 'Abrime una terminal',
+        source: 'voz' as const,
+        createdAt: 1000,
+      },
+    ];
+
+    expect(flushPendingVoiceTranscriptTail('   ', 'thread-1', existing, 2000)).toBeNull();
+    expect(flushPendingVoiceTranscriptTail('  abrime   una terminal ', 'thread-1', existing, 2000)).toBeNull();
+
+    const flushed = flushPendingVoiceTranscriptTail('  y revisa los tests  ', 'thread-1', existing, 2500);
+    expect(flushed).toMatchObject({
+      turnId: 'tail-thread-1-2500',
+      userPrompt: 'y revisa los tests',
+      source: 'voz',
+      strategy: 'tail_flush',
+      interrupted: true,
+      createdAt: 2500,
+    });
+  });
+
+  it('computes karaoke word-by-word progress and spokenCharCount synced with playback speed (S4.2, S5)', () => {
+    expect(computeKaraokeWordProgress('   ', 500, 1000)).toEqual({
+      words: [],
+      spokenCharCount: 0,
+      progress: 0,
+    });
+
+    const text = 'Hola mundo cruel';
+    const start = computeKaraokeWordProgress(text, 0, 3000);
+    expect(start.progress).toBe(0);
+    expect(start.spokenCharCount).toBe(0);
+    expect(start.words.map((w) => w.state)).toEqual(['unspoken', 'unspoken', 'unspoken']);
+
+    const mid = computeKaraokeWordProgress(text, 1500, 3000);
+    expect(mid.progress).toBe(0.5);
+    expect(mid.spokenCharCount).toBe(8);
+    expect(mid.words).toEqual([
+      { word: 'Hola', state: 'spoken' },
+      { word: 'mundo', state: 'active' },
+      { word: 'cruel', state: 'unspoken' },
+    ]);
+
+    const fast = computeKaraokeWordProgress(text, 1500, 3000, 2);
+    expect(fast.progress).toBe(1);
+    expect(fast.spokenCharCount).toBe(text.length);
+    expect(fast.words.map((w) => w.state)).toEqual(['spoken', 'spoken', 'spoken']);
+
+    const slow = computeKaraokeWordProgress(text, 1500, 3000, 0.5);
+    expect(slow.progress).toBe(0.25);
+    expect(slow.words).toEqual([
+      { word: 'Hola', state: 'active' },
+      { word: 'mundo', state: 'unspoken' },
+      { word: 'cruel', state: 'unspoken' },
     ]);
   });
 });

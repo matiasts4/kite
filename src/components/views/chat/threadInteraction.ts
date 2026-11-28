@@ -322,6 +322,53 @@ export function visibleRosterThreads<
   return sidebarThreads(threads);
 }
 
+export interface ThreadChronologyCandidate {
+  id: string;
+  lastTurnAtUnixMs?: number | null;
+  updatedAtUnixMs?: number;
+  createdAtUnixMs?: number;
+}
+
+/**
+ * Resolves a thread's chronological sort timestamp so active/working threads
+ * remain anchored instead of swapping places on intermediate `touch()` ticks.
+ */
+export function resolveThreadSortTimestamp(
+  thread: ThreadChronologyCandidate,
+  getWorkingAnchor?: (id: string) => number | undefined,
+): number {
+  if (typeof thread.lastTurnAtUnixMs === 'number' && Number.isFinite(thread.lastTurnAtUnixMs)) {
+    return thread.lastTurnAtUnixMs;
+  }
+  const anchored = getWorkingAnchor?.(thread.id);
+  if (typeof anchored === 'number' && Number.isFinite(anchored)) {
+    return anchored;
+  }
+  if (typeof thread.updatedAtUnixMs === 'number' && Number.isFinite(thread.updatedAtUnixMs)) {
+    return thread.updatedAtUnixMs;
+  }
+  if (typeof thread.createdAtUnixMs === 'number' && Number.isFinite(thread.createdAtUnixMs)) {
+    return thread.createdAtUnixMs;
+  }
+  return 0;
+}
+
+/** Sorts threads newest-first with deterministic created-time and ID tie-breakers. */
+export function sortThreadsChronologically<T extends ThreadChronologyCandidate>(
+  threads: readonly T[],
+  getWorkingAnchor?: (id: string) => number | undefined,
+): T[] {
+  return [...threads].sort((a, b) => {
+    const timeDiff =
+      resolveThreadSortTimestamp(b, getWorkingAnchor) -
+      resolveThreadSortTimestamp(a, getWorkingAnchor);
+    if (timeDiff !== 0) return timeDiff;
+    const createdDiff = (b.createdAtUnixMs ?? 0) - (a.createdAtUnixMs ?? 0);
+    if (createdDiff !== 0) return createdDiff;
+    return a.id.localeCompare(b.id);
+  });
+}
+
 /** Literal turn text for providers that can compact. Others must not be sent. */
 export function compactSendText(provider: string): '/compact' | null {
   if (provider === 'codex' || provider === 'claude') return '/compact';

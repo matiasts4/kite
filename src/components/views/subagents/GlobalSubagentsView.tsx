@@ -10,11 +10,14 @@ export interface GlobalSubagentsViewProps {
   entries: GlobalSubagentEntry[];
   totalCount: number;
   activeCount: number;
+  historyCount?: number;
+  includeHistory?: boolean;
   loading: boolean;
   stoppingRunKey?: string | null;
   onInspectEntry: (entry: GlobalSubagentEntry) => void;
   onStopEntry: (entry: GlobalSubagentEntry) => void;
   onFocusThread: (threadId: string) => void;
+  onToggleHistory?: () => void;
 }
 
 interface ThreadSubagentGroup {
@@ -33,11 +36,14 @@ export const GlobalSubagentsView: React.FC<GlobalSubagentsViewProps> = ({
   entries,
   totalCount,
   activeCount,
+  historyCount = 0,
+  includeHistory = false,
   loading,
   stoppingRunKey = null,
   onInspectEntry,
   onStopEntry,
   onFocusThread,
+  onToggleHistory,
 }) => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'live'>('all');
   const [workspaceFilter, setWorkspaceFilter] = useState<'all' | 'current'>('all');
@@ -169,6 +175,37 @@ export const GlobalSubagentsView: React.FC<GlobalSubagentsViewProps> = ({
             </button>
           </div>
         )}
+
+        {onToggleHistory && (historyCount > 0 || includeHistory) && (
+          <div
+            className="subagent-inspector__segmented"
+            role="tablist"
+            aria-label="Session history scope"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!includeHistory}
+              className={`subagent-inspector__segment-btn${!includeHistory ? ' subagent-inspector__segment-btn--active' : ''}`}
+              onClick={() => {
+                if (includeHistory) onToggleHistory();
+              }}
+            >
+              This session
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={includeHistory}
+              className={`subagent-inspector__segment-btn${includeHistory ? ' subagent-inspector__segment-btn--active' : ''}`}
+              onClick={() => {
+                if (!includeHistory) onToggleHistory();
+              }}
+            >
+              {historyCount > 0 && !includeHistory ? `Previous (+${historyCount})` : 'All history'}
+            </button>
+          </div>
+        )}
       </div>
 
       {!loading && groups.length === 0 ? (
@@ -176,12 +213,16 @@ export const GlobalSubagentsView: React.FC<GlobalSubagentsViewProps> = ({
           <strong>
             {statusFilter === 'live'
               ? 'No active subagents running'
-              : 'No subagents across threads yet'}
+              : includeHistory
+                ? 'No subagents across threads yet'
+                : 'No subagents in this session yet'}
           </strong>
           <span>
             {statusFilter === 'live'
               ? 'All recorded subagents across your threads have settled.'
-              : 'Subagents launched in any thread will appear together here.'}
+              : includeHistory
+                ? 'Subagents launched in any thread will appear together here.'
+                : 'Subagents launched or resumed in this session appear here.'}
           </span>
           {statusFilter === 'live' && workspaceScopedEntries.length > 0 && (
             <button
@@ -190,6 +231,15 @@ export const GlobalSubagentsView: React.FC<GlobalSubagentsViewProps> = ({
               onClick={() => setStatusFilter('all')}
             >
               Show all ({workspaceScopedEntries.length})
+            </button>
+          )}
+          {statusFilter === 'all' && !includeHistory && historyCount > 0 && onToggleHistory && (
+            <button
+              type="button"
+              className="subagent-inspector__empty-cta"
+              onClick={onToggleHistory}
+            >
+              Show previous sessions ({historyCount})
             </button>
           )}
         </div>

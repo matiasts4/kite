@@ -76,7 +76,7 @@ export interface ChatViewProps {
   driverDeclarations?: Record<string, DriverDeclaration> | null;
 }
 
-export const ChatView: React.FC<ChatViewProps> = (props) => {
+const ChatViewInner: React.FC<ChatViewProps> = (props) => {
   const {
     workspaceId,
     agentId,
@@ -118,6 +118,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
         engineLabel={engineLabel || 'Agent'}
         workspaceId={workspaceId}
         workspaces={props.workspaces}
+        agents={props.agents}
         workspaceName={props.workspaceName}
         defaultProvider={session.defaultProvider}
         draftProvider={session.draftConfig.provider}
@@ -265,6 +266,7 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
       workspaceId={workspaceId}
       workspaceName={effectiveWorkspaceName}
       workspaces={props.workspaces}
+      agents={props.agents}
       agentName={undefined}
       engineLabel={undefined}
       liveRunsCount={session.liveRuns.length}
@@ -334,3 +336,5 @@ export const ChatView: React.FC<ChatViewProps> = (props) => {
     </div>
   );
 };
+
+export const ChatView = React.memo(ChatViewInner);

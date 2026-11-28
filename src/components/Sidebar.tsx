@@ -39,9 +39,29 @@ export type ThreadSidebarCallbacks = {
   onRestoreThread?: (threadId: string) => void;
   onArchiveThread?: (threadId: string) => void;
   archivedCount?: number;
+  onOpenRoutines?: () => void;
 };
 
-export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
+const RoutinesClockIcon: React.FC<{ size?: number }> = ({ size = 12 }) => (
+  <svg
+    aria-hidden="true"
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <circle cx="12" cy="12" r="10" />
+    <polyline points="12 6 12 12 16 14" />
+  </svg>
+);
+
+const SidebarInner: React.FC<
+  SidebarProps & ThreadSidebarCallbacks & { routinesOpen?: boolean }
+> = ({
   hidden = false,
   onRailPresenceChange,
   mode,
@@ -94,6 +114,8 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
   onRegenerateTitle,
   titlePending = false,
   onRestoreThread,
+  onOpenRoutines,
+  routinesOpen = false,
 }) => {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -194,12 +216,20 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
     };
   }, [mode]);
 
-  // Poll agent rail activity
+  // Poll agent rail activity only when Sidebar is visible and document is visible
   useEffect(() => {
-    if (mode !== 'agent') return;
+    if (mode !== 'agent' || hidden) return;
     let cancelled = false;
+    let timer: number | null = null;
+
+    const isPageVisible = () =>
+      typeof document === 'undefined' ||
+      (!document.hidden && document.visibilityState === 'visible');
+
+    let wasVisible = isPageVisible();
 
     const loadActivity = async () => {
+      if (cancelled || !isPageVisible()) return;
       try {
         const rows = await invokeCommand<
           Array<{
@@ -229,16 +259,53 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
       }
     };
 
-    void loadActivity();
-    const timer = window.setInterval(() => {
+    const stopPolling = () => {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const startPolling = () => {
+      if (cancelled || timer !== null || !isPageVisible()) return;
+      timer = window.setInterval(() => {
+        if (!cancelled && isPageVisible()) {
+          void loadActivity();
+        }
+      }, 4000);
+    };
+
+    const handleVisibilityChange = () => {
+      const visibleNow = isPageVisible();
+      if (visibleNow) {
+        if (!wasVisible) {
+          void loadActivity();
+        }
+        wasVisible = true;
+        startPolling();
+      } else {
+        wasVisible = false;
+        stopPolling();
+      }
+    };
+
+    if (wasVisible) {
       void loadActivity();
-    }, 4000);
+      startPolling();
+    }
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      stopPolling();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
     };
-  }, [mode]);
+  }, [mode, hidden]);
 
   // Global listener to close context menu
   useEffect(() => {
@@ -341,6 +408,33 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
               <button className="sidebar__heading-button" onClick={onShowModeHome} type="button">
                 <span id="rail-heading">{headingTitle}</span>
               </button>
+              {mode === 'agent' && (
+                <button
+                  type="button"
+                  className={`sidebar__routines-button${routinesOpen ? ' sidebar__routines-button--active' : ''}`}
+                  aria-pressed={routinesOpen}
+                  onClick={() => {
+                    if (onOpenRoutines) {
+                      onOpenRoutines();
+                    } else {
+                      window.dispatchEvent(
+                        new CustomEvent('kite:op-request', {
+                          detail: {
+                            reqId: 'sidebar-routines',
+                            kind: 'navigate-view',
+                            payload: { view: 'routines' },
+                          },
+                        })
+                      );
+                    }
+                  }}
+                  aria-label="Routines"
+                  title={routinesOpen ? 'Back to Agents' : 'Open Routines'}
+                >
+                  <RoutinesClockIcon size={12} />
+                  <span>Routines</span>
+                </button>
+              )}
               <button
                 ref={addBtnRef}
                 aria-label={addTitle}
@@ -447,3 +541,5 @@ export const Sidebar: React.FC<SidebarProps & ThreadSidebarCallbacks> = ({
     </AnimatePresence>
   );
 };
+
+export const Sidebar = React.memo(SidebarInner);

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { RightDock } from './RightDock';
+import { computeResponsiveDockWidth } from './dock/dockConfig';
 import { OPEN_RIGHT_DOCK_BROWSER_EVENT } from '../lib/terminalLinkNav';
 import { OPEN_RIGHT_DOCK_SUBAGENT_EVENT } from '../lib/subagentNav';
+import { getBrowserSurfaceSession } from './views/browser/browserSurfaceRegistry';
 
 // Mock sub-views to avoid canvas / native / network dependencies in jsdom
 vi.mock('./views/BrowserView', () => ({
@@ -46,6 +48,23 @@ vi.mock('./views/subagents/SubagentInspectorView', () => ({
       data-swarm-id={requestedTarget?.swarmId ?? ''}
     >
       Subagent Inspector View
+    </div>
+  ),
+}));
+vi.mock('./views/voice/VoiceTranscriptPane', () => ({
+  VoiceTranscriptPane: ({
+    callId,
+    threadId,
+  }: {
+    callId?: string | null;
+    threadId?: string | null;
+  }) => (
+    <div
+      data-testid="voice-transcript-pane"
+      data-call-id={callId ?? ''}
+      data-thread-id={threadId ?? ''}
+    >
+      Voice Transcript Pane
     </div>
   ),
 }));
@@ -383,6 +402,125 @@ describe('RightDock - Fullscreen & Maximized Behavior Tests', () => {
     );
     expect(inspector.getAttribute('data-selected-thread-id')).toBe('thread-c');
     expect(inspector.getAttribute('data-target-thread-id')).toBe('thread-c');
+  });
+
+  it('opens voice-transcript tab with VoiceTranscriptPane on kite:open-voice-transcript', () => {
+    localStorage.clear();
+    render(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-1"
+        selectedThreadId="thread-v1"
+      />
+    );
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent('kite:open-voice-transcript', {
+          detail: { callId: 'call-99', threadId: 'thread-v1' },
+        })
+      );
+    });
+
+    const pane = screen.getByTestId('voice-transcript-pane');
+    expect(pane).toBeInTheDocument();
+    expect(pane).toHaveAttribute('data-call-id', 'call-99');
+    expect(pane).toHaveAttribute('data-thread-id', 'thread-v1');
+  });
+
+  it('clamps RightDock width responsively at narrow viewports while preserving 440px at 1366px', () => {
+    expect(computeResponsiveDockWidth(440, 1366)).toBe(440);
+    expect(computeResponsiveDockWidth(440, 1024)).toBe(440);
+    expect(computeResponsiveDockWidth(440, 960)).toBe(380);
+    expect(computeResponsiveDockWidth(440, 780)).toBe(260);
+  });
+
+  it('closes dormant browser surfaces for inactive workspaces on switch and tab close', async () => {
+    const ws1Session = getBrowserSurfaceSession('ws-switch-1');
+    const ws2Session = getBrowserSurfaceSession('ws-switch-2');
+    const closeSpy1 = vi.spyOn(ws1Session, 'close');
+    const closeSpy2 = vi.spyOn(ws2Session, 'close');
+
+    const { rerender } = render(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-switch-1"
+      />
+    );
+
+    await waitFor(() => {
+      expect(closeSpy2).toHaveBeenCalledTimes(1);
+    });
+    expect(closeSpy1).not.toHaveBeenCalled();
+
+    const freshWs2 = getBrowserSurfaceSession('ws-switch-2');
+    const freshCloseSpy2 = vi.spyOn(freshWs2, 'close');
+
+    rerender(
+      <RightDock
+        visible={true}
+        onClose={vi.fn()}
+        workspaceId="ws-switch-2"
+      />
+    );
+
+    await waitFor(() => {
+      expect(closeSpy1).toHaveBeenCalledTimes(1);
+    });
+    expect(freshCloseSpy2).not.toHaveBeenCalled();
+
+    // Opening and closing browser tab tears down the active workspace session too
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(OPEN_RIGHT_DOCK_BROWSER_EVENT, {
+          detail: { url: 'https://example.com' },
+        })
+      );
+    });
+
+    const closeBrowserBtn = screen.getByRole('button', { name: 'Close Browser' });
+    fireEvent.click(closeBrowserBtn);
+
+    await waitFor(() => {
+      expect(freshCloseSpy2).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('avoids repeated localStorage reads during hidden renders when visible is false', () => {
+    localStorage.clear();
+    localStorage.setItem('kite.selectedWorkspaceId', 'ws-saved');
+    const getItemSpy = vi.spyOn(localStorage, 'getItem');
+
+    const { rerender } = render(
+      <RightDock
+        visible={false}
+        onClose={vi.fn()}
+        workspaceId={null}
+        workspaces={[{ id: 'ws-saved', name: 'Saved' } as any]}
+      />
+    );
+
+    const callsAfterMount = getItemSpy.mock.calls.filter(
+      ([key]) => key === 'kite.selectedWorkspaceId'
+    ).length;
+    expect(callsAfterMount).toBe(0);
+
+    rerender(
+      <RightDock
+        visible={false}
+        onClose={vi.fn()}
+        workspaceId={null}
+        workspaces={[{ id: 'ws-saved', name: 'Saved' } as any]}
+      />
+    );
+
+    const callsAfterHiddenRerender = getItemSpy.mock.calls.filter(
+      ([key]) => key === 'kite.selectedWorkspaceId'
+    ).length;
+    expect(callsAfterHiddenRerender).toBe(0);
+    getItemSpy.mockRestore();
   });
 });
 

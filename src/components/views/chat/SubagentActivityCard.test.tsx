@@ -443,5 +443,143 @@ describe('SubagentActivityCard and SwarmActivityCard', () => {
     expect(sidebarCardHoverBlock).toContain('var(--glass-subagent-card-hover-bg');
     expect(visualLangCss).toContain('--glass-subagent-card-bg:');
     expect(visualLangCss).toContain('--glass-subagent-card-hover-bg:');
+    // Option 1 non-red failure policy: zero --danger-ink on failed subagent cards/disclosures/overview dots.
+    const failedCardBlock = chatSubagentsCss.match(/\.chat-subagent-card--failed\s*\{[^}]*\}/)?.[0] ?? '';
+    const failedStateBlock = chatSubagentsCss.match(/\.chat-subagent-card__state--failed\s*\{[^}]*\}/)?.[0] ?? '';
+    const failedDotBlock = inspectorCss.match(/\.subagent-dot--failed\s*\{[^}]*\}/)?.[0] ?? '';
+    const failedToggleBlock = inspectorCss.match(/\.subagent-overview__failed-toggle\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(failedCardBlock).not.toContain('--danger-ink');
+    expect(failedStateBlock).not.toContain('--danger-ink');
+    expect(failedDotBlock).not.toContain('--danger-ink');
+    expect(failedToggleBlock).not.toContain('--danger-ink');
+  });
+
+  it('suppresses hook-blocked / superseded 0-step noise and collapses genuine failures behind a discreet disclosure', () => {
+    const blockedInvoke: ChatItem = {
+      id: 'call_blocked_1',
+      kind: 'tool',
+      toolKind: 'subagent',
+      title: 'Run invoke_subagent',
+      text: 'Denied by pre-tool hook: native `invoke_subagent` is blocked in Thread Mode.',
+      detail: '',
+      status: 'failed',
+      streaming: false,
+      exitCode: 1,
+      createdAtUnixMs: 1_000,
+      attachments: [],
+      subagentMeta: {
+        subagentId: 'call_blocked_1',
+        action: 'spawn',
+        role: 'Subagent',
+        status: 'failed',
+        stepCount: 0,
+      },
+    };
+    const succeededRetry: ChatItem = {
+      id: 'call_ok_1',
+      kind: 'tool',
+      toolKind: 'subagent',
+      toolName: 'kite_subagent_run',
+      title: 'Auditor',
+      text: 'All checks passed.',
+      detail: '',
+      status: 'completed',
+      streaming: false,
+      exitCode: 0,
+      createdAtUnixMs: 2_000,
+      attachments: [],
+      subagentMeta: {
+        subagentId: 'child-ok-1',
+        childThreadId: 'child-ok-1',
+        action: 'spawn',
+        role: 'Auditor',
+        status: 'completed',
+        stepCount: 4,
+      },
+    };
+
+    const { container: retryContainer } = render(
+      <SubagentGroupRow items={[blockedInvoke, succeededRetry]} threadId="thread-parent" workspaceId="ws-1" />,
+    );
+    expect(retryContainer.querySelector('[data-subagent-id="call_blocked_1"]')).toBeNull();
+    expect(retryContainer.querySelector('[data-subagent-id="child-ok-1"]')).not.toBeNull();
+
+    const realFailure: ChatItem = {
+      id: 'call_real_fail',
+      kind: 'tool',
+      toolKind: 'subagent',
+      toolName: 'kite_subagent_run',
+      title: 'Crasher Worker',
+      text: 'Quota exhausted (429)',
+      detail: '',
+      status: 'failed',
+      streaming: false,
+      exitCode: 1,
+      createdAtUnixMs: 3_000,
+      attachments: [],
+      subagentMeta: {
+        subagentId: 'child-crash-1',
+        childThreadId: 'child-crash-1',
+        action: 'spawn',
+        role: 'Crasher Worker',
+        status: 'failed',
+        stepCount: 2,
+      },
+    };
+
+    const { container: failContainer } = render(
+      <SubagentGroupRow items={[realFailure]} threadId="thread-parent" workspaceId="ws-1" />,
+    );
+    const disclosure = failContainer.querySelector('[data-testid="subagent-failed-disclosure"]');
+    expect(disclosure).not.toBeNull();
+    expect(disclosure?.textContent).toContain('Crasher Worker · Did not finish');
+    // Collapsed by default: card is hidden until clicked.
+    expect(failContainer.querySelector('.chat-subagent-card--failed')).toBeNull();
+
+    fireEvent.click(failContainer.querySelector('.chat-subagent-failed-disclosure__toggle')!);
+    expect(failContainer.querySelector('.chat-subagent-card--failed')).not.toBeNull();
+  });
+
+  it('highlights only the clicked SwarmActivityCard when multiple cards share the same swarmId', () => {
+    setActiveSubagentInspection(null);
+    const sharedSwarmState = {
+      swarmId: 'swarm_shared',
+      title: 'Release Swarm',
+      coordinatorModel: 'claude-opus-4-6',
+      members: [
+        { name: 'alpha', role: 'Alpha', model: 'claude-opus-4-6', state: 'working' as const, channels: ['main'] },
+      ],
+      posts: [
+        { seq: 1, author: 'coordinator', channel: 'main', text: 'Kickoff', mentions: [], createdAtUnixMs: 10 },
+      ],
+      channels: [{ name: 'main' }],
+    };
+    const makeItem = (id: string): ChatItem => ({
+      id,
+      kind: 'tool',
+      text: '',
+      title: 'Swarm',
+      detail: '',
+      status: 'completed',
+      streaming: false,
+      exitCode: 0,
+      createdAtUnixMs: 10,
+      attachments: [],
+      toolKind: 'swarm',
+      swarmMeta: { swarmId: 'swarm_shared', action: 'post_message', swarmTitle: 'Release Swarm' },
+    });
+
+    const { container } = render(
+      <>
+        <SwarmActivityCard item={makeItem('sw_item_1')} threadId="thread-parent" swarmState={sharedSwarmState} />
+        <SwarmActivityCard item={makeItem('sw_item_2')} threadId="thread-parent" swarmState={sharedSwarmState} />
+      </>,
+    );
+    const cards = container.querySelectorAll('[data-swarm-id="swarm_shared"]');
+    expect(cards).toHaveLength(2);
+    fireEvent.click(cards[1]!);
+    expect(cards[0]!.className).not.toContain('chat-subagent-card--active');
+    expect(cards[1]!.className).toContain('chat-subagent-card--active');
+    setActiveSubagentInspection(null);
   });
 });

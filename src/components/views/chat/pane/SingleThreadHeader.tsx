@@ -10,6 +10,7 @@ import {
   PencilIcon,
 } from '../ChatIcons';
 import { BrandLogo } from '../../../ui/BrandLogo';
+import { AgentStatusIndicator } from '../../../ui/AgentStatusIndicator';
 import type { ExtendedChatThread } from '../types';
 import type { UseThreadBranchesResult } from './useThreadBranches';
 
@@ -376,7 +377,7 @@ export const SingleThreadHeader: React.FC<SingleThreadHeaderProps> = React.memo(
           }`}
           role="status"
         >
-          <i />
+          {running ? <AgentStatusIndicator status="running" size={12} /> : <i />}
         </span>
 
         {/* New Thread */}

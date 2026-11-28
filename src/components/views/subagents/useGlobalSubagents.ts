@@ -12,9 +12,13 @@ const EMPTY_SNAPSHOT: GlobalSubagentRunsSnapshot = {
   totalCount: 0,
   activeCount: 0,
   waitingCount: 0,
+  historyCount: 0,
 };
 
-function recomputeSnapshotStats(entries: GlobalSubagentEntry[]): GlobalSubagentRunsSnapshot {
+function recomputeSnapshotStats(
+  entries: GlobalSubagentEntry[],
+  prev?: GlobalSubagentRunsSnapshot,
+): GlobalSubagentRunsSnapshot {
   let activeCount = 0;
   let waitingCount = 0;
   for (const entry of entries) {
@@ -31,6 +35,10 @@ function recomputeSnapshotStats(entries: GlobalSubagentEntry[]): GlobalSubagentR
     totalCount: entries.length,
     activeCount,
     waitingCount,
+    historyCount: prev?.historyCount ?? 0,
+    ...(typeof prev?.sessionStartedAtMs === 'number'
+      ? { sessionStartedAtMs: prev.sessionStartedAtMs }
+      : {}),
   };
 }
 
@@ -55,7 +63,7 @@ function patchGlobalEntries(
       return !matches;
     });
     if (!matched) return { next: snapshot, matched: false };
-    return { next: recomputeSnapshotStats(filtered), matched: true };
+    return { next: recomputeSnapshotStats(filtered, snapshot), matched: true };
   }
 
   const updated = snapshot.runs.map((entry) => {
@@ -112,20 +120,31 @@ function patchGlobalEntries(
   if (!matched) {
     return { next: snapshot, matched: false };
   }
-  return { next: recomputeSnapshotStats(updated), matched: true };
+  return { next: recomputeSnapshotStats(updated, snapshot), matched: true };
 }
 
-/** Loads and live-syncs subagent runs across all non-archived threads. */
-export function useGlobalSubagents() {
+export interface UseGlobalSubagentsOptions {
+  includeHistory?: boolean;
+}
+
+/** Loads and live-syncs subagent runs across threads (scoped to the current app session by default). */
+export function useGlobalSubagents(options: UseGlobalSubagentsOptions = {}) {
+  const includeHistory = Boolean(options.includeHistory);
+  const includeHistoryRef = useRef(includeHistory);
+  includeHistoryRef.current = includeHistory;
   const [snapshot, setSnapshot] = useState<GlobalSubagentRunsSnapshot>(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(false);
   const refreshTimerRef = useRef<number | null>(null);
+  const staleWhileHiddenRef = useRef(false);
   const mountedRef = useRef(true);
 
   const refresh = useCallback(async () => {
     if (typeof listAllSubagentRuns !== 'function') return;
     try {
-      const next = await listAllSubagentRuns({ limit: 120 });
+      const next = await listAllSubagentRuns({
+        limit: 120,
+        includeHistory: includeHistoryRef.current,
+      });
       if (mountedRef.current && next) {
         setSnapshot(next);
       }
@@ -138,16 +157,32 @@ export function useGlobalSubagents() {
     if (refreshTimerRef.current !== null) return;
     refreshTimerRef.current = window.setTimeout(() => {
       refreshTimerRef.current = null;
+      // A hidden window repaints nothing; catch up once when it becomes visible again.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        staleWhileHiddenRef.current = true;
+        return;
+      }
       void refresh();
     }, 150);
   }, [refresh]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && staleWhileHiddenRef.current) {
+        staleWhileHiddenRef.current = false;
+        scheduleRefresh();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [scheduleRefresh]);
 
   useEffect(() => {
     mountedRef.current = true;
     let cancelled = false;
     if (typeof listAllSubagentRuns === 'function') {
       setLoading(true);
-      void listAllSubagentRuns({ limit: 120 })
+      void listAllSubagentRuns({ limit: 120, includeHistory })
         .then((next) => {
           if (!cancelled && mountedRef.current && next) {
             setSnapshot(next);
@@ -160,6 +195,14 @@ export function useGlobalSubagents() {
           }
         });
     }
+    return () => {
+      cancelled = true;
+    };
+  }, [includeHistory]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    let cancelled = false;
 
     const onThreadsChanged = () => {
       scheduleRefresh();

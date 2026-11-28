@@ -1,12 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  DEFAULT_RUNTIME_RESOURCE_SETTINGS,
   deleteSubagentRole,
+  getRuntimeTransportMetrics,
   getSubagentSettings,
   listChatProviderModels,
+  saveRuntimeResourceSettings,
   saveSubagentRole,
   saveSubagentSettings,
   type ChatProviderModelOption,
   type DiscoveredSubagentProvider,
+  type RuntimeResourceSettings,
   type SaveSubagentRoleInput,
   type SubagentOverridePolicy,
   type SubagentRoleRecord,
@@ -21,6 +25,7 @@ import { PlusIcon, RefreshCwIcon, TrashIcon } from './icons';
 const DEFAULT_EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 const CUSTOM_MODEL_SENTINEL = '__custom__';
 const AUTO_SENTINEL = '__auto__';
+const HEAVY_PROCESS_LIMIT_OPTIONS = [1, 2, 4, 6, 8] as const;
 
 const POLICY_OPTIONS: Array<{
   id: SubagentOverridePolicy;
@@ -92,10 +97,12 @@ interface CachedSubagentSnapshot {
 }
 
 let cachedSnapshot: CachedSubagentSnapshot | null = null;
+let cachedRuntimeSettings: RuntimeResourceSettings | null = null;
 const cachedModelsByProvider = new Map<string, ChatProviderModelOption[]>();
 
 export function resetSubagentsTabCacheForTest(): void {
   cachedSnapshot = null;
+  cachedRuntimeSettings = null;
   cachedModelsByProvider.clear();
 }
 
@@ -117,6 +124,11 @@ export const SubagentsTab: React.FC = () => {
   );
   const [loading, setLoading] = useState(() => cachedSnapshot === null);
   const [saving, setSaving] = useState(false);
+  const [runtimeSettings, setRuntimeSettings] = useState<RuntimeResourceSettings>(
+    () => cachedRuntimeSettings ?? DEFAULT_RUNTIME_RESOURCE_SETTINGS
+  );
+  const [savingRuntime, setSavingRuntime] = useState(false);
+  const runtimeEditedRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   const [selectedProvider, setSelectedProvider] = useState(() => {
@@ -181,6 +193,15 @@ export const SubagentsTab: React.FC = () => {
       .finally(() => {
         if (active) setLoading(false);
       });
+    void Promise.resolve(getRuntimeTransportMetrics())
+      .then((metrics) => {
+        if (!active || runtimeEditedRef.current || !metrics?.settings) return;
+        cachedRuntimeSettings = metrics.settings;
+        setRuntimeSettings(metrics.settings);
+      })
+      .catch((err) => {
+        console.warn('[SubagentsTab] Failed to load runtime transport metrics:', err);
+      });
     return () => {
       active = false;
     };
@@ -241,6 +262,25 @@ export const SubagentsTab: React.FC = () => {
     },
     [applySnapshot, workspacePath]
   );
+
+  const persistRuntimeSettings = useCallback(async (next: RuntimeResourceSettings) => {
+    runtimeEditedRef.current = true;
+    setSavingRuntime(true);
+    setError(null);
+    try {
+      const saved = await saveRuntimeResourceSettings(next);
+      cachedRuntimeSettings = saved;
+      setRuntimeSettings(saved);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'No se pudo guardar la configuración de recursos de ejecución.'
+      );
+    } finally {
+      setSavingRuntime(false);
+    }
+  }, []);
 
   const handlePolicyChange = (policy: SubagentOverridePolicy) => {
     if (policy === settings.overridePolicy || saving) return;
@@ -426,8 +466,10 @@ export const SubagentsTab: React.FC = () => {
   );
 
   const effortOptions = useMemo(() => {
-    const levels =
-      selectedModelMeta?.effortLevels && selectedModelMeta.effortLevels.length > 0
+    const explicitlyNoEffort = selectedModelMeta?.supportsEffort === false;
+    const levels = explicitlyNoEffort
+      ? []
+      : selectedModelMeta?.effortLevels && selectedModelMeta.effortLevels.length > 0
         ? selectedModelMeta.effortLevels
         : DEFAULT_EFFORT_LEVELS;
     return [
@@ -435,6 +477,15 @@ export const SubagentsTab: React.FC = () => {
       ...levels.map((level) => ({ id: level, title: level })),
     ];
   }, [selectedModelMeta]);
+
+  useEffect(() => {
+    if (
+      selectedEffort !== AUTO_SENTINEL &&
+      !effortOptions.some((option) => option.id === selectedEffort)
+    ) {
+      setSelectedEffort(AUTO_SENTINEL);
+    }
+  }, [effortOptions, selectedEffort]);
 
   const modelRows: SelectMenuRow[] = useMemo(() => {
     const rows: SelectMenuRow[] = providerModels.map((m) => ({
@@ -1063,6 +1114,113 @@ export const SubagentsTab: React.FC = () => {
               </div>
             ))
           )}
+        </div>
+      </section>
+
+      {/* 4. Runtime Execution Engine & Resource Controls */}
+      <section className="settings-group" aria-labelledby="settings-subagents-runtime-title">
+        <h2 id="settings-subagents-runtime-title" className="settings-group__title">
+          Motor de ejecución y recursos
+        </h2>
+        <div className="ui-card">
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">
+                Fast Lane nativo en Rust (API Keys / OpenCode Go)
+              </h3>
+              <p>
+                Ejecuta turnos ligeros directamente sobre endpoints HTTPS/SSE oficiales cuando usas
+                claves API o OpenCode Go. Las suscripciones de consumo continúan ejecutándose en los
+                daemons CLI oficiales.
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={runtimeSettings.fastLaneEnabled}
+                aria-label="Fast Lane nativo en Rust (API Keys / OpenCode Go)"
+                className="ui-switch"
+                disabled={savingRuntime}
+                onClick={() =>
+                  void persistRuntimeSettings({
+                    ...runtimeSettings,
+                    fastLaneEnabled: !runtimeSettings.fastLaneEnabled,
+                  })
+                }
+              >
+                <span aria-hidden="true" className="ui-switch__knob" />
+              </button>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Pool HTTP/Stdio del Hub MCP</h3>
+              <p>
+                Comparte servidores MCP por sesión mediante el hub HTTP local y un pool stdio para
+                reducir procesos duplicados en memoria.
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={runtimeSettings.mcpHttpHubEnabled}
+                aria-label="Pool HTTP/Stdio del Hub MCP"
+                className="ui-switch"
+                disabled={savingRuntime}
+                onClick={() =>
+                  void persistRuntimeSettings({
+                    ...runtimeSettings,
+                    mcpHttpHubEnabled: !runtimeSettings.mcpHttpHubEnabled,
+                  })
+                }
+              >
+                <span aria-hidden="true" className="ui-switch__knob" />
+              </button>
+            </div>
+          </div>
+
+          <div className="ui-card__row settings-row">
+            <div className="settings-row__copy">
+              <h3 className="settings-row__title">Límite de procesos pesados concurrentes</h3>
+              <p>
+                Máximo de subprocesos CLI pesados activos en paralelo antes de encolar nuevas
+                solicitudes en el gobernador de sesión.
+              </p>
+            </div>
+            <div className="settings-row__control">
+              <fieldset
+                aria-label="Límite de procesos pesados concurrentes"
+                className="ui-segmented"
+              >
+                {HEAVY_PROCESS_LIMIT_OPTIONS.map((limit) => {
+                  const active = runtimeSettings.maxHeavyProcesses === limit;
+                  return (
+                    <button
+                      key={limit}
+                      type="button"
+                      aria-pressed={active}
+                      className="ui-segmented__item"
+                      style={{ minWidth: '42px' }}
+                      disabled={savingRuntime}
+                      onClick={() => {
+                        if (limit === runtimeSettings.maxHeavyProcesses) return;
+                        void persistRuntimeSettings({
+                          ...runtimeSettings,
+                          maxHeavyProcesses: limit,
+                        });
+                      }}
+                    >
+                      {active && <SegmentedIndicator group="settings-subagents-heavy-limit" />}
+                      <span>{limit}</span>
+                    </button>
+                  );
+                })}
+              </fieldset>
+            </div>
+          </div>
         </div>
       </section>
     </>

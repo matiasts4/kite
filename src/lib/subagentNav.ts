@@ -12,9 +12,26 @@ export const SUBAGENT_INSPECTION_CHANGE_EVENT = 'kite:subagent-inspection-change
 
 let pendingSubagentRequest: OpenRightDockSubagentDetail | null = null;
 let activeInspectionTarget: OpenRightDockSubagentDetail | null = null;
+let activeSwarmCardItemId: string | null = null;
+
+export function setActiveSwarmCardItemId(itemId: string | null) {
+  activeSwarmCardItemId = itemId;
+}
+
+export function getActiveSwarmCardItemId(): string | null {
+  return activeSwarmCardItemId;
+}
 
 export function setActiveSubagentInspection(next: OpenRightDockSubagentDetail | null) {
+  const prevSwarmId = activeInspectionTarget?.swarmId ?? null;
   activeInspectionTarget = next ? { ...next } : null;
+  if (
+    !next ||
+    next.mode !== 'swarm' ||
+    (prevSwarmId && next.swarmId && prevSwarmId !== next.swarmId)
+  ) {
+    activeSwarmCardItemId = null;
+  }
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent<OpenRightDockSubagentDetail | null>(SUBAGENT_INSPECTION_CHANGE_EVENT, {

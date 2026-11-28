@@ -188,8 +188,8 @@
 .usage-dash__tile {
   min-width: 0;
   padding: var(--panel-padding, 14px);
-  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
-  border-radius: var(--radius-card, 10px);
+  border: 1px solid var(--glass-card-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
+  border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -225,8 +225,8 @@
 
 .usage-dash__card {
   padding: var(--panel-padding, 16px);
-  border: 1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
-  border-radius: var(--radius-card, 10px);
+  border: 1px solid var(--glass-card-border, var(--block-stroke, rgba(255, 255, 255, 0.08)));
+  border-radius: var(--card-radius, 12px);
   background: var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.03)));
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
@@ -267,7 +267,7 @@
 
 .usage-dash__heat-cell {
   background: var(--chip-fill, rgba(255, 255, 255, 0.06));
-  border-radius: 2.5px;
+  border-radius: var(--vl-radius-xs, 4px);
   width: 11px;
   height: 11px;
   display: block;
@@ -324,7 +324,7 @@
 }
 
 .usage-dash__bar {
-  border-radius: 2px 2px 0 0;
+  border-radius: var(--vl-radius-xs, 4px) var(--vl-radius-xs, 4px) 0 0;
   flex-direction: column-reverse;
   flex: 1 1 0;
   gap: 1px;
@@ -392,7 +392,7 @@
 }
 
 .usage-dash__legend-dot {
-  border-radius: 2px;
+  border-radius: var(--vl-radius-xs, 4px);
   width: 8px;
   height: 8px;
   display: inline-block;
@@ -442,13 +442,13 @@
 
 .usage-dash__agent-track {
   background: var(--chip-fill, rgba(255, 255, 255, 0.08));
-  border-radius: 2px;
+  border-radius: var(--pill-radius, 9999px);
   height: 4px;
   overflow: hidden;
 }
 
 .usage-dash__agent-fill {
-  border-radius: 2px;
+  border-radius: var(--pill-radius, 9999px);
   height: 100%;
   display: block;
 }

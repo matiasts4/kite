@@ -15,6 +15,7 @@ import type {
 } from './types';
 import type { CatalogAvailability } from './hooks/useChatModels';
 import type { PlanActionPayload } from './ChatPlanPanel';
+import type { ApprovalDecision } from './ChatApprovalCard';
 import type { DriverDeclaration, SessionProjection } from '../../../lib/session/types';
 
 export interface ThreadGridProps {
@@ -27,6 +28,7 @@ export interface ThreadGridProps {
   workspaceId: string | null;
   workspaceName?: string;
   workspaces?: Array<{ id: string; displayName?: string; name?: string }>;
+  agents?: Array<{ id: string; name?: string; engine?: string }>;
   agentName?: string;
   engineLabel?: string;
   liveRunsCount: number;
@@ -74,11 +76,11 @@ export interface ThreadGridProps {
     threadId: string,
     patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; connectionId?: string | null; agent?: string | null; workspaceId?: string | null }
   ) => void;
-  onApprovalDecision: (
+  onApprovalDecision(
     threadId: string,
-    decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
+    decision: ApprovalDecision,
     reqId: string
-  ) => void;
+  ): void;
   onDropThread?: (
     targetThreadId: string,
     droppedThreadId: string,
@@ -224,6 +226,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
   workspaceId,
   workspaceName,
   workspaces,
+  agents = [],
   agentName,
   engineLabel,
   liveRunsCount,
@@ -462,6 +465,7 @@ export const ThreadGrid: React.FC<ThreadGridProps> = ({
                   workspaceId={workspaceId}
                   workspaceName={workspaceName}
                   workspaces={workspaces}
+                  agents={agents}
                   agentName={agentName}
                   engineLabel={engineLabel}
                   isFocused={isFocused}

@@ -15,6 +15,25 @@ import {
   isPrivateUseNerdIcon,
 } from './terminalCanvasTypes';
 
+export const MAX_TERMINAL_CANVAS_DPR = 1.5;
+
+export function resolveTerminalCanvasDpr(): number {
+  const raw = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  return Math.min(raw > 0 ? raw : 1, MAX_TERMINAL_CANVAS_DPR);
+}
+
+export function releaseCanvasBackingStore(
+  canvas: HTMLCanvasElement | null | undefined,
+): boolean {
+  if (!canvas) return false;
+  if (canvas.width !== 0 || canvas.height !== 0) {
+    canvas.width = 0;
+    canvas.height = 0;
+    return true;
+  }
+  return false;
+}
+
 export interface CanvasRenderState {
   canvas: HTMLCanvasElement;
   prefs: TerminalAppearancePrefs;
@@ -70,7 +89,7 @@ export function renderCanvasGrid(state: CanvasRenderState): number {
   const rect = canvas.getBoundingClientRect();
   if (rect.width < 4 || rect.height < 4) return 0;
 
-  const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+  const dpr = resolveTerminalCanvasDpr();
   const displayW = rect.width;
   const displayH = rect.height;
   const targetPixelW = Math.max(1, Math.round(displayW * dpr));

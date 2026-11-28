@@ -8,7 +8,22 @@ import {
   FileCodeIcon,
 } from './ChatIcons';
 import { useVoiceSession, voiceSessionStore, type VoiceTurnRecord } from '../../../lib/operator/voice/voiceSessionStore';
-import { liveVoiceStageItem, mergeTimeline, voiceTurnsToChatItems } from './voiceTranscript';
+import {
+  buildVoiceSessionBoundaryItem,
+  flushPendingVoiceTranscriptTail,
+  liveVoiceStageItem,
+  mergeTimeline,
+  voiceTurnsToChatItems,
+} from './voiceTranscript';
+import { VoiceTeleprompterDock } from './composer/VoiceTeleprompterDock';
+import { VoiceTranscriptCard } from './VoiceTranscriptCard';
+import {
+  ensureVoiceCallReceiptsHook,
+  listVoiceCallReceipts,
+  type VoiceCallReceipt,
+} from '../../../lib/operator/voice/voiceCallReceipts';
+import { getActiveVoiceAudioTime } from '../../../lib/operator/voice/pcm24kPlayer';
+import { clampVoicePlaybackSpeed } from '../../../lib/operator/voice/callResilience';
 import { subscribeTrace } from '../../../lib/operator/trace/trace';
 import { runOperatorTurn } from '../../../lib/operator';
 import {
@@ -27,19 +42,27 @@ import {
   renameChatThread,
 } from '../../../lib/ipc';
 import { ChatItemRow, ChatWorkGroup, groupTranscriptRows, liveActivityRowIndex } from './ChatItemRow';
-import { SubagentGroupRow } from './SubagentActivityCard';
+import { dedupeSubagentRuns, SubagentGroupRow } from './SubagentActivityCard';
+import { matchSubagentRun } from './subagentRunHelpers';
 import { filterTranscriptForVisibility, readToolVisibility, TOOL_VISIBILITY_EVENT, type ToolVisibilityMode } from './toolVisibility';
 import { QueuedRunsControl, type QueuedRunRow } from './QueuedRunsControl';
 import { SideChatPane } from './SideChatPane';
 import { TurnActivityStatus } from './TurnActivityStatus';
 import { ChatComposer } from './ChatComposer';
+import { ConsultativeDraftCard } from './ConsultativeDraftCard';
 import { ThemeHeroFigure } from '../../theme/ThemeHeroFigure';
 import { ZedOrb, type ZedOrbState } from '../../ZedOrb';
 import {
   loadOperatorConfig,
+  saveOperatorConfig,
   sanitizeZedFigure,
   type ZedFigureId,
 } from '../../../lib/operator/operatorConfig';
+import {
+  getVoicePalette,
+  normalizeVoiceRgb,
+} from '../../../lib/operator/config/voicePalettes';
+import type { VoiceGlowPalette } from './composer/composerVoiceGlowShader';
 import { SessionLifecycleBar } from './SessionLifecycleBar';
 import { declarationFromCatalog } from './driverDeclaration';
 import { getSavedSelectedModel, getSavedSelectedAgent } from './modelPersistence';
@@ -48,7 +71,7 @@ import { ChatPlanPanel, PlanActionPayload } from './ChatPlanPanel';
 import { useThreadFailureBanner } from './ThreadErrorBanner';
 import { HtmlRenderFrame } from './HtmlRenderFrame';
 import { ComposerPendingUserInputPanel } from './ComposerPendingUserInputPanel';
-import { ChatApprovalCard } from './ChatApprovalCard';
+import { ChatApprovalCard, type ApprovalDecision } from './ChatApprovalCard';
 import { ThreadUsageCard } from './ThreadUsageCard';
 import { bringBackAllowed, childApprovals, childStopIds, directMessageNotice } from './childApprovals';
 import { compactSendText, fileRestoreAllowed } from './threadInteraction';
@@ -70,11 +93,42 @@ import { SingleThreadHeader } from './pane/SingleThreadHeader';
 
 export { composeRewoundPrompt, changedFilesForTurn };
 
+export const INITIAL_VISIBLE_TRANSCRIPT_ROWS = 48;
+export const INITIAL_VISIBLE_UNDERLYING_ITEMS = 150;
+
+export function sliceTranscriptRowsByWindow(
+  transcriptRows: ReturnType<typeof groupTranscriptRows>,
+  visibleLimit: number
+): ReturnType<typeof groupTranscriptRows> {
+  const totalRows = transcriptRows.length;
+  if (totalRows === 0 || visibleLimit >= totalRows) {
+    if (visibleLimit > totalRows) return transcriptRows;
+  }
+  const scaledItemBudget = Math.max(
+    INITIAL_VISIBLE_UNDERLYING_ITEMS,
+    Math.round((visibleLimit / INITIAL_VISIBLE_TRANSCRIPT_ROWS) * INITIAL_VISIBLE_UNDERLYING_ITEMS)
+  );
+  let rowCount = 0;
+  let itemCount = 0;
+  let startIdx = totalRows;
+  for (let i = totalRows - 1; i >= 0; i -= 1) {
+    const row = transcriptRows[i]!;
+    const weight = row.kind === 'work' || row.kind === 'subagentGroup' ? row.items.length : 1;
+    if (rowCount >= visibleLimit) break;
+    if (rowCount > 0 && itemCount + weight > scaledItemBudget) break;
+    rowCount += 1;
+    itemCount += weight;
+    startIdx = i;
+  }
+  return startIdx <= 0 ? transcriptRows : transcriptRows.slice(startIdx);
+}
+
 export interface SingleThreadPaneProps {
   thread: ExtendedChatThread;
   workspaceId: string | null;
   workspaceName?: string;
   workspaces?: Array<{ id: string; displayName?: string; name?: string }>;
+  agents?: Array<{ id: string; name?: string; engine?: string }>;
   agentName?: string;
   engineLabel?: string;
   isFocused: boolean;
@@ -125,12 +179,12 @@ export interface SingleThreadPaneProps {
   onRemoveAttachment: (resId: string) => void;
   onDropdownToggle?: (type: 'provider' | 'model' | 'mode') => void;
   onUpdateConfig: (patch: { provider?: ChatProvider; mode?: ChatMode; model?: string | null; effort?: string | null; plan?: boolean; agent?: string | null; connectionId?: string | null; workspaceId?: string | null }) => void;
-  onApprovalDecision: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
-  onChildApprovalDecision?: (
+  onApprovalDecision(decision: ApprovalDecision, reqId: string): void;
+  onChildApprovalDecision?(
     childThreadId: string,
-    decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop',
+    decision: ApprovalDecision,
     reqId: string
-  ) => void;
+  ): void;
   embedded?: boolean;
 }
 
@@ -166,6 +220,7 @@ interface SingleThreadTranscriptProps {
   onRestoreFiles: (messageId: string) => Promise<void>;
   onEditUserMessage: (text: string) => void;
   onDismissReflection: (note: string | null) => void;
+  voiceTranscriptCard?: React.ReactNode;
 }
 
 /** Memoized transcript and turn-rail subtree so composer typing never re-renders message rows. */
@@ -195,7 +250,12 @@ const SingleThreadTranscript = React.memo(function SingleThreadTranscript({
   onRestoreFiles,
   onEditUserMessage,
   onDismissReflection,
+  voiceTranscriptCard,
 }: SingleThreadTranscriptProps) {
+  const dedupedSubagentRuns = React.useMemo(
+    () => dedupeSubagentRuns(subagentRuns),
+    [subagentRuns]
+  );
   return (
     <>
       <ThreadTurnRail
@@ -256,7 +316,7 @@ const SingleThreadTranscript = React.memo(function SingleThreadTranscript({
                     items={row.items}
                     threadId={threadId}
                     workspaceId={activeWsId}
-                    subagentRuns={subagentRuns ?? null}
+                    subagentRuns={dedupedSubagentRuns}
                     enterFor={enterFor}
                   />
                 ) : (
@@ -264,7 +324,12 @@ const SingleThreadTranscript = React.memo(function SingleThreadTranscript({
                     item={row.item}
                     threadId={threadId}
                     workspaceId={activeWsId}
-                    subagentRuns={subagentRuns ?? null}
+                    matchedSubagentRun={
+                      (row.item.kind === 'tool' || row.item.kind === 'command') &&
+                      (row.item.toolKind === 'subagent' || Boolean(row.item.subagentMeta))
+                        ? matchSubagentRun(row.item, dedupedSubagentRuns)
+                        : null
+                    }
                     swarmState={swarmState ?? null}
                     enter={enterFor(row.item.id)}
                     fileRestoreEnabled={isFileRestoreAllowed}
@@ -276,6 +341,8 @@ const SingleThreadTranscript = React.memo(function SingleThreadTranscript({
               </React.Fragment>
             );
           })}
+
+          {voiceTranscriptCard}
 
           <TurnActivityStatus
             running={running}
@@ -307,11 +374,12 @@ const SingleThreadTranscript = React.memo(function SingleThreadTranscript({
   );
 });
 
-export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
+const SingleThreadPaneInner: React.FC<SingleThreadPaneProps> = ({
   thread,
   workspaceId,
   workspaceName,
   workspaces,
+  agents = [],
   agentName,
   engineLabel,
   isFocused,
@@ -392,7 +460,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const contextReduceMotion = useReduceMotion();
   const reduceMotion = contextReduceMotion || prefersReducedMotion();
   const [hiddenFromId, setHiddenFromId] = useState<string | null>(null);
-  const [visibleLimit, setVisibleLimit] = useState<number>(200);
+  const [visibleLimit, setVisibleLimit] = useState<number>(INITIAL_VISIBLE_TRANSCRIPT_ROWS);
   const [dismissedReflectionNote, setDismissedReflectionNote] = useState<string | null>(null);
 
   const atLiveEdgeRef = useRef(true);
@@ -412,6 +480,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const enterFor = useTranscriptMotion(thread.id, transcriptItemIds);
   useEffect(() => {
     setHiddenFromId(null);
+    setVisibleLimit(INITIAL_VISIBLE_TRANSCRIPT_ROWS);
   }, [thread.id]);
   const rewindFromMessage = useCallback(async (messageId: string) => {
     const result = await rewindThreadTranscript(thread.id, messageId);
@@ -478,11 +547,31 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const [voiceTurns, setVoiceTurns] = useState<VoiceTurnRecord[]>(() =>
     voice.getThreadVoiceTurns(thread.id)
   );
+  const [voiceSessionEndedAt, setVoiceSessionEndedAt] = useState<number | undefined>(undefined);
   const [liveVoiceTurn, setLiveVoiceTurn] = useState<{
     turnId: string;
     stage: string;
     detail?: string;
   } | null>(null);
+
+  useEffect(() => {
+    setVoiceSessionEndedAt(undefined);
+  }, [thread.id]);
+
+  useEffect(() => {
+    return voiceSessionStore.onSessionEnded(({ threadId: endedThreadId, turns }) => {
+      if (endedThreadId !== thread.id) return;
+      setVoiceSessionEndedAt(Date.now());
+      const flushed = flushPendingVoiceTranscriptTail(
+        voiceSessionStore.getSnapshot().interimTranscript || '',
+        thread.id,
+        turns
+      );
+      if (flushed) {
+        voiceSessionStore.addThreadVoiceTurn(thread.id, flushed);
+      }
+    });
+  }, [thread.id]);
 
   useEffect(() => {
     const vs = voiceSessionStore.getSnapshot();
@@ -574,6 +663,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
         await voiceSessionStore.submitTextTurn(clean, thread.id, thread.workspaceId ?? undefined);
         return;
       }
+      const startedAt = Date.now();
       const res = await runOperatorTurn(clean, {
         workspaceId: thread.workspaceId ?? undefined,
         mode: 'thread',
@@ -593,7 +683,8 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
           overallSuccess: res.overallSuccess,
           receipts: res.receipts,
           reply: res.reply,
-          createdAt: Date.now(),
+          createdAt: startedAt,
+          completedAt: Math.max(startedAt + 1, Date.now()),
         });
       }
     } catch (err: any) {
@@ -610,18 +701,25 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   const [voiceFigure, setVoiceFigure] = useState<ZedFigureId>(() =>
     sanitizeZedFigure(loadOperatorConfig().persona?.figure)
   );
+  const [voiceRgbPalette, setVoiceRgbPalette] = useState(() =>
+    getVoicePalette(loadOperatorConfig().persona?.voice).palette
+  );
+  const voicePalette: VoiceGlowPalette = normalizeVoiceRgb(voiceRgbPalette);
 
   useEffect(() => {
-    const syncFigure = (event?: Event) => {
-      const detail = (event as CustomEvent<{ persona?: { figure?: string } }> | undefined)?.detail;
-      const next = detail?.persona?.figure ?? loadOperatorConfig().persona?.figure;
-      setVoiceFigure(sanitizeZedFigure(next));
+    const syncPersona = (event?: Event) => {
+      const detail = (
+        event as CustomEvent<{ persona?: { figure?: string; voice?: string } }> | undefined
+      )?.detail;
+      const cfg = loadOperatorConfig().persona;
+      setVoiceFigure(sanitizeZedFigure(detail?.persona?.figure ?? cfg?.figure));
+      setVoiceRgbPalette(getVoicePalette(detail?.persona?.voice ?? cfg?.voice).palette);
     };
-    window.addEventListener('kite:operator-config-updated', syncFigure);
-    window.addEventListener('kite:operator-config-changed', syncFigure);
+    window.addEventListener('kite:operator-config-updated', syncPersona);
+    window.addEventListener('kite:operator-config-changed', syncPersona);
     return () => {
-      window.removeEventListener('kite:operator-config-updated', syncFigure);
-      window.removeEventListener('kite:operator-config-changed', syncFigure);
+      window.removeEventListener('kite:operator-config-updated', syncPersona);
+      window.removeEventListener('kite:operator-config-changed', syncPersona);
     };
   }, []);
 
@@ -636,6 +734,17 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     : voice.isTranscribing
     ? 'transcribing'
     : 'listening';
+
+  const voiceStageStyle = isVoiceActiveHere
+    ? ({
+        '--voice-deep-rgb': voiceRgbPalette.deep.join(', '),
+        '--voice-core-rgb': voiceRgbPalette.core.join(', '),
+        '--voice-glint-rgb': voiceRgbPalette.glint.join(', '),
+        '--voice-level': String(
+          Math.max(voice.liveAudioLevel ?? 0, voice.speakerAudioLevel ?? 0),
+        ),
+      } as React.CSSProperties)
+    : undefined;
 
   const voiceOrbState: ZedOrbState =
     voiceHeroState === 'muted'
@@ -657,12 +766,86 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
       ? 'TRANSCRIBIENDO VOZ'
       : 'SESIÓN DE VOZ · EN VIVO';
 
+  const [latestThreadReceipt, setLatestThreadReceipt] = useState<VoiceCallReceipt | null>(null);
+
   // Voice turns are projected as regular chat items so they render with the exact same rows,
   // widths and spacing as any other conversation.
   const timelineItems = React.useMemo(() => {
-    const merged = mergeTimeline(transcriptItems, voiceTurnsToChatItems(voiceTurns));
+    const projected = voiceTurnsToChatItems(voiceTurns, {
+      includeSessionSummary: !isVoiceActiveHere && voiceTurns.length > 0 && !latestThreadReceipt,
+      sessionEndedAt: voiceSessionEndedAt,
+    });
+    if (voiceTurns.length > 0) {
+      const firstAt = voiceTurns.reduce(
+        (min, t) => (t.createdAt > 0 ? Math.min(min, t.createdAt) : min),
+        Number.POSITIVE_INFINITY
+      );
+      const startTs = Number.isFinite(firstAt) ? Math.max(1, firstAt - 1) : 1;
+      projected.unshift(buildVoiceSessionBoundaryItem(thread.id, 'started', startTs));
+      if (!isVoiceActiveHere) {
+        const lastTurn = voiceTurns[voiceTurns.length - 1];
+        const endTs = voiceSessionEndedAt ?? lastTurn?.completedAt ?? lastTurn?.createdAt ?? Date.now();
+        const durationMs = Number.isFinite(firstAt) && endTs > firstAt ? endTs - firstAt : undefined;
+        const summaryIdx = projected.findIndex((item) => item.id === 'voice-session-summary');
+        const endItem = buildVoiceSessionBoundaryItem(thread.id, 'ended', endTs + 1, durationMs);
+        if (summaryIdx >= 0) {
+          projected.splice(summaryIdx, 0, endItem);
+        } else {
+          projected.push(endItem);
+        }
+      }
+    }
+    const merged = mergeTimeline(transcriptItems, projected);
     return liveVoiceTurn ? [...merged, liveVoiceStageItem(liveVoiceTurn)] : merged;
-  }, [transcriptItems, voiceTurns, liveVoiceTurn]);
+  }, [transcriptItems, voiceTurns, liveVoiceTurn, isVoiceActiveHere, voiceSessionEndedAt, thread.id, latestThreadReceipt]);
+
+  const [voicePlaybackSpeed, setVoicePlaybackSpeed] = useState<number>(() =>
+    clampVoicePlaybackSpeed(loadOperatorConfig().ttsRate || 1)
+  );
+
+  useEffect(() => {
+    ensureVoiceCallReceiptsHook();
+  }, []);
+
+  useEffect(() => {
+    const syncRate = () => {
+      setVoicePlaybackSpeed(clampVoicePlaybackSpeed(loadOperatorConfig().ttsRate || 1));
+    };
+    window.addEventListener('kite:operator-config-updated', syncRate);
+    return () => window.removeEventListener('kite:operator-config-updated', syncRate);
+  }, []);
+
+  const handleVoiceSpeedChange = useCallback((speed: number) => {
+    const next = clampVoicePlaybackSpeed(speed);
+    setVoicePlaybackSpeed(next);
+    saveOperatorConfig({ ttsRate: next });
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const refreshReceipt = async () => {
+      try {
+        const list = await listVoiceCallReceipts(15);
+        if (!active) return;
+        const match = list.find((item) => item.boundThreadId === thread.id) ?? null;
+        setLatestThreadReceipt(match);
+      } catch (err) {
+        console.warn('[SingleThreadPane] Failed to load thread voice receipt:', err);
+      }
+    };
+    void refreshReceipt();
+    const handleUpdated = (ev: Event) => {
+      const custom = ev as CustomEvent<VoiceCallReceipt>;
+      if (custom.detail?.boundThreadId === thread.id) {
+        setLatestThreadReceipt(custom.detail);
+      }
+    };
+    window.addEventListener('kite:voice-receipt-updated', handleUpdated);
+    return () => {
+      active = false;
+      window.removeEventListener('kite:voice-receipt-updated', handleUpdated);
+    };
+  }, [thread.id, voiceSessionEndedAt]);
 
   // A voice session always opens its own conversation: reuse the current thread only when it is
   // still blank, otherwise start a fresh thread and bind the session to it.
@@ -835,8 +1018,8 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
   );
   const totalRows = transcriptRows.length;
   const displayedRows = React.useMemo(
-    () => (totalRows > visibleLimit ? transcriptRows.slice(totalRows - visibleLimit) : transcriptRows),
-    [transcriptRows, totalRows, visibleLimit]
+    () => sliceTranscriptRowsByWindow(transcriptRows, visibleLimit),
+    [transcriptRows, visibleLimit]
   );
   const liveWorkIdx = React.useMemo(
     () => (running ? liveActivityRowIndex(displayedRows) : -1),
@@ -944,8 +1127,29 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
 
       {/* Frame containing Main Transcript */}
       <div className="chat-thread-frame">
-        <div className="chat-thread-main">
-          <div className={`chat-thread-layout${isDraft ? ' chat-thread-layout--draft' : ''}`}>
+        <div
+          className={`chat-thread-main${isVoiceActiveHere ? ' chat-thread-main--voice-active' : ''}`}
+          data-voice-stage={isVoiceActiveHere ? 'true' : undefined}
+          data-voice-stage-state={isVoiceActiveHere ? voiceHeroState : undefined}
+          style={voiceStageStyle}
+        >
+          {isVoiceActiveHere ? (
+            <div
+              className="chat-voice-atmosphere"
+              data-testid="voice-stage-atmosphere"
+              data-state={voiceHeroState}
+              aria-hidden="true"
+            >
+              <div className="chat-voice-atmosphere__aurora" />
+              <div className="chat-voice-atmosphere__grid" />
+              <div className="chat-voice-atmosphere__vignette" />
+            </div>
+          ) : null}
+          <div
+            className={`chat-thread-layout${isDraft ? ' chat-thread-layout--draft' : ''}${
+              isDraft && isVoiceActiveHere ? ' chat-thread-layout--voice-draft' : ''
+            }`}
+          >
             {/* Layout body: renders null when isDraft to prevent empty transcript pushing hero up */}
             <div className="chat-thread-layout__body">
               {isDraft ? null : (
@@ -975,6 +1179,11 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                   onRestoreFiles={handleRestoreFiles}
                   onEditUserMessage={handleEditUserMessage}
                   onDismissReflection={handleDismissReflection}
+                  voiceTranscriptCard={
+                    !isVoiceActiveHere && latestThreadReceipt ? (
+                      <VoiceTranscriptCard receipt={latestThreadReceipt} />
+                    ) : null
+                  }
                 />
               )}
             </div>
@@ -985,7 +1194,9 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                 initial={reduceMotion ? false : { y: shift.handoff }}
                 animate={{ y: 0 }}
                 transition={reduceMotion ? tweens.instant : tweens.fade}
-                className={agentName ? 'chat-draft-hero agent-chat-hero scroll-quiet' : 'chat-draft-hero scroll-quiet'}
+                className={`${agentName ? 'chat-draft-hero agent-chat-hero' : 'chat-draft-hero'}${
+                  isVoiceActiveHere ? ' chat-draft-hero--voice' : ''
+                } scroll-quiet`}
               >
                 {isVoiceActiveHere ? (
                   <div
@@ -995,11 +1206,18 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                     style={{ '--voice-level': String(voice.liveAudioLevel || 0) } as React.CSSProperties}
                   >
                     <div className="chat-voice-stage__frame">
+                      <span className="chat-voice-stage__halo" aria-hidden="true" />
+                      <span className="chat-voice-stage__orbit" aria-hidden="true" />
+                      <span className="chat-voice-stage__sonar" aria-hidden="true" />
+                      <span
+                        className="chat-voice-stage__sonar chat-voice-stage__sonar--delayed"
+                        aria-hidden="true"
+                      />
                       <span className="chat-voice-stage__reticle" aria-hidden="true" />
                       <ZedOrb
                         figure={voiceFigure}
                         state={voiceOrbState}
-                        size={112}
+                        size={128}
                         level={voice.liveAudioLevel}
                         interactive={true}
                         onClick={() => voice.toggleMicMuted()}
@@ -1024,7 +1242,11 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                     </span>
                   </div>
                 ) : (
-                  <ThemeHeroFigure variant="hero" />
+                  <ThemeHeroFigure
+                    mood={prompt.trim().length > 0 ? 'curious' : 'idle'}
+                    triggerKey={thread.id}
+                    variant="hero"
+                  />
                 )}
                 <h1>
                   {isVoiceActiveHere ? (
@@ -1070,16 +1292,23 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
                     data-testid="thread-voice-quick-prompts"
                     aria-label="Acciones rápidas de voz"
                   >
-                    {VOICE_STAGE_QUICK_PROMPTS.map((suggestion) => (
-                      <button
+                    {VOICE_STAGE_QUICK_PROMPTS.map((suggestion, index) => (
+                      <motion.button
                         key={suggestion}
                         type="button"
+                        initial={reduceMotion ? false : { opacity: 0, y: 10, scale: 0.96 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={
+                          reduceMotion
+                            ? tweens.instant
+                            : { ...tweens.fade, delay: 0.08 + index * 0.045 }
+                        }
                         className="chat-voice-prompt-chip"
                         disabled={voiceHeroState === 'thinking'}
                         onClick={() => void handleSendVoiceTurn(suggestion)}
                       >
                         {suggestion}
-                      </button>
+                      </motion.button>
                     ))}
                   </div>
                 )}
@@ -1193,7 +1422,55 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               onRemove={handleRemoveQueuedRun}
             />
 
+            <ConsultativeDraftCard
+              threadId={thread.id}
+              onConfirm={() => handleSendVoiceTurn('confirmar')}
+            />
+
+            <VoiceTeleprompterDock
+              open={isVoiceActiveHere}
+              showUserTurns={false}
+              lines={voice.liveTeleprompterLines ?? []}
+              isThinking={Boolean(liveVoiceTurn && liveVoiceTurn.stage !== 'speaking')}
+              isTranscribing={Boolean(voice.isTranscribing)}
+              isListening={Boolean(voice.isListening && !voice.micMuted)}
+              speakerMuted={voice.speakerMuted}
+              micMuted={voice.micMuted}
+              speakerLevel={voice.speakerAudioLevel ?? 0}
+              micLevel={voice.liveAudioLevel ?? 0}
+              voicePalette={voicePalette}
+              startedAt={voice.startedAt}
+              linkPhase={voice.phase === 'starting' ? 'connecting' : undefined}
+              micPrompt={Boolean(voice.micFlatlined)}
+              statusHint={voice.voiceError?.message || undefined}
+              playbackSpeed={voicePlaybackSpeed}
+              onChangePlaybackSpeed={handleVoiceSpeedChange}
+              onToggleMicMuted={() => voice.toggleMicMuted()}
+              onToggleSpeakerMuted={() => voice.toggleSpeakerMuted()}
+              onEndSession={() => voice.stopSession()}
+              showCallActions={false}
+              getAudioTime={getActiveVoiceAudioTime}
+            />
+
+            {!isVoiceActiveHere && voice.inactivityNotice ? (
+              <div
+                data-testid="voice-inactivity-notice"
+                role="status"
+                className="kite-voice-inactivity-notice"
+              >
+                <span>{voice.inactivityNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => voice.setInactivityNotice(null)}
+                  className="kite-voice-inactivity-notice__dismiss"
+                >
+                  Entendido
+                </button>
+              </div>
+            ) : null}
+
             <ChatComposer
+              hideVoiceFooterSpeedControl={true}
               threadId={thread.id}
               threadItems={transcriptItems}
               conversationStarted={!isDraft || queuedRuns.length > 0}
@@ -1222,6 +1499,7 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
               threadWorkspaceId={activeWsId ?? null}
               threadWorkspaceName={effectiveWorkspaceName || 'Local'}
               workspaces={workspaceOptions}
+              agents={agents}
               onSelectWorkspace={handleSelectHeaderWorkspace}
               onSwitchBranch={branchState.handleSwitchBranch}
               onCreateBranch={branchState.handleCreateBranch}
@@ -1274,3 +1552,5 @@ export const SingleThreadPane: React.FC<SingleThreadPaneProps> = ({
     </section>
   );
 };
+
+export const SingleThreadPane = React.memo(SingleThreadPaneInner);

@@ -130,6 +130,7 @@ export interface UseTerminalSnapshotPollerOptions {
   isFocusedRef: React.MutableRefObject<boolean>;
   onTitleChange?: (title: string) => void;
   onProcessExit?: (exitCode: number | null) => void;
+  onAccountRotated?: () => void;
   scheduleRender: (dirtyRows?: number[]) => void;
   resizeInFlightRef?: React.MutableRefObject<boolean>;
   /** Resend the measured grid when a snapshot still has a different size. */
@@ -185,6 +186,8 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
   onTitleChangeRef.current = onTitleChange;
   const onProcessExitRef = useRef(onProcessExit);
   onProcessExitRef.current = onProcessExit;
+  const onAccountRotatedRef = useRef(options.onAccountRotated);
+  onAccountRotatedRef.current = options.onAccountRotated;
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
   const engineRef = useRef(engine);
@@ -584,6 +587,7 @@ export function useTerminalSnapshotPoller(options: UseTerminalSnapshotPollerOpti
         lastSeqRef.current = 0;
         packedGridRef.current = null;
         clearGap();
+        onAccountRotatedRef.current?.();
         void pull(true, true);
       }).then((stop) => {
         if (!active) {

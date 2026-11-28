@@ -1,0 +1,98 @@
+/* ==========================================================================
+   Kite Code — Composer Ambient Voice Horizon Glow & Concentric Ring (S1)
+   Pure CSS surface + dynamic runtime CSS custom properties (Zero hex colors)
+   ========================================================================== */
+
+.kite-composer-voice-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  border-radius: var(--dialog-radius, 14px);
+  overflow: visible;
+  clip-path: inset(-300px -120px -2px -120px);
+  opacity: var(--glow-wrapper-alpha, 1);
+  transition: opacity 280ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.kite-composer-voice-glow[data-active='false'] {
+  opacity: 0;
+}
+
+.kite-composer-voice-glow__canvas {
+  position: absolute;
+  left: 50%;
+  bottom: -26px;
+  width: 100%;
+  max-width: 1080px;
+  height: 360px;
+  transform: translateX(-50%);
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) 74%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 1) 74%,
+    transparent 100%
+  );
+  pointer-events: none;
+  transition:
+    bottom 420ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 280ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.kite-composer-voice-glow[data-pushed-down='true'] .kite-composer-voice-glow__canvas {
+  bottom: -112px;
+}
+
+.kite-composer-voice-glow__canvas[data-renderer='fallback'] {
+  background: radial-gradient(
+    ellipse 58% 72% at var(--glow-x, 50%) 82%,
+    var(--glow-color, color-mix(in srgb, var(--accent) 44%, transparent)),
+    transparent 72%
+  );
+  filter: blur(28px);
+  opacity: var(--glow-alpha, 0);
+}
+
+.kite-composer-voice-glow[data-theme='light'] .kite-composer-voice-glow__canvas[data-renderer='fallback'] {
+  opacity: calc(var(--glow-alpha, 0) * 0.78);
+}
+
+.kite-composer-voice-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius, 12px);
+  pointer-events: none;
+  opacity: var(--glow-ring-alpha, 0.85);
+  box-shadow:
+    0 0 0 1px var(--glow-ring-border, color-mix(in srgb, var(--accent) 34%, transparent)),
+    0 0 26px -6px var(--glow-ring-shadow, color-mix(in srgb, var(--accent) 28%, transparent));
+  transition:
+    box-shadow 220ms cubic-bezier(0.2, 0, 0, 1),
+    opacity 280ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.kite-composer-voice-glow[data-theme='light'] .kite-composer-voice-ring {
+  box-shadow:
+    0 0 0 1px var(--glow-ring-border, color-mix(in srgb, var(--accent) 26%, transparent)),
+    0 0 20px -6px var(--glow-ring-shadow, color-mix(in srgb, var(--accent) 20%, transparent));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kite-composer-voice-glow,
+  .kite-composer-voice-glow__canvas,
+  .kite-composer-voice-ring {
+    transition: none;
+  }
+}
+
+html[data-motion='reduce'] .kite-composer-voice-glow,
+html[data-motion='reduce'] .kite-composer-voice-glow__canvas,
+html[data-motion='reduce'] .kite-composer-voice-ring {
+  transition: none;
+}

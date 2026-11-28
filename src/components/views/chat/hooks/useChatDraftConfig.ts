@@ -52,7 +52,7 @@ export interface CreateDraftConfigOptions {
 }
 
 /**
- * A draft opens on the agent's provider with edits auto-accepted and the
+ * A draft opens on the agent's provider with full access and the
  * agent's configured default model; without one it checks localStorage or starts on Automatic.
  */
 export function createDraftConfig(
@@ -76,7 +76,7 @@ export function createDraftConfig(
   const rawMode = options?.defaultMode ?? (options as any)?.agentProfile?.defaultMode;
   const rawPlan = options?.defaultPlan ?? (options as any)?.agentProfile?.defaultPlan;
 
-  let mode: ChatMode = 'acceptEdits';
+  let mode: ChatMode = 'fullAccess';
   if (rawMode === 'fullAccess' || rawMode === 'readOnly' || rawMode === 'acceptEdits') {
     mode = rawMode;
   } else if (rawPlan === true || rawPlan === 'true') {

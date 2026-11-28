@@ -42,8 +42,8 @@
 }
 
 .chat-subagent-card--failed {
-  border-color: color-mix(in srgb, var(--danger-ink) 32%, transparent);
-  background: color-mix(in srgb, var(--danger-ink) 8%, var(--glass-subagent-card-bg, color-mix(in srgb, var(--composer, #1c1c1e) 74%, transparent)));
+  border-color: var(--glass-border, var(--block-stroke));
+  background: var(--glass-subagent-card-bg, color-mix(in srgb, var(--composer) 72%, transparent));
 }
 
 .chat-subagent-card--active {
@@ -55,8 +55,9 @@
   display: flex;
   align-items: center;
   gap: 7px;
+  row-gap: 4px;
   min-width: 0;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
 }
 
 .chat-subagent-card__icon {
@@ -69,8 +70,14 @@
   flex: none;
 }
 
-.chat-subagent-card--failed .chat-subagent-card__icon {
-  color: var(--danger-ink);
+.chat-subagent-card--failed .chat-subagent-card__icon,
+.chat-subagent-card--failed .subagent-role-icon--failed,
+.chat-subagent-card--failed .agent-status-indicator--failed,
+.chat-subagent-group .subagent-role-icon--failed,
+.chat-subagent-group .agent-status-indicator--failed,
+.chat-subagent-failed-disclosure .subagent-role-icon--failed,
+.chat-subagent-failed-disclosure .agent-status-indicator--failed {
+  color: var(--text-tertiary);
 }
 
 .chat-subagent-card--running .chat-subagent-card__icon {
@@ -90,11 +97,11 @@
   font-weight: var(--weight-semibold, 600);
   color: var(--text-primary);
   min-width: 0;
-  max-width: min(280px, 100%);
+  max-width: min(280px, calc(100% - 24px));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
 }
 
 .chat-subagent-card__summary {
@@ -123,7 +130,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
 }
 
 .chat-subagent-card__pill--ws-branch {
@@ -173,6 +180,8 @@
 }
 
 .chat-subagent-group__label {
+  flex: 1 1 auto;
+  min-width: 0;
   font-weight: var(--weight-medium, 500);
   color: var(--text-primary);
   overflow: hidden;
@@ -189,7 +198,8 @@
 }
 
 .chat-subagent-card__spacer {
-  flex: 1 1 auto;
+  flex: 1 1 8px;
+  min-width: 0;
 }
 
 .chat-subagent-card__telemetry {
@@ -197,6 +207,8 @@
   align-items: center;
   gap: 6px;
   flex: none;
+  margin-left: auto;
+  white-space: nowrap;
   font-size: var(--text-meta);
   color: var(--text-tertiary);
 }
@@ -221,7 +233,80 @@
 }
 
 .chat-subagent-card__state--failed {
-  color: var(--danger-ink);
+  color: var(--text-tertiary);
+}
+
+.chat-subagent-failed-disclosure {
+  display: flex;
+  flex-direction: column;
+  margin: 2px 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-subagent-failed-disclosure__toggle {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-height: var(--vl-control-sm, 28px);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--control-radius, 8px);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--text-caption, 11px);
+  text-align: left;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background var(--duration-ink) var(--ease-ink), border-color var(--duration-ink) var(--ease-ink), color var(--duration-ink) var(--ease-ink);
+}
+
+.chat-subagent-failed-disclosure__toggle:hover {
+  background: var(--hover-fill);
+  border-color: var(--block-stroke);
+  color: var(--text-secondary);
+}
+
+.chat-subagent-failed-disclosure__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.chat-subagent-failed-disclosure__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: var(--weight-medium, 500);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-subagent-failed-disclosure__meta {
+  font-size: var(--text-meta);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+}
+
+.chat-subagent-failed-disclosure__items {
+  display: flex;
+  flex-direction: column;
+  margin-left: 16px;
+  padding-left: 8px;
+  border-left: 1px solid var(--block-stroke);
 }
 
 .chat-subagent-card__steps,
@@ -229,6 +314,8 @@
   font-size: var(--text-meta);
   color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
 }
 
 .chat-subagent-card__chevron {
@@ -296,8 +383,23 @@
 }
 
 .chat-swarm-dot--working {
+  position: relative;
   background: var(--status-running);
+}
+
+.chat-swarm-dot--working::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--status-running);
+  pointer-events: none;
+  will-change: transform, opacity;
   animation: chat-working-ping 1.8s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+}
+
+html[data-window-state='minimized'] .chat-swarm-dot--working::after {
+  animation-play-state: paused !important;
 }
 
 .chat-swarm-dot--waiting {

@@ -5,6 +5,8 @@ import type {
   FileDiffMetadata,
 } from '@pierre/diffs';
 
+export const MAX_DIFF_CONTENTS_CACHE_ENTRIES = 24;
+
 export interface DiffFileContentsPair {
   oldContent: string | null;
   newContent: string | null;
@@ -42,7 +44,12 @@ export function createDiffFileContentsLoader(
     const cacheKey = `${workspaceId}:${oldPath ?? ''}:${newPath}:${fileDiff.cacheKey ?? ''}`;
 
     const existing = cache.get(cacheKey);
-    if (existing) return existing;
+    if (existing) {
+      // Refresh LRU recency order on cache hit.
+      cache.delete(cacheKey);
+      cache.set(cacheKey, existing);
+      return existing;
+    }
 
     const promise = (async (): Promise<FileDiffLoadedFiles> => {
       const pair = await fetchContents(oldPath, newPath);
@@ -73,6 +80,11 @@ export function createDiffFileContentsLoader(
     });
 
     cache.set(cacheKey, promise);
+    while (cache.size > MAX_DIFF_CONTENTS_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey === undefined) break;
+      cache.delete(oldestKey);
+    }
     return promise;
   };
 }

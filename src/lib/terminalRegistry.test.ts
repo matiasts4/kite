@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as ipc from './ipc';
 import {
   hasWorkingMarkers,
   isWaitingForUserInput,
@@ -9,6 +10,10 @@ import {
   waitForTerminalReady,
   markTerminalPromptInjected,
   recordTerminalOutput,
+  getActiveAgentTerminals,
+  resetTerminalExitStatus,
+  MAX_TERMINAL_REGISTRY_HISTORY,
+  getTerminalRegistryHistoryCounts,
 } from './terminalRegistry';
 
 describe('terminalRegistry — Prompt readiness & startup decontamination', () => {
@@ -100,5 +105,74 @@ describe('terminalRegistry — Prompt readiness & startup decontamination', () =
     expect(isBlockedOnQuestionOrApproval('Approval required before running command.')).toBe(true);
     expect(isBlockedOnQuestionOrApproval('Allow once or deny?')).toBe(true);
     expect(isBlockedOnQuestionOrApproval('Do you want to continue?')).toBe(true);
+  });
+
+  it('caps exitedSessionIds at 128 entries with FIFO eviction', () => {
+    expect(MAX_TERMINAL_REGISTRY_HISTORY).toBe(128);
+
+    const total = 140;
+    const prefix = 'fifo-exit-cap-';
+    for (let i = 0; i < total; i += 1) {
+      markTerminalExited(`${prefix}${i}`);
+    }
+
+    const counts = getTerminalRegistryHistoryCounts();
+    expect(counts.exitedSessionIds).toBe(128);
+
+    // Oldest entries (0..11) were evicted by FIFO so output for fifo-exit-cap-0 is accepted again.
+    recordTerminalOutput(`${prefix}0`, 'OpenCode v0.2.0\n❯ ', { engine: 'open-code' });
+    expect(getActiveAgentTerminals().some((t) => t.sessionId === `${prefix}0`)).toBe(true);
+
+    // Most recent entries (12..139) remain marked exited and ignore output.
+    recordTerminalOutput(`${prefix}139`, 'OpenCode v0.2.0\n❯ ', { engine: 'open-code' });
+    expect(getActiveAgentTerminals().some((t) => t.sessionId === `${prefix}139`)).toBe(false);
+    expect(isTerminalReadyForInput(`${prefix}139`)).toBe(false);
+
+    // Clean up resurrected test session
+    markTerminalExited(`${prefix}0`);
+    resetTerminalExitStatus(`${prefix}0`);
+  });
+
+  it('caps lastPublishedPresence at 128 entries with FIFO eviction', () => {
+    const prevTauriInternals = (window as any).__TAURI_INTERNALS__;
+    (window as any).__TAURI_INTERNALS__ = {};
+    const invokeSpy = vi.spyOn(ipc, 'invokeCommand').mockResolvedValue(undefined as never);
+
+    try {
+      const prefix = 'fifo-pres-cap-';
+      for (let i = 0; i < 129; i += 1) {
+        registerSpawnedTerminal(`${prefix}${i}`, { engine: 'open-code' });
+      }
+
+      const counts = getTerminalRegistryHistoryCounts();
+      expect(counts.lastPublishedPresence).toBe(128);
+
+      invokeSpy.mockClear();
+
+      // fifo-pres-cap-1 is still cached with state 'idle', so re-registering 'idle' does not re-publish.
+      registerSpawnedTerminal(`${prefix}1`, { engine: 'open-code' });
+      const retainedCalls = invokeSpy.mock.calls.filter(
+        ([cmd, args]: any[]) => cmd === 'dispatch_publish' && args?.address === `session:${prefix}1`
+      );
+      expect(retainedCalls).toHaveLength(0);
+
+      // fifo-pres-cap-0 was evicted by FIFO, so publishing 'idle' emits dispatch_publish again.
+      registerSpawnedTerminal(`${prefix}0`, { engine: 'open-code' });
+      const evictedCalls = invokeSpy.mock.calls.filter(
+        ([cmd, args]: any[]) => cmd === 'dispatch_publish' && args?.address === `session:${prefix}0`
+      );
+      expect(evictedCalls).toHaveLength(1);
+
+      for (let i = 0; i < 129; i += 1) {
+        markTerminalExited(`${prefix}${i}`);
+      }
+    } finally {
+      if (prevTauriInternals === undefined) {
+        delete (window as any).__TAURI_INTERNALS__;
+      } else {
+        (window as any).__TAURI_INTERNALS__ = prevTauriInternals;
+      }
+      invokeSpy.mockRestore();
+    }
   });
 });

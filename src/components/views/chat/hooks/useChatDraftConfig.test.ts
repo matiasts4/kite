@@ -15,19 +15,19 @@ const draftWithModel = (): ChatDraftConfig => ({
 });
 
 describe('createDraftConfig', () => {
-  it('starts on the agent default provider with acceptEdits and Automatic model', () => {
+  it('starts on the agent default provider with fullAccess and Automatic model', () => {
     expect(createDraftConfig('codex')).toEqual({
       provider: 'codex',
-      mode: 'acceptEdits',
+      mode: 'fullAccess',
       model: null,
       effort: null,
     });
   });
 
-  it('starts with the agent default model when one is configured', () => {
+  it('starts with the agent default model and fullAccess when one is configured', () => {
     expect(createDraftConfig('antigravity', 'gemini-4-argon')).toEqual({
       provider: 'antigravity',
-      mode: 'acceptEdits',
+      mode: 'fullAccess',
       model: 'gemini-4-argon',
       effort: null,
     });

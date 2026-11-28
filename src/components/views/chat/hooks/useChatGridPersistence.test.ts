@@ -6,9 +6,13 @@ import {
   CHAT_SUMMARIES_STORAGE_KEY,
   CHAT_THREAD_STORAGE_PREFIX,
   MAX_CACHED_THREADS_IN_MEMORY,
+  MAX_LOCAL_HYDRATION_ITEM_TEXT_CHARS,
+  MAX_LOCAL_HYDRATION_STUB_BYTES,
+  MAX_LOCAL_HYDRATION_STUB_ITEMS,
   THREAD_LOCAL_PERSIST_DEBOUNCE_MS,
   pruneThreadsMapLru,
   stripExternalizedAttachmentPreviews,
+  toLocalHydrationStub,
   toThreadSummary,
   sortAgentSummariesByTabOrder,
   loadAgentTabOrder,
@@ -27,6 +31,14 @@ import {
   pruneMapLru,
 } from '../../FilesView';
 import { invokeCommand } from '../../../../lib/ipc';
+import {
+  MAX_DIFF_CONTENTS_CACHE_ENTRIES,
+  createDiffFileContentsLoader,
+} from '../../../../lib/diffs/diffFileContents';
+import {
+  MAX_VOICE_HISTORY_THREADS,
+  voiceSessionStore,
+} from '../../../../lib/operator/voice/voiceSessionStore';
 
 vi.mock('../../../../lib/ipc', () => ({
   invokeCommand: vi.fn(),
@@ -313,5 +325,347 @@ describe('useChatGridPersistence hook', () => {
     expect(prunedMap.size).toBe(2);
     expect(prunedMap.has('a')).toBe(true);
     expect(prunedMap.has('b')).toBe(false);
+  });
+
+  it('bounds toLocalHydrationStub below 150 KB, defers mid-turn streaming writes, and cleans evicted LRU keys', () => {
+    const giantText = 'x'.repeat(20_000);
+    const items = Array.from({ length: 60 }, (_, idx) => ({
+      id: `item-${idx}`,
+      kind: 'tool',
+      title: `Tool ${idx}`,
+      text: giantText,
+      detail: giantText,
+      status: 'completed',
+      streaming: false,
+      exitCode: null,
+      createdAtUnixMs: idx,
+      attachments: [],
+    }));
+    const massiveThread = {
+      id: 't-massive',
+      title: 'Massive Thread',
+      status: 'idle',
+      items,
+      subagentRuns: [
+        {
+          subagentId: 'sub-1',
+          parentThreadId: 't-massive',
+          parentToolCallId: 'call-1',
+          role: 'Explorer',
+          status: 'completed',
+          stepCount: 40,
+          startedAtUnixMs: 1,
+          updatedAtUnixMs: 2,
+          items: items.slice(0, 20),
+        },
+      ],
+    } as unknown as ExtendedChatThread;
+
+    const stub = toLocalHydrationStub(massiveThread);
+    const serialized = JSON.stringify(stub);
+    expect(serialized.length).toBeLessThanOrEqual(MAX_LOCAL_HYDRATION_STUB_BYTES);
+    expect(stub.items.length).toBeLessThanOrEqual(MAX_LOCAL_HYDRATION_STUB_ITEMS);
+    expect(stub.items[stub.items.length - 1]?.id).toBe('item-59');
+    expect(stub.items[0]?.text?.length).toBeLessThanOrEqual(MAX_LOCAL_HYDRATION_ITEM_TEXT_CHARS);
+    expect(stub.subagentRuns?.[0]?.items).toEqual([]);
+    expect(stub.subagentRuns?.[0]?.stepCount).toBe(40);
+
+    // LRU eviction also removes stale localStorage entries
+    const manyThreads: Record<string, ExtendedChatThread> = {};
+    for (let i = 0; i < MAX_CACHED_THREADS_IN_MEMORY + 3; i += 1) {
+      const id = `t-lru-${i}`;
+      localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, '{}');
+      manyThreads[id] = { id, status: 'idle', items: [] } as unknown as ExtendedChatThread;
+    }
+    pruneThreadsMapLru(manyThreads, []);
+    expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-lru-0`)).toBeNull();
+    expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-lru-1`)).toBeNull();
+    expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-lru-2`)).toBeNull();
+    expect(
+      localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-lru-${MAX_CACHED_THREADS_IN_MEMORY + 2}`)
+    ).toBe('{}');
+
+    // Mid-turn streaming deltas do not write to localStorage until the turn settles
+    vi.useFakeTimers();
+    try {
+      const baseProps = {
+        agentId: null,
+        workspaceId: 'ws-1',
+        draftConfig: { provider: 'antigravity' as const, mode: 'acceptEdits' as const, model: null, effort: null },
+        setThreadsMap: vi.fn(),
+        knownThreadsList: [],
+        setKnownThreadsList: vi.fn(),
+        threadWithResolvedBinding: (t: ExtendedChatThread) => t,
+        attachmentsMapRef: { current: {} },
+        writeAttachments: vi.fn(),
+        isMountedRef: { current: true },
+      };
+      const settled0 = {
+        id: 't-stream',
+        title: 'Stream',
+        status: 'idle',
+        items: [{ id: 'm1', kind: 'assistant', text: 'v0', streaming: false }],
+      } as unknown as ExtendedChatThread;
+
+      const { rerender } = renderHook(
+        ({ threadsMap }) => useChatGridPersistence({ ...baseProps, threadsMap }),
+        { initialProps: { threadsMap: { 't-stream': settled0 } } }
+      );
+      act(() => {
+        vi.advanceTimersByTime(THREAD_LOCAL_PERSIST_DEBOUNCE_MS + 10);
+      });
+      expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-stream`)).toContain('"v0"');
+
+      for (let step = 1; step <= 5; step += 1) {
+        const streamingNext = {
+          id: 't-stream',
+          title: 'Stream',
+          status: 'running',
+          items: [{ id: 'm1', kind: 'assistant', text: `delta-${step}`, streaming: true }],
+        } as unknown as ExtendedChatThread;
+        rerender({ threadsMap: { 't-stream': streamingNext } });
+        act(() => {
+          vi.advanceTimersByTime(THREAD_LOCAL_PERSIST_DEBOUNCE_MS + 10);
+        });
+      }
+      // Still holds the pre-stream 'v0' snapshot; zero mid-turn overwrites occurred
+      expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-stream`)).toContain('"v0"');
+      expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-stream`)).not.toContain('delta-');
+
+      const settledFinal = {
+        id: 't-stream',
+        title: 'Stream',
+        status: 'idle',
+        items: [{ id: 'm1', kind: 'assistant', text: 'settled-final', streaming: false }],
+      } as unknown as ExtendedChatThread;
+      rerender({ threadsMap: { 't-stream': settledFinal } });
+      act(() => {
+        vi.advanceTimersByTime(THREAD_LOCAL_PERSIST_DEBOUNCE_MS + 10);
+      });
+      expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-stream`)).toContain('settled-final');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('evicts dropped thread IDs from lastPersistedThreadsRef so re-added identical references persist again and strips subagentRuns items in summaries', () => {
+    const heavySubagentThread = {
+      id: 't-sub-strip',
+      title: 'Sub Strip',
+      status: 'idle',
+      items: [{ id: 'm1', kind: 'user', text: 'parent msg' }],
+      subagentRuns: [
+        {
+          subagentId: 'sub-1',
+          parentThreadId: 't-sub-strip',
+          parentToolCallId: 'call-1',
+          role: 'Explorer',
+          status: 'completed',
+          stepCount: 2,
+          startedAtUnixMs: 1,
+          updatedAtUnixMs: 2,
+          items: [{ id: 'sub-m1', kind: 'assistant', text: 'subagent heavy step' }],
+        },
+      ],
+    } as unknown as ExtendedChatThread;
+
+    const summary = toThreadSummary(heavySubagentThread);
+    expect(summary.items).toBeUndefined();
+    expect(summary.subagentRuns?.[0]?.items).toEqual([]);
+
+    vi.useFakeTimers();
+    try {
+      const baseProps = {
+        agentId: null,
+        workspaceId: 'ws-1',
+        draftConfig: { provider: 'antigravity' as const, mode: 'acceptEdits' as const, model: null, effort: null },
+        setThreadsMap: vi.fn(),
+        knownThreadsList: [],
+        setKnownThreadsList: vi.fn(),
+        threadWithResolvedBinding: (t: ExtendedChatThread) => t,
+        attachmentsMapRef: { current: {} },
+        writeAttachments: vi.fn(),
+        isMountedRef: { current: true },
+      };
+
+      const tKeep = { id: 't-keep', title: 'Keep', items: [] } as unknown as ExtendedChatThread;
+      const tEvict = { id: 't-evict', title: 'EvictMe', items: [] } as unknown as ExtendedChatThread;
+
+      const { rerender } = renderHook(
+        ({ threadsMap }) => useChatGridPersistence({ ...baseProps, threadsMap }),
+        { initialProps: { threadsMap: { 't-keep': tKeep, 't-evict': tEvict } as Record<string, ExtendedChatThread> } }
+      );
+
+      act(() => {
+        vi.advanceTimersByTime(THREAD_LOCAL_PERSIST_DEBOUNCE_MS + 10);
+      });
+      expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-evict`)).toContain('EvictMe');
+
+      // Simulate LRU eviction: t-evict is dropped from threadsMap and removed from localStorage.
+      localStorage.removeItem(`${CHAT_THREAD_STORAGE_PREFIX}t-evict`);
+      rerender({ threadsMap: { 't-keep': tKeep } });
+
+      // Re-opening the exact same tEvict object reference must see it was evicted from lastPersistedThreadsRef
+      // and write its snapshot back to localStorage.
+      rerender({ threadsMap: { 't-keep': tKeep, 't-evict': tEvict } });
+      act(() => {
+        vi.advanceTimersByTime(THREAD_LOCAL_PERSIST_DEBOUNCE_MS + 10);
+      });
+      expect(localStorage.getItem(`${CHAT_THREAD_STORAGE_PREFIX}t-evict`)).toContain('EvictMe');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies pruneThreadsMapLru and toThreadSummary when handleToggleSplit creates a new thread', async () => {
+    const initialMap: Record<string, ExtendedChatThread> = {};
+    for (let i = 0; i < MAX_CACHED_THREADS_IN_MEMORY; i += 1) {
+      initialMap[`t-${i}`] = {
+        id: `t-${i}`,
+        title: `Thread ${i}`,
+        status: 'idle',
+        items: [],
+      } as unknown as ExtendedChatThread;
+    }
+
+    let currentThreadsMap = initialMap;
+    const setThreadsMap = vi.fn((updater) => {
+      currentThreadsMap = typeof updater === 'function' ? updater(currentThreadsMap) : updater;
+    });
+    let currentKnown: ExtendedChatThread[] = [initialMap['t-0']];
+    const setKnownThreadsList = vi.fn((updater) => {
+      currentKnown = typeof updater === 'function' ? updater(currentKnown) : updater;
+    });
+
+    const createdSplitThread = {
+      id: 't-split-new',
+      title: 'Split New',
+      status: 'idle',
+      items: [{ id: 'm-split', kind: 'user', text: 'SPLIT_FULL_ITEM' }],
+      subagentRuns: [
+        {
+          subagentId: 'sub-split',
+          parentThreadId: 't-split-new',
+          parentToolCallId: 'call-split',
+          role: 'Explorer',
+          status: 'completed',
+          stepCount: 1,
+          startedAtUnixMs: 1,
+          updatedAtUnixMs: 2,
+          items: [{ id: 'sub-item', kind: 'assistant', text: 'SPLIT_SUBAGENT_ITEM' }],
+        },
+      ],
+    } as unknown as ExtendedChatThread;
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd) => {
+      if (cmd === 'create_general_chat') return createdSplitThread;
+      return undefined;
+    });
+
+    const { result } = renderHook(() =>
+      useChatGridPersistence({
+        agentId: null,
+        workspaceId: 'ws-1',
+        draftConfig: { provider: 'antigravity', mode: 'acceptEdits', model: null, effort: null },
+        threadsMap: currentThreadsMap,
+        setThreadsMap,
+        knownThreadsList: currentKnown,
+        setKnownThreadsList,
+        threadWithResolvedBinding: (t) => t,
+        attachmentsMapRef: { current: {} },
+        writeAttachments: vi.fn(),
+        isMountedRef: { current: true },
+        initialGrid: { threadIds: ['t-0'], focusedThreadId: 't-0' },
+      })
+    );
+
+    await act(async () => {
+      await result.current.handleToggleSplit();
+    });
+
+    expect(Object.keys(currentThreadsMap)).toHaveLength(MAX_CACHED_THREADS_IN_MEMORY);
+    expect(currentThreadsMap['t-0']).toBeDefined();
+    expect(currentThreadsMap['t-split-new']).toBeDefined();
+    expect(currentThreadsMap['t-1']).toBeUndefined();
+
+    const addedSummary = currentKnown.find((t) => t.id === 't-split-new');
+    expect(addedSummary).toBeDefined();
+    expect(addedSummary?.items).toBeUndefined();
+    expect(addedSummary?.subagentRuns?.[0]?.items).toEqual([]);
+  });
+
+  it('bounds diffFileContents cache to MAX_DIFF_CONTENTS_CACHE_ENTRIES (24) and voiceSessionStore turnsByThread to MAX_VOICE_HISTORY_THREADS (8)', async () => {
+    expect(MAX_DIFF_CONTENTS_CACHE_ENTRIES).toBe(24);
+    expect(MAX_VOICE_HISTORY_THREADS).toBe(8);
+
+    const fetchContents = vi.fn().mockResolvedValue({
+      oldContent: 'old',
+      newContent: 'new',
+    });
+    const loader = createDiffFileContentsLoader('ws-lru', fetchContents);
+    const makeMeta = (idx: number) =>
+      ({
+        name: `src/file-${idx}.ts`,
+        type: 'change',
+        hunks: [],
+        splitLineCount: 0,
+        unifiedLineCount: 0,
+        deletionLines: ['old'],
+        additionLines: ['new'],
+      }) as unknown as Parameters<typeof loader>[0];
+
+    for (let i = 0; i < MAX_DIFF_CONTENTS_CACHE_ENTRIES; i += 1) {
+      await loader(makeMeta(i));
+    }
+    // Touch file-0 so file-1 becomes the least recently used entry
+    await loader(makeMeta(0));
+    // Insert 25th entry -> must evict file-1
+    await loader(makeMeta(MAX_DIFF_CONTENTS_CACHE_ENTRIES));
+
+    fetchContents.mockClear();
+    await loader(makeMeta(0));
+    await loader(makeMeta(MAX_DIFF_CONTENTS_CACHE_ENTRIES));
+    expect(fetchContents).not.toHaveBeenCalled();
+
+    await loader(makeMeta(1));
+    expect(fetchContents).toHaveBeenCalledTimes(1);
+
+    const createdVoiceThreads: string[] = ['vt-bound'];
+    try {
+      voiceSessionStore.startSession('vt-bound', 'thread');
+      voiceSessionStore.addThreadVoiceTurn('vt-bound', {
+        turnId: 'turn-bound',
+        userPrompt: 'bound prompt',
+        source: 'voz',
+        reply: 'bound reply',
+        createdAt: 1,
+      });
+
+      for (let i = 0; i < MAX_VOICE_HISTORY_THREADS + 2; i += 1) {
+        const tid = `vt-hist-${i}`;
+        createdVoiceThreads.push(tid);
+        voiceSessionStore.addThreadVoiceTurn(tid, {
+          turnId: `turn-${i}`,
+          userPrompt: `prompt ${i}`,
+          source: 'voz',
+          reply: `reply ${i}`,
+          createdAt: 10 + i,
+        });
+      }
+
+      const internalMap = (
+        voiceSessionStore as unknown as { turnsByThread: Record<string, unknown[]> }
+      ).turnsByThread;
+      expect(Object.keys(internalMap).length).toBeLessThanOrEqual(MAX_VOICE_HISTORY_THREADS);
+      expect(internalMap['vt-bound']).toBeDefined();
+      expect(internalMap['vt-hist-0']).toBeUndefined();
+      // Evicted inactive thread still reloads seamlessly from localStorage on demand
+      expect(voiceSessionStore.getThreadVoiceTurns('vt-hist-0')).toHaveLength(1);
+    } finally {
+      voiceSessionStore.stopSession();
+      for (const tid of createdVoiceThreads) {
+        voiceSessionStore.clearThreadVoiceTurns(tid);
+      }
+    }
   });
 });

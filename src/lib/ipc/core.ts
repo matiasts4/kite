@@ -164,14 +164,42 @@ export interface ConnectionSummary {
   lastHttpStatus?: number | null;
 }
 
-export async function listConnections(): Promise<ConnectionSummary[]> {
+const CONNECTIONS_CACHE_TTL_MS = 5000;
+let connectionsCache: { data: ConnectionSummary[]; expiresAt: number } | null = null;
+let connectionsInFlight: Promise<ConnectionSummary[]> | null = null;
+
+export function clearConnectionsCache(): void {
+  connectionsCache = null;
+  connectionsInFlight = null;
+}
+
+export async function listConnections(forceRefresh: boolean = false): Promise<ConnectionSummary[]> {
   if (!isTauriEnvironment()) return [];
-  try {
-    return await invokeCommand<ConnectionSummary[]>('list_connections');
-  } catch (err) {
-    console.warn('[IPC] Failed to list connections:', err);
-    return [];
+  if (!forceRefresh && connectionsCache && Date.now() < connectionsCache.expiresAt) {
+    return connectionsCache.data;
   }
+  if (!forceRefresh && connectionsInFlight) {
+    return connectionsInFlight;
+  }
+  const req = invokeCommand<ConnectionSummary[]>('list_connections')
+    .then((res) => {
+      connectionsCache = {
+        data: res,
+        expiresAt: Date.now() + CONNECTIONS_CACHE_TTL_MS,
+      };
+      return res;
+    })
+    .catch((err) => {
+      console.warn('[IPC] Failed to list connections:', err);
+      return [];
+    })
+    .finally(() => {
+      if (connectionsInFlight === req) {
+        connectionsInFlight = null;
+      }
+    });
+  connectionsInFlight = req;
+  return req;
 }
 
 // Workspaces

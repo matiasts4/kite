@@ -48,7 +48,8 @@ describe('TurnActivityStatus', () => {
     expect(container.querySelector('.chat-turn-activity__thinking')).toBeNull();
     expect(container.querySelector('.chat-working-caption__stage')).toBeNull();
     expect(container.querySelector('.chat-working-row__dots')).toBeNull();
-    expect(container.querySelector('.chat-working-pulse')).not.toBeNull();
+    const runningIndicator = container.querySelector('[data-testid="agent-status-indicator"][data-status="running"]');
+    expect(runningIndicator).not.toBeNull();
     expect(container.querySelector('.chat-working-live')?.textContent).toBe('Working…');
     expect(container.querySelector('.chat-working-caption__clock')).toBeNull();
 

@@ -116,11 +116,12 @@
 }
 
 @keyframes chat-shimmer-sweep {
-  0% {
-    background-position: 200% 0;
-  }
+  0%,
   100% {
-    background-position: -200% 0;
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.58;
   }
 }
 
@@ -364,12 +365,29 @@
   padding-left: 2px;
 }
 
+.chat-working-indicator {
+  flex: none;
+}
+
 .chat-working-pulse,
 .chat-thread-header__status--running i,
 .chat-thread-row__dot.chat-thread-row__dot--running {
+  position: relative;
   display: inline-block;
   border-radius: 9999px;
   background: var(--status-running);
+}
+
+.chat-working-pulse::after,
+.chat-thread-header__status--running i::after,
+.chat-thread-row__dot.chat-thread-row__dot--running::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--status-running);
+  pointer-events: none;
+  will-change: transform, opacity;
   animation: chat-working-ping 1.8s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
 }
 
@@ -396,6 +414,8 @@
 
 .chat-working-live {
   color: var(--text-secondary, #a1a1a1);
+  white-space: nowrap;
+  flex: none;
 }
 
 .chat-thread-row__trailing--running.chat-working-live {
@@ -406,24 +426,24 @@
 .chat-thread-header__clock > span:last-child {
   color: var(--text-tertiary, var(--text-faint, #6e6e6e));
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
 }
 
 @keyframes chat-working-ping {
   0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-running) 55%, transparent);
-    transform: scale(0.9);
+    opacity: 0.55;
+    transform: scale(0.92);
   }
-  45% {
-    transform: scale(1.08);
-  }
-  80%,
+  75%,
   100% {
-    box-shadow: 0 0 0 6px color-mix(in srgb, var(--status-running) 0%, transparent);
-    transform: scale(0.9);
+    opacity: 0;
+    transform: scale(2.15);
   }
 }
 
 .chat-working-caption__stage {
+  flex: 1 1 auto;
   min-width: 0;
   max-width: min(46ch, 100%);
   overflow: hidden;
@@ -454,42 +474,25 @@
   }
 }
 
-.chat-activity-shine {
+.chat-working-live {
   color: var(--text-secondary, #a1a1a1);
+  will-change: opacity;
+  animation: chat-shimmer-sweep 2.2s ease-in-out infinite;
 }
 
-@supports ((-webkit-background-clip: text) or (background-clip: text)) {
-  .chat-working-live {
-    background-image: linear-gradient(
-      100deg,
-      currentColor 0%,
-      currentColor 35%,
-      var(--text-primary, #fafafa) 50%,
-      currentColor 65%,
-      currentColor 100%
-    );
-    background-size: 200% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: chat-shimmer-sweep 2.2s linear infinite;
-  }
+.chat-activity-shine {
+  color: var(--text-secondary, #a1a1a1);
+  will-change: opacity;
+  animation: chat-shimmer-sweep 2.2s ease-in-out infinite;
+}
 
-  .chat-activity-shine {
-    background-image: linear-gradient(
-      100deg,
-      var(--text-secondary, #a1a1a1) 0%,
-      var(--text-secondary, #a1a1a1) 38%,
-      var(--text-primary, #fafafa) 50%,
-      var(--text-secondary, #a1a1a1) 62%,
-      var(--text-secondary, #a1a1a1) 100%
-    );
-    background-size: 200% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: chat-shimmer-sweep 2.2s linear infinite;
-  }
+html[data-window-state='minimized'] .chat-working-pulse::after,
+html[data-window-state='minimized'] .chat-thread-header__status--running i::after,
+html[data-window-state='minimized'] .chat-thread-row__dot.chat-thread-row__dot--running::after,
+html[data-window-state='minimized'] .chat-working-live,
+html[data-window-state='minimized'] .chat-activity-shine,
+html[data-window-state='minimized'] .live-tool-shine {
+  animation-play-state: paused !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -501,8 +504,11 @@
     background: none;
   }
   .chat-working-pulse,
+  .chat-working-pulse::after,
   .chat-thread-header__status--running i,
-  .chat-thread-row__dot.chat-thread-row__dot--running {
+  .chat-thread-header__status--running i::after,
+  .chat-thread-row__dot.chat-thread-row__dot--running,
+  .chat-thread-row__dot.chat-thread-row__dot--running::after {
     animation: none;
   }
   .chat-working-caption__stage {

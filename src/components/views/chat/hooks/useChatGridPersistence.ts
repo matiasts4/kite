@@ -9,6 +9,9 @@ export const CHAT_SUMMARIES_STORAGE_KEY = 'kite.chat.summaries.v1';
 export const CHAT_THREAD_STORAGE_PREFIX = 'kite.chat.thread.';
 export const MAX_CACHED_THREADS_IN_MEMORY = 8;
 export const THREAD_LOCAL_PERSIST_DEBOUNCE_MS = 350;
+export const MAX_LOCAL_HYDRATION_STUB_ITEMS = 25;
+export const MAX_LOCAL_HYDRATION_ITEM_TEXT_CHARS = 3_000;
+export const MAX_LOCAL_HYDRATION_STUB_BYTES = 150 * 1024;
 
 function stripAttachmentPreview(att: ChatAttachment): ChatAttachment {
   if (!att || !att.previewDataUrl) return att;
@@ -63,12 +66,75 @@ export function stripExternalizedAttachmentPreviews(
 }
 
 /**
- * Strips heavy transcript `items[]` and inline attachment data URLs before storing
- * a thread in `knownThreadsList` or `localStorage['kite.chat.summaries.v1']`.
+ * Builds a bounded hydration stub (`< 150 KB` serialized) for `localStorage` so
+ * first-frame cold boot renders the recent tail while `kite.sqlite` remains the
+ * durable source of truth for full transcripts and subagent step histories.
+ */
+export function toLocalHydrationStub(thread: ExtendedChatThread): ExtendedChatThread {
+  const sanitized = stripExternalizedAttachmentPreviews(thread);
+  const rawItems = Array.isArray(sanitized.items) ? sanitized.items : [];
+  const trimItems = (maxItems: number, maxChars: number) => {
+    const tail = rawItems.length > maxItems ? rawItems.slice(rawItems.length - maxItems) : rawItems;
+    return tail.map((item) => {
+      const text = typeof item.text === 'string' && item.text.length > maxChars
+        ? item.text.slice(0, maxChars)
+        : item.text;
+      const detail = typeof item.detail === 'string' && item.detail.length > maxChars
+        ? item.detail.slice(0, maxChars)
+        : item.detail;
+      if (text === item.text && detail === item.detail) return item;
+      return { ...item, text, detail };
+    });
+  };
+  const slimRuns = Array.isArray(sanitized.subagentRuns)
+    ? sanitized.subagentRuns.map((run) =>
+        Array.isArray(run.items) && run.items.length === 0 ? run : { ...run, items: [] }
+      )
+    : sanitized.subagentRuns;
+
+  let stub: ExtendedChatThread = {
+    ...sanitized,
+    items: trimItems(MAX_LOCAL_HYDRATION_STUB_ITEMS, MAX_LOCAL_HYDRATION_ITEM_TEXT_CHARS),
+    ...(slimRuns !== undefined ? { subagentRuns: slimRuns } : {}),
+  };
+
+  try {
+    if (JSON.stringify(stub).length > MAX_LOCAL_HYDRATION_STUB_BYTES) {
+      stub = {
+        ...stub,
+        items: trimItems(8, 1_000),
+      };
+    }
+  } catch {}
+  return stub;
+}
+
+/**
+ * Strips heavy transcript `items[]`, queued runs, and subagent step `items[]`
+ * before storing a thread in `knownThreadsList` or `localStorage['kite.chat.summaries.v1']`.
  */
 export function toThreadSummary(thread: ExtendedChatThread): ExtendedChatThread {
-  const { items: _droppedItems, queuedRuns: _droppedQueue, ...rest } = thread;
-  return rest as ExtendedChatThread;
+  const { items: _droppedItems, queuedRuns: _droppedQueue, subagentRuns, ...rest } = thread;
+  if (!Array.isArray(subagentRuns)) {
+    return rest as ExtendedChatThread;
+  }
+  const slimRuns = subagentRuns.map((run) =>
+    Array.isArray(run.items) && run.items.length === 0 ? run : { ...run, items: [] }
+  );
+  return { ...rest, subagentRuns: slimRuns } as ExtendedChatThread;
+}
+
+function prunePersistedThreadsCache(
+  cache: Record<string, ExtendedChatThread>,
+  liveThreadsMap: Record<string, ExtendedChatThread>,
+  dirtySet?: Set<string>
+): void {
+  for (const cachedId of Object.keys(cache)) {
+    if (!Object.prototype.hasOwnProperty.call(liveThreadsMap, cachedId)) {
+      delete cache[cachedId];
+      dirtySet?.delete(cachedId);
+    }
+  }
 }
 
 /**
@@ -98,6 +164,13 @@ export function pruneThreadsMapLru(
   if (excess <= 0 || evictable.length === 0) return map;
 
   const toDrop = new Set(evictable.slice(0, excess));
+  if (typeof localStorage !== 'undefined') {
+    for (const droppedId of toDrop) {
+      try {
+        localStorage.removeItem(`${CHAT_THREAD_STORAGE_PREFIX}${droppedId}`);
+      } catch {}
+    }
+  }
   const next: Record<string, ExtendedChatThread> = {};
   for (const key of keys) {
     if (!toDrop.has(key)) {
@@ -112,13 +185,24 @@ export interface SavedGridState {
   focusedThreadId: string | null;
 }
 
+export function threadMatchesAgentScope(
+  thread: ExtendedChatThread | null | undefined,
+  agentId?: string | null
+): boolean {
+  if (!thread || !thread.id) return false;
+  if (!agentId) return true;
+  return (thread.profileId ?? null) === agentId;
+}
+
 export const readCachedChatSummaries = (agentId?: string | null): ExtendedChatThread[] => {
   try {
     const raw = localStorage.getItem(CHAT_SUMMARIES_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    const typed = parsed.filter((t): t is ExtendedChatThread => Boolean(t && t.id));
+    const typed = parsed
+      .filter((t): t is ExtendedChatThread => Boolean(t && t.id))
+      .map(toThreadSummary);
     if (agentId) {
       return sortAgentSummariesByTabOrder(typed.filter((t) => t.profileId === agentId));
     }
@@ -177,8 +261,10 @@ export const hydrateInitialChatState = (
   const threadsMap: Record<string, ExtendedChatThread> = {};
 
   if (agentId) {
-    const first = summaries[0];
-    const cached = first?.id ? readCachedThread(first.id) : null;
+    const preferred =
+      (initialThreadId ? summaries.find((s) => s.id === initialThreadId) : undefined) ?? summaries[0];
+    const rawCached = preferred?.id ? readCachedThread(preferred.id) : null;
+    const cached = threadMatchesAgentScope(rawCached, agentId) ? rawCached : null;
     if (cached) {
       threadsMap[cached.id] = cached;
       return {
@@ -303,7 +389,7 @@ export const loadChatSummariesWithFallback = async (
       ? await invokeCommand<{ summaries: ExtendedChatThread[] }>('list_agent_chat_summaries', { agentId })
       : await invokeCommand<{ summaries: ExtendedChatThread[] }>('list_chat_summaries');
     if (hist && Array.isArray(hist.summaries)) {
-      summaries = hist.summaries;
+      summaries = hist.summaries.map(toThreadSummary);
       ipcSucceeded = true;
     }
   } catch (err) {
@@ -359,13 +445,19 @@ export const loadThreadWithFallback = async (
 ): Promise<ExtendedChatThread | null> => {
   try {
     const t = agentId
-      ? await invokeCommand<ExtendedChatThread>('load_agent_chat_thread', { agentId, threadId: tid })
-      : await invokeCommand<ExtendedChatThread>('load_chat_thread', { threadId: tid });
-    if (t && t.id) return normalizeLoadedThread(t);
+      ? await invokeCommand<ExtendedChatThread | null>('load_agent_chat_thread', { agentId, threadId: tid })
+      : await invokeCommand<ExtendedChatThread | null>('load_chat_thread', { threadId: tid });
+    if (t === null) {
+      return null;
+    }
+    if (t && t.id) {
+      return threadMatchesAgentScope(t, agentId) ? normalizeLoadedThread(t) : null;
+    }
   } catch {
     // Fall back to localStorage if IPC fails or thread is offline
   }
-  return readCachedThread(tid);
+  const cached = readCachedThread(tid);
+  return threadMatchesAgentScope(cached, agentId) ? cached : null;
 };
 
 export interface UseChatGridPersistenceOptions {
@@ -417,6 +509,10 @@ export function useChatGridPersistence({
   };
 
   const persistGrid = async (ids: string[], focused: string | null) => {
+    if (agentId) {
+      await persistAgentTabOrder(ids);
+      return;
+    }
     if (!focused && ids.length > 0) focused = ids[0];
     try {
       localStorage.setItem(CHAT_GRID_STORAGE_KEY, JSON.stringify({ threadIds: ids, focusedThreadId: focused }));
@@ -457,9 +553,22 @@ export function useChatGridPersistence({
               });
           if (!isMountedRef.current) return;
           const boundThread = threadWithResolvedBinding(newThread);
-          setThreadsMap((prev) => ({ ...prev, [newThread.id]: boundThread }));
-          setKnownThreadsList((prev) => [boundThread, ...prev]);
           const nextGrid = [...gridThreadIds, newThread.id];
+          setThreadsMap((prev) => {
+            const { [newThread.id]: _reordered, ...rest } = prev;
+            const updated = { ...rest, [newThread.id]: boundThread };
+            const protectedIds = [
+              ...nextGrid,
+              ...(focusedThreadId ? [focusedThreadId] : []),
+              newThread.id,
+            ];
+            return pruneThreadsMapLru(updated, protectedIds);
+          });
+          const summaryThread = toThreadSummary(boundThread);
+          setKnownThreadsList((prev) => [
+            summaryThread,
+            ...prev.filter((t) => t.id !== newThread.id),
+          ]);
           setGridThreadIds(nextGrid);
           void persistGrid(nextGrid, focusedThreadId);
         } catch (err) {
@@ -520,6 +629,7 @@ export function useChatGridPersistence({
 
   useEffect(() => {
     const prev = lastPersistedThreadsRef.current;
+    prunePersistedThreadsCache(prev, threadsMap, dirtyThreadIdsRef.current);
     for (const [id, thread] of Object.entries(threadsMap)) {
       if (id && thread && prev[id] !== thread) {
         dirtyThreadIdsRef.current.add(id);
@@ -530,15 +640,28 @@ export function useChatGridPersistence({
     const flushDirty = () => {
       const pending = Array.from(dirtyThreadIdsRef.current);
       if (pending.length === 0) return;
-      dirtyThreadIdsRef.current.clear();
       const current = latestThreadsMapRef.current;
       const nextPersisted = { ...lastPersistedThreadsRef.current };
+      prunePersistedThreadsCache(nextPersisted, current, dirtyThreadIdsRef.current);
       for (const id of pending) {
         const thread = current[id];
-        if (!thread) continue;
+        if (!thread) {
+          delete nextPersisted[id];
+          dirtyThreadIdsRef.current.delete(id);
+          continue;
+        }
+        const isStreamingTurn =
+          thread.status === 'running' ||
+          (Array.isArray(thread.items) && thread.items.some((it) => Boolean(it?.streaming)));
+        // Defer mid-turn streaming writes until the turn settles so 350ms deltas never
+        // block the UI thread with synchronous JSON.stringify + localStorage writes.
+        if (isStreamingTurn && nextPersisted[id] !== undefined) {
+          continue;
+        }
+        dirtyThreadIdsRef.current.delete(id);
         try {
-          const sanitized = stripExternalizedAttachmentPreviews(thread);
-          localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, JSON.stringify(sanitized));
+          const stub = toLocalHydrationStub(thread);
+          localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, JSON.stringify(stub));
           nextPersisted[id] = thread;
         } catch {}
       }
@@ -554,15 +677,16 @@ export function useChatGridPersistence({
   useEffect(() => {
     return () => {
       const pending = Array.from(dirtyThreadIdsRef.current);
-      if (pending.length === 0) return;
       dirtyThreadIdsRef.current.clear();
       const current = latestThreadsMapRef.current;
+      lastPersistedThreadsRef.current = {};
+      if (pending.length === 0) return;
       for (const id of pending) {
         const thread = current[id];
         if (!thread) continue;
         try {
-          const sanitized = stripExternalizedAttachmentPreviews(thread);
-          localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, JSON.stringify(sanitized));
+          const stub = toLocalHydrationStub(thread);
+          localStorage.setItem(`${CHAT_THREAD_STORAGE_PREFIX}${id}`, JSON.stringify(stub));
         } catch {}
       }
     };

@@ -37,9 +37,39 @@ export interface ActiveAgentTerminal {
   updatedAt: number;
 }
 
+export const MAX_TERMINAL_REGISTRY_HISTORY = 128;
+
 const terminalsMap = new Map<string, ActiveAgentTerminal>();
 const exitedSessionIds = new Set<string>();
 const STORAGE_KEY = 'kite_active_agent_terminals_v1';
+
+function addBoundedSetEntry(
+  set: Set<string>,
+  value: string,
+  maxEntries: number = MAX_TERMINAL_REGISTRY_HISTORY,
+): void {
+  if (set.has(value)) return;
+  set.add(value);
+  while (set.size > maxEntries) {
+    const oldest = set.values().next().value;
+    if (oldest === undefined) break;
+    set.delete(oldest);
+  }
+}
+
+function setBoundedMapEntry<K, V>(
+  map: Map<K, V>,
+  key: K,
+  value: V,
+  maxEntries: number = MAX_TERMINAL_REGISTRY_HISTORY,
+): void {
+  map.set(key, value);
+  while (map.size > maxEntries) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
 
 // Timing constants (ms) for terminalRuntime & paneActivity
 const SETTLE_DELAY_MS = 2000; // Silence required before evaluating if agent is paused at user prompt
@@ -473,6 +503,16 @@ export function isBlockedOnQuestionOrApproval(buffer: string): boolean {
 
 const lastPublishedPresence = new Map<string, string>();
 
+export function getTerminalRegistryHistoryCounts(): {
+  exitedSessionIds: number;
+  lastPublishedPresence: number;
+} {
+  return {
+    exitedSessionIds: exitedSessionIds.size,
+    lastPublishedPresence: lastPublishedPresence.size,
+  };
+}
+
 function mapPaneToPresence(sessionId: string, state: string | undefined): string | undefined {
   switch (state) {
     case 'idle':
@@ -504,7 +544,7 @@ function publishObservedPresence(sessionId: string, state: string | undefined): 
   const mapped = mapPaneToPresence(sessionId, state);
   if (!sessionId || !mapped) return;
   if (lastPublishedPresence.get(sessionId) === mapped) return;
-  lastPublishedPresence.set(sessionId, mapped);
+  setBoundedMapEntry(lastPublishedPresence, sessionId, mapped);
   if (!inNativeApp()) return;
   const tracker = sessionStates.get(sessionId);
   const tail = tracker?.rollingBuffer;
@@ -797,7 +837,7 @@ export function registerSpawnedTerminal(
 
 export function markTerminalExited(sessionId: string) {
   if (!sessionId) return;
-  exitedSessionIds.add(sessionId);
+  addBoundedSetEntry(exitedSessionIds, sessionId);
   const tracker = sessionStates.get(sessionId);
   if (tracker?.settleTimer) {
     clearTimeout(tracker.settleTimer);

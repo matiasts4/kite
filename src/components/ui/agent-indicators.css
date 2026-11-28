@@ -467,6 +467,22 @@
   }
 }
 
+html[data-window-state='minimized'] .agent-activity-pulse-aura__ring,
+html[data-window-state='minimized'] .agent-activity-pulse-aura__core,
+html[data-window-state='minimized'] .agent-activity-signal-bars__bar,
+html[data-window-state='minimized'] .agent-activity-matrix-grid__cell,
+html[data-window-state='minimized'] .agent-activity-kite-diamond__frame,
+html[data-window-state='minimized'] .agent-activity-kite-diamond__core,
+html[data-window-state='minimized'] .agent-activity-matrix-3x3__cell,
+html[data-window-state='minimized'] .agent-activity-wave-dots__dot,
+html[data-window-state='minimized'] .agent-activity-radar-sweep__arc,
+html[data-window-state='minimized'] .agent-activity-chevron-flow__arm,
+html[data-window-state='minimized'] .agent-dot-bounce__dot,
+html[data-window-state='minimized'] .agent-status-attention__ping,
+html[data-window-state='minimized'] .agent-avatar--running circle[data-avatar-badge="true"] {
+  animation-play-state: paused !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .agent-activity-pulse-aura__ring,
   .agent-activity-pulse-aura__core,

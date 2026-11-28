@@ -1,5 +1,10 @@
-import type { OperatorConfig } from '../config/types';
-import { loadOperatorConfig, saveOperatorConfig } from '../config/storage';
+import type { OperatorConfig, RealtimeProviderId } from '../config/types';
+import {
+  loadOperatorConfig,
+  sanitizeRealtimeProvider,
+  sanitizeVoiceIdleTimeoutSec,
+  saveOperatorConfig,
+} from '../config/storage';
 import { invokeCommand, isTauriEnvironment } from '../../ipc';
 
 export const AUDIO_SETTINGS_CHANGED_EVENT = 'kite:audio-settings-changed';
@@ -13,6 +18,8 @@ export interface UnifiedAudioSettings {
   ttsEngine: OperatorConfig['ttsEngine'];
   ttsRate: number;
   voiceTransportMode: 'cascaded' | 'realtime';
+  realtimeProvider: RealtimeProviderId;
+  voiceIdleTimeoutSec: number;
 }
 
 const listeners = new Set<(next: UnifiedAudioSettings) => void>();
@@ -47,6 +54,8 @@ export function readUnifiedAudioSettings(): UnifiedAudioSettings {
     ttsEngine: cfg.ttsEngine,
     ttsRate: cfg.ttsRate,
     voiceTransportMode: cfg.voiceTransportMode ?? 'cascaded',
+    realtimeProvider: sanitizeRealtimeProvider(cfg.realtimeProvider),
+    voiceIdleTimeoutSec: sanitizeVoiceIdleTimeoutSec(cfg.voiceIdleTimeoutSec),
   };
 }
 
@@ -75,6 +84,12 @@ export async function updateUnifiedAudioSettings(
   if (patch.voiceTransportMode !== undefined) {
     cfgPatch.voiceTransportMode = patch.voiceTransportMode;
   }
+  if (patch.realtimeProvider !== undefined) {
+    cfgPatch.realtimeProvider = sanitizeRealtimeProvider(patch.realtimeProvider);
+  }
+  if (patch.voiceIdleTimeoutSec !== undefined) {
+    cfgPatch.voiceIdleTimeoutSec = sanitizeVoiceIdleTimeoutSec(patch.voiceIdleTimeoutSec);
+  }
   if (Object.keys(cfgPatch).length > 0) {
     saveOperatorConfig(cfgPatch);
   }
@@ -89,10 +104,13 @@ export async function updateUnifiedAudioSettings(
           outputDeviceId: next.outputDeviceId === 'automatic' ? null : next.outputDeviceId,
           language: next.language,
           voiceTransportMode: next.voiceTransportMode,
+          realtimeProvider: next.realtimeProvider,
+          voiceIdleTimeoutSec: next.voiceIdleTimeoutSec,
         },
       });
-    } catch {
+    } catch (err) {
       // keep local synchronization authoritative even if IPC is unavailable
+      console.warn('[audioSettingsSync] Failed to sync update_dictation_settings via IPC:', err);
     }
   }
 

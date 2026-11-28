@@ -5,7 +5,12 @@ import {
   subscribeUnifiedAudioSettings,
   updateUnifiedAudioSettings,
 } from './audioSettingsSync';
-import { loadOperatorConfig } from '../config/storage';
+import {
+  DEFAULT_OPERATOR_CONFIG,
+  OPERATOR_CONFIG_STORAGE_KEY,
+  loadOperatorConfig,
+  saveOperatorConfig,
+} from '../config/storage';
 import * as ipc from '../../ipc';
 
 vi.mock('../../ipc', async () => {
@@ -78,5 +83,114 @@ describe('audioSettingsSync (T8 — Unified Audio/Dictation/Voice Source of Trut
 
     window.removeEventListener(AUDIO_SETTINGS_CHANGED_EVENT, eventSpy);
     unsub();
+  });
+
+  it('hydrates legacy stored OperatorConfig without dropping existing keys and sanitizes new realtime/idle/volume fields', () => {
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        activeProvider: 'grok',
+        grokApiKey: 'xai-legacy-key',
+        voiceTransportMode: 'realtime',
+        ttsRate: 1.2,
+      })
+    );
+
+    const hydrated = loadOperatorConfig();
+    expect(hydrated.activeProvider).toBe('grok');
+    expect(hydrated.grokApiKey).toBe('xai-legacy-key');
+    expect(hydrated.voiceTransportMode).toBe('realtime');
+    expect(hydrated.ttsRate).toBe(1.2);
+    expect(hydrated.realtimeProvider).toBe('xai');
+    expect(hydrated.voiceIdleTimeoutSec).toBe(180);
+    expect(hydrated.voiceVolume).toBe(100);
+    expect(hydrated.geminiLiveApiKey).toBe('');
+    expect(hydrated.openaiRealtimeApiKey).toBe('');
+
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_OPERATOR_CONFIG,
+        realtimeProvider: 'invalid-provider',
+        voiceIdleTimeoutSec: 999,
+        voiceVolume: 250,
+      })
+    );
+    const sanitized = loadOperatorConfig();
+    expect(sanitized.realtimeProvider).toBe('xai');
+    expect(sanitized.voiceIdleTimeoutSec).toBe(180);
+    expect(sanitized.voiceVolume).toBe(100);
+
+    const saved = saveOperatorConfig({
+      realtimeProvider: 'gemini_live',
+      geminiLiveApiKey: 'AIza-saved',
+      openaiRealtimeApiKey: 'sk-saved',
+      voiceIdleTimeoutSec: 0,
+      voiceVolume: -15,
+    });
+    expect(saved.realtimeProvider).toBe('gemini_live');
+    expect(saved.geminiLiveApiKey).toBe('AIza-saved');
+    expect(saved.openaiRealtimeApiKey).toBe('sk-saved');
+    expect(saved.voiceIdleTimeoutSec).toBe(0);
+    expect(saved.voiceVolume).toBe(0);
+  });
+
+  it('hydrates and persists realtimeProvider and voiceIdleTimeoutSec through UnifiedAudioSettings and dictation IPC', async () => {
+    const first = await updateUnifiedAudioSettings({
+      realtimeProvider: 'gemini_live',
+      voiceIdleTimeoutSec: 300,
+    });
+
+    expect(first.realtimeProvider).toBe('gemini_live');
+    expect(first.voiceIdleTimeoutSec).toBe(300);
+
+    expect(readUnifiedAudioSettings()).toEqual(
+      expect.objectContaining({
+        realtimeProvider: 'gemini_live',
+        voiceIdleTimeoutSec: 300,
+      })
+    );
+    expect(loadOperatorConfig()).toEqual(
+      expect.objectContaining({
+        realtimeProvider: 'gemini_live',
+        voiceIdleTimeoutSec: 300,
+      })
+    );
+    expect(ipc.invokeCommand).toHaveBeenCalledWith(
+      'update_dictation_settings',
+      expect.objectContaining({
+        settings: expect.objectContaining({
+          realtimeProvider: 'gemini_live',
+          voiceIdleTimeoutSec: 300,
+        }),
+      })
+    );
+
+    const disabled = await updateUnifiedAudioSettings({
+      realtimeProvider: 'openai',
+      voiceIdleTimeoutSec: 0,
+    });
+    expect(disabled.realtimeProvider).toBe('openai');
+    expect(disabled.voiceIdleTimeoutSec).toBe(0);
+    expect(readUnifiedAudioSettings().voiceIdleTimeoutSec).toBe(0);
+  });
+
+  it('logs console.warn and preserves local state when update_dictation_settings IPC fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.mocked(ipc.invokeCommand).mockRejectedValueOnce(new Error('ipc_unavailable'));
+
+    const next = await updateUnifiedAudioSettings({
+      realtimeProvider: 'openai',
+      voiceIdleTimeoutSec: 60,
+    });
+
+    expect(next.realtimeProvider).toBe('openai');
+    expect(next.voiceIdleTimeoutSec).toBe(60);
+    expect(loadOperatorConfig().realtimeProvider).toBe('openai');
+    expect(loadOperatorConfig().voiceIdleTimeoutSec).toBe(60);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('[audioSettingsSync]'),
+      expect.any(Error)
+    );
   });
 });

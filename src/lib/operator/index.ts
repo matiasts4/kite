@@ -28,7 +28,10 @@ import { runLedger } from './runLedger';
 import { getActiveAgentTerminals } from '../terminalRegistry';
 import type { PlannerProvider, ProviderMessage } from './providers/types';
 import { resolveTieredPlannerProviders } from './providers/resolvePlanner';
-import { zedAssistantFailureMessage } from './assistantFailureNotice';
+import {
+  extractSafeFailureDetail,
+  zedAssistantFailureMessage,
+} from './assistantFailureNotice';
 import { voiceSessionStore } from './voice/voiceSessionStore';
 import { consumeSpeculativeTurnContext } from './voice/zedVoice';
 import {
@@ -592,10 +595,33 @@ export async function runOperatorTurn(
     }
     const execution = await executePlan(plan, context, turnId);
     const receipts = [...accumulatedPeekReceipts, ...execution.receipts];
-    const reply = isSilentTurn
-      ? ''
-      : execution.reply || composeReplyFromReceipts(plan, execution.receipts);
-    const overallSuccess = execution.overallSuccess;
+    const durationMs = Date.now() - startTime;
+    const providerFailure = zedAssistantFailureMessage({
+      strategy: plan.strategy,
+      fallbackReason: plan.fallbackReason,
+      actionCount: plan.actions.length,
+      providerId: provider.id,
+    });
+    const hasEmptyFallbackFailure =
+      plan.strategy === 'heuristic-fallback' &&
+      execution.receipts.length === 0 &&
+      !plan.answer &&
+      !plan.reply;
+
+    let reply = '';
+    if (!isSilentTurn) {
+      if (hasEmptyFallbackFailure && (providerFailure || plan.fallbackReason?.trim())) {
+        const baseNotice =
+          providerFailure || 'El asistente no respondió. La orden no se pudo procesar.';
+        const safeDetail = extractSafeFailureDetail(plan.fallbackReason);
+        const appendDetail =
+          Boolean(safeDetail) && !baseNotice.toLowerCase().includes(safeDetail.toLowerCase());
+        reply = appendDetail ? `${baseNotice} (${safeDetail})` : baseNotice;
+      } else {
+        reply = execution.reply || composeReplyFromReceipts(plan, execution.receipts);
+      }
+    }
+    const overallSuccess = hasEmptyFallbackFailure ? false : execution.overallSuccess;
 
     // S3.3: Automatically open a 12s hands-free reply window when proposing/refining or asking a question
     const hasProposalInteraction = plan.actions.some(
@@ -639,13 +665,6 @@ export async function runOperatorTurn(
         console.warn('[Operator] TTS speech failed:', ttsErr);
       }
     }
-
-    const durationMs = Date.now() - startTime;
-    const providerFailure = zedAssistantFailureMessage({
-      strategy: plan.strategy,
-      fallbackReason: plan.fallbackReason,
-      actionCount: plan.actions.length,
-    });
 
     const turnResult: OperatorTurnResult = {
       turnId,

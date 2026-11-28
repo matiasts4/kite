@@ -280,3 +280,62 @@ export const GROK_CHAT_MODEL_OPTIONS = [
   { id: 'grok-4.5', label: 'Grok 4.5' },
   { id: 'grok-3-mini-fast', label: 'Grok 3 Mini Fast (legacy)' },
 ] as const;
+
+export const ANTIGRAVITY_MODEL_CATALOG: OpenCodeModelOption[] = [
+  {
+    id: 'gemini-4-hydrogen-low',
+    label: 'Gemini 4 Hydrogen (Low) · Recomendado',
+    badge: 'Ultra-Fast',
+    tier: 'Subscription · Fast',
+    description: 'Menor latencia medida (~2.5s en caliente) y formato JSON sólido para conversar y delegar tareas.',
+  },
+  {
+    id: 'gemini-4-hydrogen-medium',
+    label: 'Gemini 4 Hydrogen (Medium)',
+    badge: 'Balanced',
+    tier: 'Subscription · Balanced',
+    description: 'Balance entre velocidad y profundidad para coordinar tareas multi-paso.',
+  },
+  {
+    id: 'gemini-4-hydrogen-high',
+    label: 'Gemini 4 Hydrogen (High)',
+    badge: 'Deep Reasoning',
+    tier: 'Subscription · Pro',
+    description: 'Mayor razonamiento sobre el mismo modelo base para planificación compleja.',
+  },
+  {
+    id: 'gemini-3.8-flash-low',
+    label: 'Gemini 3.8 Flash (Low)',
+    badge: 'Fast Flash',
+    tier: 'Subscription · Fast',
+    description: 'Variante Flash liviana heredada para turnos breves.',
+  },
+  {
+    id: 'gemini-4-carbon-low',
+    label: 'Gemini 4 Carbon (Low)',
+    badge: 'Carbon Fast',
+    tier: 'Subscription · Balanced',
+    description: 'Alternativa Gemini 4 Carbon en esfuerzo bajo.',
+  },
+  {
+    id: 'gemini-4-neon-low',
+    label: 'Gemini 4 Neon (Low)',
+    badge: 'Neon Fast',
+    tier: 'Subscription · Balanced',
+    description: 'Alternativa Gemini 4 Neon en esfuerzo bajo.',
+  },
+  {
+    id: 'gemini-4-argon-low',
+    label: 'Gemini 4 Argon (Low)',
+    badge: 'Argon Fast',
+    tier: 'Subscription · Pro',
+    description: 'Alternativa Gemini 4 Argon en esfuerzo bajo.',
+  },
+  {
+    id: 'claude-sonnet-5-5-low',
+    label: 'Claude Sonnet 5.5 (Low)',
+    badge: 'Claude',
+    tier: 'Subscription · Balanced',
+    description: 'Modelo Claude de la suscripción Antigravity en esfuerzo bajo.',
+  },
+];

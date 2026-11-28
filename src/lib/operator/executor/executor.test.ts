@@ -991,3 +991,150 @@ describe('T17 / S9-S10 — Spoken summary separation & real Thread/Subagent/Agen
     expect(result.reply).toContain('ODD de notificaciones');
   });
 });
+
+describe('T9/S4.2 — Parallel DAG action wave execution', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.mocked(invokeCommand).mockResolvedValue({} as any);
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    (window as any).__kiteCodeWorkspaceMounted = true;
+  });
+
+  it('executes contiguous peek_* actions concurrently via Promise.allSettled and preserves actionIdx ordering', async () => {
+    const events: string[] = [];
+    const { ctxClient } = await import('../context/ctxClient');
+
+    vi.spyOn(ctxClient, 'readCompact').mockImplementation(async (path: string) => {
+      events.push(`start:${path}`);
+      await new Promise((r) => setTimeout(r, path === 'src/slow.ts' ? 45 : 5));
+      events.push(`end:${path}`);
+      return { path, mode: 'signatures', content: `// ${path}`, source: 'fallback' };
+    });
+
+    const plan: OperatorPlan = {
+      strategy: 'llm',
+      actions: [
+        { type: 'peek_files', path: 'src/slow.ts', mode: 'signatures' },
+        { type: 'peek_runs', limit: 5 },
+        { type: 'peek_files', path: 'src/fast.ts', mode: 'signatures' },
+      ],
+    };
+
+    const res = await executePlan(plan, { workspaceId: 'ws-1' }, 'turn-dag-peek');
+
+    expect(res.overallSuccess).toBe(true);
+    expect(res.receipts.map((r) => [r.actionIdx, r.type])).toEqual([
+      [0, 'peek_files'],
+      [1, 'peek_runs'],
+      [2, 'peek_files'],
+    ]);
+    expect((res.receipts[0].data as any)?.path).toBe('src/slow.ts');
+    expect((res.receipts[2].data as any)?.path).toBe('src/fast.ts');
+    // Concurrent execution: fast file starts and ends while slow file is still awaiting.
+    const startSlowIdx = events.indexOf('start:src/slow.ts');
+    const startFastIdx = events.indexOf('start:src/fast.ts');
+    const endFastIdx = events.indexOf('end:src/fast.ts');
+    const endSlowIdx = events.indexOf('end:src/slow.ts');
+    expect(startSlowIdx).toBeGreaterThanOrEqual(0);
+    expect(startFastIdx).toBeGreaterThan(startSlowIdx);
+    expect(endFastIdx).toBeLessThan(endSlowIdx);
+  });
+
+  it('executes multiple independent spawn_subagent actions in parallel and preserves actionIdx ordering', async () => {
+    const events: string[] = [];
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'dispatch_run') {
+        const role = args?.role || 'unknown';
+        events.push(`start:${role}`);
+        await new Promise((r) => setTimeout(r, role === 'Alpha' ? 40 : 5));
+        events.push(`end:${role}`);
+        return { status: 'submitted', address: `thread:child-${role}` };
+      }
+      return {};
+    });
+
+    const plan: OperatorPlan = {
+      strategy: 'llm',
+      actions: [
+        { type: 'spawn_subagent', role: 'Alpha', task: 'Primera tarea', provider: 'claude' },
+        { type: 'spawn_subagent', role: 'Beta', task: 'Segunda tarea', provider: 'grok' },
+      ],
+    };
+
+    const res = await executePlan(plan, { workspaceId: 'ws-1', mode: 'thread' }, 'turn-dag-subagents');
+
+    expect(res.overallSuccess).toBe(true);
+    expect(res.receipts.map((r) => [r.actionIdx, (r.data as any)?.role])).toEqual([
+      [0, 'Alpha'],
+      [1, 'Beta'],
+    ]);
+    expect(events.indexOf('start:Beta')).toBeLessThan(events.indexOf('end:Alpha'));
+    expect(events.indexOf('end:Beta')).toBeLessThan(events.indexOf('end:Alpha'));
+  });
+
+  it('treats stateful actions (propose_task / switch_workspace) as wave barriers across parallel waves', async () => {
+    const events: string[] = [];
+    const { voiceSessionStore } = await import('../voice/voiceSessionStore');
+    const { ctxClient } = await import('../context/ctxClient');
+    voiceSessionStore.startSession('voice-barrier-1', 'thread');
+
+    vi.spyOn(ctxClient, 'readCompact').mockImplementation(async (path: string) => {
+      events.push('wave1:peek_files:start');
+      await new Promise((r) => setTimeout(r, 25));
+      events.push('wave1:peek_files:end');
+      return { path, mode: 'signatures', content: '// ok', source: 'fallback' };
+    });
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'dispatch_run') {
+        const role = args?.role || 'sub';
+        events.push(`wave3:${role}`);
+        return { status: 'submitted', address: `thread:${role}` };
+      }
+      return {};
+    });
+
+    const plan: OperatorPlan = {
+      strategy: 'llm',
+      actions: [
+        { type: 'peek_files', path: 'src/app.ts', mode: 'signatures' },
+        { type: 'peek_runs', limit: 3 },
+        {
+          type: 'propose_task',
+          targetKind: 'subagent',
+          title: 'Propuesta barrera',
+          taskBrief: 'Ejecutar después de peek',
+        },
+        { type: 'spawn_subagent', role: 'WorkerA', task: 'Post barrera A' },
+        { type: 'spawn_subagent', role: 'WorkerB', task: 'Post barrera B' },
+      ],
+    };
+
+    const res = await executePlan(
+      plan,
+      { workspaceId: 'ws-1', mode: 'thread', boundThreadId: 'voice-barrier-1', voiceSessionActive: true },
+      'turn-dag-barriers'
+    );
+    voiceSessionStore.clearDraftProposal('voice-barrier-1');
+    voiceSessionStore.stopSession();
+
+    expect(res.overallSuccess).toBe(true);
+    expect(res.receipts.map((r) => r.actionIdx)).toEqual([0, 1, 2, 3, 4]);
+    expect(res.receipts.map((r) => r.type)).toEqual([
+      'peek_files',
+      'peek_runs',
+      'propose_task',
+      'spawn_subagent',
+      'spawn_subagent',
+    ]);
+    // Wave 1 must complete before Wave 3 subagents begin
+    const wave1End = events.indexOf('wave1:peek_files:end');
+    const wave3A = events.indexOf('wave3:WorkerA');
+    const wave3B = events.indexOf('wave3:WorkerB');
+    expect(wave1End).toBeGreaterThanOrEqual(0);
+    expect(wave3A).toBeGreaterThan(wave1End);
+    expect(wave3B).toBeGreaterThan(wave1End);
+  });
+});

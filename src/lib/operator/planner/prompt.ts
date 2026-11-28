@@ -103,6 +103,7 @@ export function buildStaticOperatorPromptPrefix(
 REGLAS CRÍTICAS:
 1. Responde SIEMPRE con un ÚNICO objeto JSON válido.
 2. NUNCA agregues texto antes ni después del objeto JSON.
+2b. NUNCA intentes invocar herramientas MCP externas ni herramientas de edición directa desde el CLI durante este turno de planificación; para explorar o delegar código a modelos más capaces usa exclusivamente las acciones "peek_*", "propose_task", "spawn_subagent" o "launch_thread" en el JSON.
 3. RESUMEN HABLADO MEDIDO — PROSODIA Y ESTILO (VOZ NATURAL):
    - El campo "answer" (conversación/aclaración sin acciones) o "reply" (confirmación de acción) se reproduce en voz alta en español neutro y natural.
    - Redacta respuestas breves de 2 a 4 oraciones completas para conversación (1 a 2 para confirmaciones). En turnos sin acciones coloca SIEMPRE el campo "answer" PRIMERO en el JSON para habilitar streaming de voz inmediato.

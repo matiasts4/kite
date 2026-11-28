@@ -15,7 +15,17 @@ import {
   transcribeWithGrokCloud,
   SttProviderError,
   isFatalSttError,
+  flushSilenceOnMute,
+  setOperatorMicMuted,
+  isOperatorMicMuted,
+  PreConnectAudioRingBuffer,
 } from './zedVoice';
+import { voiceSessionStore } from './voiceSessionStore';
+import {
+  startArgosListening,
+  stopArgosListening,
+  releaseArgosCapture,
+} from './argosVoice';
 import { resetSttEndpointCacheForTests } from './transcriptionProviders';
 import { saveOperatorConfig } from '../operatorConfig';
 
@@ -667,5 +677,463 @@ describe('ZedVoice — Speech Recognition Engine', () => {
       (window as any).AudioContext = originalAudioContext;
       (window as any).navigator = originalNavigator;
     }
+  });
+
+  it('streams PCM16 over WebSocket and delivers live partials without batch upload when WS opens', async () => {
+    const originalAudioContext = (window as any).AudioContext;
+    const originalNavigator = window.navigator;
+    const originalWebSocket = (globalThis as any).WebSocket;
+    resetSttEndpointCacheForTests();
+    saveOperatorConfig({ grokApiKey: 'xai-test-key', grokBaseUrl: 'https://api.x.ai/v1' });
+
+    let capturedProcessor: any = null;
+    (window as any).AudioContext = vi.fn(() => ({
+      state: 'running',
+      sampleRate: 16000,
+      destination: {},
+      createMediaStreamSource: () => ({ connect: vi.fn(), disconnect: vi.fn() }),
+      createAnalyser: () => ({ fftSize: 64, frequencyBinCount: 32, getByteFrequencyData: vi.fn() }),
+      createScriptProcessor: () => {
+        capturedProcessor = {
+          onaudioprocess: null as any,
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        };
+        return capturedProcessor;
+      },
+      createGain: () => ({ gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }),
+      close: vi.fn(),
+    }));
+    (window as any).navigator = {
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: vi.fn(), readyState: 'live' }],
+          getAudioTracks: () => [{ stop: vi.fn(), readyState: 'live' }],
+        }),
+      },
+    };
+    delete (window as any).SpeechRecognition;
+    delete (window as any).webkitSpeechRecognition;
+
+    const sentFrames: any[] = [];
+    let mockWs: any = null;
+    (globalThis as any).WebSocket = vi.fn(function (this: any, url: string) {
+      mockWs = this;
+      this.url = url;
+      this.readyState = 1;
+      this.onopen = null;
+      this.onmessage = null;
+      this.onerror = null;
+      this.onclose = null;
+      this.send = vi.fn((data: any) => {
+        sentFrames.push(data);
+        if (typeof data === 'string' && data.includes('audio.done')) {
+          queueMicrotask(() => {
+            this.onmessage?.({
+              data: JSON.stringify({ type: 'Done', transcript: 'abre dos hilos' }),
+            });
+          });
+        }
+      });
+      this.close = vi.fn(() => {
+        this.readyState = 3;
+      });
+      queueMicrotask(() => this.onopen?.({}));
+    });
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    try {
+      const partials: string[] = [];
+      const listenPromise = startArgosListening({
+        continuous: true,
+        onInterim: (p) => partials.push(p),
+      });
+      await vi.waitFor(() => {
+        expect(capturedProcessor?.onaudioprocess).toBeTypeOf('function');
+      });
+
+      const speechFrame = new Float32Array(2048).fill(0.2);
+      for (let i = 0; i < 4; i++) {
+        capturedProcessor.onaudioprocess({
+          inputBuffer: { getChannelData: () => speechFrame },
+        });
+      }
+
+      await vi.waitFor(() => {
+        expect(mockWs).not.toBeNull();
+      });
+      await Promise.resolve();
+
+      mockWs.onmessage?.({
+        data: JSON.stringify({ type: 'transcript.partial', transcript: 'abre dos' }),
+      });
+      expect(partials).toContain('abre dos');
+
+      const result = await stopArgosListening();
+      expect(result).toBe('abre dos hilos');
+      expect(await listenPromise).toBe('abre dos hilos');
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(sentFrames.some((f) => f instanceof ArrayBuffer)).toBe(true);
+      expect(sentFrames[sentFrames.length - 1]).toBe(JSON.stringify({ type: 'audio.done' }));
+    } finally {
+      fetchSpy.mockRestore();
+      localStorage.clear();
+      await releaseArgosCapture();
+      (globalThis as any).WebSocket = originalWebSocket;
+      (window as any).AudioContext = originalAudioContext;
+      (window as any).navigator = originalNavigator;
+    }
+  });
+
+  it('recreates SpeechRecognition across Turn 1 and Turn 2+ and recovers from InvalidStateError in 60ms', async () => {
+    vi.useFakeTimers();
+    const originalAudioContext = (window as any).AudioContext;
+    const originalNavigator = window.navigator;
+
+    const instances: any[] = [];
+    let shouldThrowInvalidStateOnNextStart = false;
+    (window as any).SpeechRecognition = vi.fn(function (this: any) {
+      this.start = vi.fn(() => {
+        if (shouldThrowInvalidStateOnNextStart) {
+          shouldThrowInvalidStateOnNextStart = false;
+          const err = new Error('recognition already started');
+          err.name = 'InvalidStateError';
+          throw err;
+        }
+      });
+      this.stop = vi.fn();
+      this.abort = vi.fn();
+      instances.push(this);
+    });
+    (window as any).AudioContext = vi.fn(() => ({
+      state: 'running',
+      sampleRate: 16000,
+      destination: {},
+      createMediaStreamSource: () => ({ connect: vi.fn(), disconnect: vi.fn() }),
+      createAnalyser: () => ({ fftSize: 64, frequencyBinCount: 32, getByteFrequencyData: vi.fn() }),
+      createScriptProcessor: () => ({
+        onaudioprocess: null as any,
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      }),
+      createGain: () => ({ gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }),
+      close: vi.fn(),
+    }));
+    (window as any).navigator = {
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: vi.fn(), readyState: 'live' }],
+          getAudioTracks: () => [{ stop: vi.fn(), readyState: 'live' }],
+        }),
+      },
+    };
+
+    try {
+      // Turn 1
+      const partials1: string[] = [];
+      const p1 = startOperatorListening({ continuous: true, onInterim: (t) => partials1.push(t) });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(instances).toHaveLength(1);
+      const turn1Rec = instances[0];
+      turn1Rec.onresult({
+        resultIndex: 0,
+        results: [{ isFinal: false, 0: { transcript: 'hola argos' } }],
+      });
+      expect(partials1).toEqual(['hola argos']);
+      expect(await stopOperatorListening()).toBe('hola argos');
+      await p1;
+      expect(turn1Rec.onresult).toBeNull();
+      expect(turn1Rec.onerror).toBeNull();
+      expect(turn1Rec.onend).toBeNull();
+
+      // Turn 2: fresh instance + simulated onend with InvalidStateError recovery after 60ms
+      const partials2: string[] = [];
+      const p2 = startOperatorListening({ continuous: true, onInterim: (t) => partials2.push(t) });
+      await vi.advanceTimersByTimeAsync(20);
+      expect(instances).toHaveLength(2);
+      const turn2Rec = instances[1];
+      shouldThrowInvalidStateOnNextStart = true;
+      turn2Rec.onend();
+      await vi.advanceTimersByTimeAsync(70);
+
+      // Fresh retry instance was created and started cleanly
+      expect(instances.length).toBeGreaterThanOrEqual(4);
+      const activeTurn2Rec = instances[instances.length - 1];
+      activeTurn2Rec.onresult({
+        resultIndex: 0,
+        results: [{ isFinal: true, 0: { transcript: 'segundo turno' } }],
+      });
+      expect(partials2).toContain('segundo turno');
+      expect(await stopOperatorListening()).toBe('segundo turno');
+      await p2;
+    } finally {
+      await releaseOperatorCapture();
+      vi.useRealTimers();
+      (window as any).AudioContext = originalAudioContext;
+      (window as any).navigator = originalNavigator;
+    }
+  });
+
+  it('emits 500ms of zeroed PCM frames on mute without tearing down activeMediaStream or activeAudioContext', async () => {
+    const originalAudioContext = (window as any).AudioContext;
+    const originalNavigator = window.navigator;
+    const originalWebSocket = (globalThis as any).WebSocket;
+    saveOperatorConfig({ grokApiKey: 'xai-test-key', grokBaseUrl: 'https://api.x.ai/v1' });
+
+    const trackStopSpy = vi.fn();
+    const ctxCloseSpy = vi.fn();
+    let capturedProcessor: any = null;
+
+    (window as any).AudioContext = vi.fn(() => ({
+      state: 'running',
+      sampleRate: 16000,
+      destination: {},
+      createMediaStreamSource: () => ({ connect: vi.fn(), disconnect: vi.fn() }),
+      createAnalyser: () => ({ fftSize: 64, frequencyBinCount: 32, getByteFrequencyData: vi.fn() }),
+      createScriptProcessor: () => {
+        capturedProcessor = {
+          onaudioprocess: null as any,
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        };
+        return capturedProcessor;
+      },
+      createGain: () => ({ gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }),
+      close: ctxCloseSpy,
+    }));
+    (window as any).navigator = {
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: trackStopSpy, readyState: 'live' }],
+          getAudioTracks: () => [{ stop: trackStopSpy, readyState: 'live' }],
+        }),
+      },
+    };
+    delete (window as any).SpeechRecognition;
+    delete (window as any).webkitSpeechRecognition;
+
+    const sentFrames: any[] = [];
+    (globalThis as any).WebSocket = vi.fn(function (this: any) {
+      this.readyState = 1;
+      this.send = vi.fn((data: any) => sentFrames.push(data));
+      this.close = vi.fn();
+      queueMicrotask(() => this.onopen?.({}));
+    });
+
+    try {
+      const listenPromise = startOperatorListening({ continuous: true });
+      await vi.waitFor(() => {
+        expect(capturedProcessor?.onaudioprocess).toBeTypeOf('function');
+      });
+
+      const voiced = new Float32Array(2048).fill(0.2);
+      capturedProcessor.onaudioprocess({ inputBuffer: { getChannelData: () => voiced } });
+      capturedProcessor.onaudioprocess({ inputBuffer: { getChannelData: () => voiced } });
+      await Promise.resolve();
+
+      setOperatorMicMuted(true);
+      expect(isOperatorMicMuted()).toBe(true);
+      flushSilenceOnMute(500);
+
+      // 500ms @ 16kHz Int16 = 8000 samples = 16000 zero bytes
+      const zeroFrames = sentFrames.filter(
+        (f) => f instanceof ArrayBuffer && f.byteLength === 16000 && new Int16Array(f).every((v) => v === 0)
+      );
+      expect(zeroFrames.length).toBeGreaterThanOrEqual(1);
+      expect(trackStopSpy).not.toHaveBeenCalled();
+      expect(ctxCloseSpy).not.toHaveBeenCalled();
+
+      setOperatorMicMuted(false);
+      expect(isOperatorMicMuted()).toBe(false);
+      await stopOperatorListening({ discard: true });
+      await listenPromise;
+    } finally {
+      localStorage.clear();
+      await releaseOperatorCapture();
+      (globalThis as any).WebSocket = originalWebSocket;
+      (window as any).AudioContext = originalAudioContext;
+      (window as any).navigator = originalNavigator;
+    }
+  });
+
+  it('PreConnectAudioRingBuffer buffers 20s, transitions buffering -> live, and trims leading silence keeping 100ms pre-roll', () => {
+    const ring = new PreConnectAudioRingBuffer({
+      maxDurationMs: 20000,
+      sampleRate: 16000,
+      leadingSilenceThreshold: 0.003,
+      preRollMs: 100,
+    });
+    expect(ring.getState()).toBe('buffering');
+
+    // Push 1000ms of dead silence (10 chunks x 100ms @ 0.0005 RMS)
+    for (let i = 0; i < 10; i++) {
+      ring.push(new Float32Array(1600).fill(0.0005));
+    }
+    // Push 300ms of voiced speech (3 chunks x 100ms @ 0.08 RMS)
+    for (let i = 0; i < 3; i++) {
+      ring.push(new Float32Array(1600).fill(0.08));
+    }
+    expect(ring.getDurationMs()).toBe(1300);
+
+    const drained = ring.releaseAndDrain();
+    expect(ring.getState()).toBe('live');
+
+    // Should retain exactly 100ms (1600 samples) pre-roll + 300ms (4800 samples) speech = 6400 samples (400ms)
+    const totalSamples = drained.reduce((sum, c) => sum + c.length, 0);
+    expect(totalSamples).toBe(6400);
+    expect(drained[0][0]).toBeCloseTo(0.0005, 5);
+    expect(drained[1][0]).toBeCloseTo(0.08, 5);
+
+    // Pushing while live is ignored until reset()
+    ring.push(new Float32Array(1600).fill(0.2));
+    expect(ring.getSampleCount()).toBe(0);
+
+    // Pure dead silence drains to empty
+    ring.reset(16000);
+    expect(ring.getState()).toBe('buffering');
+    ring.push(new Float32Array(3200).fill(0.001));
+    expect(ring.releaseAndDrain()).toEqual([]);
+
+    // Enforces ring capacity wraparound (e.g. 15s maxDurationMs)
+    const bounded = new PreConnectAudioRingBuffer({
+      maxDurationMs: 15000,
+      sampleRate: 16000,
+    });
+    for (let i = 0; i < 20; i++) {
+      bounded.push(new Float32Array(16000).fill(0.05)); // 20 x 1s
+    }
+    expect(bounded.getSampleCount()).toBe(15 * 16000);
+  });
+
+  it('preserves speech frames arriving before delayed WebSocket handshake completes in zedVoice', async () => {
+    const originalAudioContext = (window as any).AudioContext;
+    const originalNavigator = window.navigator;
+    const originalWebSocket = (globalThis as any).WebSocket;
+    resetSttEndpointCacheForTests();
+    saveOperatorConfig({ grokApiKey: 'xai-test-key', grokBaseUrl: 'https://api.x.ai/v1' });
+
+    let capturedProcessor: any = null;
+    (window as any).AudioContext = vi.fn(() => ({
+      state: 'running',
+      sampleRate: 16000,
+      destination: {},
+      createMediaStreamSource: () => ({ connect: vi.fn(), disconnect: vi.fn() }),
+      createAnalyser: () => ({ fftSize: 64, frequencyBinCount: 32, getByteFrequencyData: vi.fn() }),
+      createScriptProcessor: () => {
+        capturedProcessor = {
+          onaudioprocess: null as any,
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        };
+        return capturedProcessor;
+      },
+      createGain: () => ({ gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }),
+      close: vi.fn(),
+    }));
+    (window as any).navigator = {
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: vi.fn(), readyState: 'live' }],
+          getAudioTracks: () => [{ stop: vi.fn(), readyState: 'live' }],
+        }),
+      },
+    };
+    delete (window as any).SpeechRecognition;
+    delete (window as any).webkitSpeechRecognition;
+
+    const sentBuffers: ArrayBuffer[] = [];
+    let mockWs: any = null;
+    (globalThis as any).WebSocket = vi.fn(function (this: any) {
+      mockWs = this;
+      this.readyState = 0; // CONNECTING until explicitly opened
+      this.onopen = null;
+      this.onmessage = null;
+      this.onerror = null;
+      this.onclose = null;
+      this.send = vi.fn((data: any) => {
+        if (data instanceof ArrayBuffer) {
+          sentBuffers.push(data);
+        } else if (typeof data === 'string' && data.includes('audio.done')) {
+          queueMicrotask(() => {
+            this.onmessage?.({
+              data: JSON.stringify({ type: 'Done', transcript: 'hola argos desde el inicio' }),
+            });
+          });
+        }
+      });
+      this.close = vi.fn(() => {
+        this.readyState = 3;
+      });
+    });
+
+    try {
+      const listenPromise = startOperatorListening({ continuous: true });
+      await vi.waitFor(() => {
+        expect(capturedProcessor?.onaudioprocess).toBeTypeOf('function');
+      });
+
+      // 500ms of dead silence + 3 frames of speech BEFORE WS opens
+      const silent = new Float32Array(2048).fill(0.0005);
+      for (let i = 0; i < 4; i++) {
+        capturedProcessor.onaudioprocess({ inputBuffer: { getChannelData: () => silent } });
+      }
+      const voiced = new Float32Array(2048).fill(0.2);
+      for (let i = 0; i < 3; i++) {
+        capturedProcessor.onaudioprocess({ inputBuffer: { getChannelData: () => voiced } });
+      }
+
+      expect(mockWs).not.toBeNull();
+      expect(sentBuffers).toHaveLength(0);
+
+      // Complete WebSocket handshake -> pre-connect + handshake buffers drain into WS
+      mockWs.readyState = 1;
+      mockWs.onopen?.({});
+
+      const totalSentSamples = sentBuffers.reduce((sum, buf) => sum + buf.byteLength / 2, 0);
+      // Should include 100ms (1600 samples) pre-roll + 3 x 2048 speech frames = 7744 samples
+      expect(totalSentSamples).toBe(7744);
+
+      const finalText = await stopOperatorListening();
+      expect(finalText).toBe('hola argos desde el inicio');
+      await listenPromise;
+    } finally {
+      localStorage.clear();
+      await releaseOperatorCapture();
+      (globalThis as any).WebSocket = originalWebSocket;
+      (window as any).AudioContext = originalAudioContext;
+      (window as any).navigator = originalNavigator;
+    }
+  });
+
+  it('voiceSessionStore.markTurnInterrupted truncates reply to heardText and records audioEndMs for LLM history', () => {
+    voiceSessionStore.clearThreadVoiceTurns('thr-t5-heard');
+    voiceSessionStore.addThreadVoiceTurn('thr-t5-heard', {
+      turnId: 'turn-heard-1',
+      userPrompt: 'Cuéntame toda la arquitectura.',
+      source: 'voz',
+      reply: 'Primero tenemos el buffer de entrada y luego el orquestador completo con todos los módulos.',
+      createdAt: 1000,
+    });
+
+    voiceSessionStore.markTurnInterrupted(
+      'thr-t5-heard',
+      'turn-heard-1',
+      'Primero tenemos el buffer de entrada',
+      1420
+    );
+
+    const turns = voiceSessionStore.getThreadVoiceTurns('thr-t5-heard');
+    expect(turns[0].interrupted).toBe(true);
+    expect(turns[0].audioEndMs).toBe(1420);
+    expect(turns[0].reply).toBe('Primero tenemos el buffer de entrada');
+
+    const history = voiceSessionStore.getConversationHistory('thr-t5-heard');
+    expect(history).toHaveLength(2);
+    expect(history[1].content).toBe(
+      'Primero tenemos el buffer de entrada [respuesta interrumpida por el usuario]'
+    );
+    expect(history[1].content).not.toContain('orquestador completo');
+    voiceSessionStore.clearThreadVoiceTurns('thr-t5-heard');
   });
 });

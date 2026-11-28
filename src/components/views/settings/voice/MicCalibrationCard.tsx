@@ -197,7 +197,7 @@ export const MicCalibrationCard: React.FC<MicCalibrationCardProps> = ({
             </div>
             <button
               type="button"
-              className={`settings-control ui-button${isTestingMic ? ' ui-button--danger' : ''}`}
+              className={isTestingMic ? 'settings-control danger-button' : 'settings-control ui-button'}
               onClick={() => void handleToggleMicTest()}
             >
               {isTestingMic ? 'Detener' : 'Probar'}
@@ -220,7 +220,7 @@ export const MicCalibrationCard: React.FC<MicCalibrationCardProps> = ({
           <div className="settings-row__control">
             <button
               type="button"
-              className={`settings-control ui-button${transcriptionTestState === 'recording' ? ' ui-button--danger' : ''}`}
+              className={transcriptionTestState === 'recording' ? 'settings-control danger-button' : 'settings-control ui-button'}
               onClick={() => void handleToggleTranscriptionTest()}
               disabled={transcriptionTestState === 'transcribing'}
             >

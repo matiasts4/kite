@@ -1,4 +1,5 @@
 export type OperatorProviderId = 'opencode' | 'vercel' | 'cloudflare' | 'antigravity' | 'grok' | 'local';
+export type RealtimeProviderId = 'xai' | 'gemini_live' | 'openai';
 
 export type OperatorTaskType =
   | 'open_terminals'
@@ -71,6 +72,7 @@ export interface ArgosPersonaConfig {
 export type ZedPersonaConfig = ArgosPersonaConfig;
 
 export interface OperatorProviderConfig {
+  updatedAtMs?: number;
   activeProvider: OperatorProviderId;
   // OpenCode Go subscription (HTTP OpenAI-compatible gateway)
   opencodeApiKey: string;
@@ -104,7 +106,12 @@ export interface OperatorProviderConfig {
   offlineSttEngine?: 'auto' | 'whisper' | 'parakeet' | 'disabled';
   offlineSttModelPath?: string;
   voiceTransportMode?: 'cascaded' | 'realtime';
+  realtimeProvider?: RealtimeProviderId;
   realtimeEndpoint?: string;
+  geminiLiveApiKey?: string;
+  openaiRealtimeApiKey?: string;
+  voiceIdleTimeoutSec?: number;
+  voiceVolume?: number;
   // Voice & TTS preferences
   ttsEnabled: boolean;
   ttsLanguage: string;
@@ -164,7 +171,7 @@ export interface TaskLatencySummaryRow {
   successRate: number;
 }
 
-export type ModelCatalogProvider = 'opencode' | 'vercel' | 'cloudflare';
+export type ModelCatalogProvider = 'opencode' | 'vercel' | 'cloudflare' | 'antigravity';
 
 export interface ModelCatalogSnapshot {
   models: OpenCodeModelOption[];

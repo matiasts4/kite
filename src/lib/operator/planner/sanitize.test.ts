@@ -32,6 +32,31 @@ describe('Sanitize & Contract Tests', () => {
         )
       ).toBe(true);
     });
+
+    it('never flags natural proposal confirmations that repeat text from active draftProposal in dynamic context', () => {
+      const systemPrompt = buildOperatorSystemPrompt({
+        mode: 'thread',
+        voiceSessionActive: true,
+        draftProposal: {
+          proposalId: 'prop-1795651197444-4m8i',
+          status: 'awaiting_confirmation',
+          targetKind: 'subagent',
+          title: 'Corregir recorte superior del aura del asistente',
+          taskBrief:
+            'Localizar el componente de animación o figura del asistente en el proyecto kite, inspeccionar su contenedor y corregir el recorte superior.',
+          questionForUser:
+            '¿Quieres que lance un subagente para localizar el componente del asistente y revisar ese recorte en el desvanecimiento superior?',
+          revision: 1,
+        },
+      });
+
+      expect(
+        detectPromptEcho(
+          'Perfecto, ya lanzo el subagente para localizar el componente del asistente y revisar ese recorte en el desvanecimiento superior.',
+          systemPrompt
+        )
+      ).toBe(false);
+    });
   });
 
   describe('isPredominantlyEnglish', () => {

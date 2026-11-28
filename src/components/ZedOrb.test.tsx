@@ -91,6 +91,48 @@ describe('ZedOrb — Interactive Multi-Mode Living Figures & Low-Resource Pacing
     rafSpy.mockRestore();
   });
 
+  it('pauses continuous requestAnimationFrame in calm idle/connected state and wakes on hover or active voice states', () => {
+    let rafCallback: FrameRequestCallback | null = null;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      rafCallback = cb;
+      return 1;
+    });
+
+    try {
+      const { rerender } = render(<ZedOrb figure="plasma-orb" size={72} state="idle" />);
+      // Renders one crisp static frame on mount without scheduling a continuous RAF loop
+      expect(orbRendererSpies.render).toHaveBeenCalledTimes(1);
+      expect(rafSpy).toHaveBeenCalledTimes(0);
+
+      // Entering an active voice state wakes the RAF loop immediately
+      rerender(<ZedOrb figure="plasma-orb" size={72} state="thinking" />);
+      expect(rafSpy).toHaveBeenCalledTimes(1);
+      expect(rafCallback).not.toBeNull();
+      rafCallback!(performance.now() + 32);
+      expect(orbRendererSpies.render).toHaveBeenCalledTimes(2);
+      expect(rafSpy).toHaveBeenCalledTimes(2);
+
+      // Returning to calm idle stops scheduling new RAF frames after rendering the settled frame
+      rerender(<ZedOrb figure="plasma-orb" size={72} state="idle" />);
+      const rafCountBeforeSettle = rafSpy.mock.calls.length;
+      rafCallback!(performance.now() + 64);
+      expect(rafSpy).toHaveBeenCalledTimes(rafCountBeforeSettle);
+
+      // Minimized window state blocks RAF scheduling even when hovered
+      document.documentElement.setAttribute('data-window-state', 'minimized');
+      const orb = screen.getByTestId('zed-orb');
+      fireEvent.pointerEnter(orb);
+      expect(rafSpy).toHaveBeenCalledTimes(rafCountBeforeSettle);
+
+      document.documentElement.removeAttribute('data-window-state');
+      fireEvent.pointerEnter(orb);
+      expect(rafSpy).toHaveBeenCalledTimes(rafCountBeforeSettle + 1);
+    } finally {
+      document.documentElement.removeAttribute('data-window-state');
+      rafSpy.mockRestore();
+    }
+  });
+
   it('forwards external pointerTargetRef hover, 3D tilt, and click ripple events into OrbRenderer', () => {
     let rafCallback: FrameRequestCallback | null = null;
     const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {

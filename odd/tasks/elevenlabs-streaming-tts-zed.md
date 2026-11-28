@@ -81,9 +81,9 @@ En la tarjeta de "Identidad y Comportamiento de Zed":
 
 ## 2. Criterios de Aceptación (Testing)
 
-- [ ] **AC1:** `operatorConfig.ts` serializa y deserializa correctamente los nuevos campos de ElevenLabs sin alterar la compatibilidad hacia atrás.
-- [ ] **AC2:** `ttsNarrator.speak()` transmite a ElevenLabs cuando `ttsEngine === 'elevenlabs'` y `elevenlabsApiKey` está presente.
-- [ ] **AC3:** `ttsNarrator.speak()` conmuta a `SpeechSynthesis` si `ttsEngine === 'browser'` o si la petición a ElevenLabs falla con error 401/429/red.
-- [ ] **AC4:** `ttsNarrator.stop()` detiene el audio y cancela el `AbortController` en curso inmediatamente.
-- [ ] **AC5:** El componente `ZedPersonaSection` renderiza los controles de ElevenLabs y permite probar la voz con feedback visual.
-- [ ] **AC6:** Pasan todas las pruebas automatizadas (`vitest run`) y la verificación de tipos (`tsc --noEmit`).
+- [x] **AC1:** `operatorConfig.ts` serializa y deserializa correctamente los nuevos campos de ElevenLabs sin alterar la compatibilidad hacia atrás.
+- [x] **AC2:** `ttsNarrator.speak()` transmite a ElevenLabs cuando `ttsEngine === 'elevenlabs'` y `elevenlabsApiKey` está presente.
+- [x] **AC3:** `ttsNarrator.speak()` conmuta a `SpeechSynthesis` si `ttsEngine === 'browser'` o si la petición a ElevenLabs falla con error 401/429/red.
+- [x] **AC4:** `ttsNarrator.stop()` detiene el audio y cancela el `AbortController` en curso inmediatamente.
+- [x] **AC5:** El componente `ZedPersonaSection` (`ArgosPersonaSection`) renderiza los controles de ElevenLabs y permite probar la voz con feedback visual.
+- [x] **AC6:** Pasan todas las pruebas automatizadas (`vitest run`) y la verificación de tipos (`tsc --noEmit`).

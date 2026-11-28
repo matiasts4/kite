@@ -4,8 +4,10 @@
 // `dispatch_read`, records concise findings into Working Context & Episodic Memory, projects
 // a proactive assistant report into the thread timeline, and speaks through `VoiceTurnArbitrator`.
 
-import { invokeCommand, isTauriEnvironment, listChatSummaries, loadChatThread } from '../ipc';
+import * as ipc from '../ipc';
+import { invokeCommand, listChatSummaries, loadChatThread } from '../ipc';
 import type { SubagentDelegationMode } from './contract';
+import { ctxClient } from './context/ctxClient';
 import { recordDelegation } from './context/episodicMemory';
 import { upsertSubagentFinding } from './context/workingContext';
 import { ttsNarrator } from './ttsNarrator';
@@ -425,6 +427,15 @@ export async function handleSubagentSettlementEvent(
       stopFallbackPollIfIdle();
     }
 
+    // 0. S2.3: Store full output in local CCR & publish `<<ccr:HASH>>` finding in SharedContextStore
+    const ccrHash = ctxClient.ccrStoreLocal(rawOutput || findingsSummary || speech);
+    void ctxClient
+      .sharePut(
+        `finding:${childThreadId}`,
+        `${findingsSummary || speech} <<ccr:${ccrHash}>>`
+      )
+      .catch(() => {});
+
     // 1. Update live session Working Context
     if (parentThreadId) {
       upsertSubagentFinding(parentThreadId, {
@@ -496,7 +507,7 @@ export async function handleSubagentSettlementEvent(
       } catch {}
     }
 
-    // 5. Deliver concise voice synthesis via VoiceTurnArbitrator (never interrupts active speech)
+    // 5. Deliver concise voice synthesis via VoiceTurnArbitrator (folds concurrent updates, never overlaps)
     const shouldSpeak = runtime ? runtime.isVoiceSessionOpen() : defaultIsVoiceOpen();
     if (shouldSpeak && !voiceSessionStore.getSnapshot().speakerMuted) {
       const speakSink = runtime?.speak ?? defaultSpeak;
@@ -510,7 +521,12 @@ export async function handleSubagentSettlementEvent(
             }
           } catch {}
         },
-        now
+        now,
+        {
+          role,
+          summary: findingsSummary || speech,
+          foldable: true,
+        }
       );
     }
 
@@ -537,7 +553,13 @@ export function startSubagentReturnWatcher(
     now: options.now ?? (() => Date.now()),
   };
 
-  if (isTauriEnvironment()) {
+  let inTauri = false;
+  try {
+    inTauri = typeof ipc.isTauriEnvironment === 'function' && ipc.isTauriEnvironment();
+  } catch {
+    inTauri = false;
+  }
+  if (inTauri) {
     void import('@tauri-apps/api/event')
       .then(({ listen }) =>
         listen<SubagentRunEventPayload>('chat-subagent-event', (event) => {

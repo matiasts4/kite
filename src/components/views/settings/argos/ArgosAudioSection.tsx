@@ -1,11 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import {
+  DEFAULT_REALTIME_ENDPOINTS,
   OperatorConfig,
+  RealtimeProviderId,
   loadOperatorConfig,
+  sanitizeRealtimeProvider,
+  sanitizeVoiceIdleTimeoutSec,
   saveOperatorConfig,
 } from '../../../../lib/operator/operatorConfig';
 import { invokeCommand, isTauriEnvironment } from '../../../../lib/ipc';
 import { SelectMenu, type SelectMenuRow } from '../../../ui/SelectMenu';
+import { Badge } from '../../../ui/Badge';
+import { Card } from '../../../ui/Card';
 import { toast } from '../../../../lib/toast';
 import {
   listAudioInputDevices,
@@ -23,6 +29,8 @@ import {
   listVoiceCallReceipts,
   type VoiceCallReceipt,
 } from '../../../../lib/operator/voice/voiceCallReceipts';
+import { getVoicePalette, isKnownVoicePreset } from '../../../../lib/operator/config/voicePalettes';
+import { VoicePickerModal } from './VoicePickerModal';
 
 const GROK_TRANSCRIPTION_KEY_STORAGE_KEY = 'kite_grok_transcription_api_key';
 
@@ -85,6 +93,59 @@ const TRANSPORT_MODE_ROWS: SelectMenuRow[] = [
   },
 ];
 
+const REALTIME_PROVIDER_ROWS: SelectMenuRow[] = [
+  {
+    id: 'xai',
+    title: 'xAI Realtime (24 kHz)',
+    detail: 'WebSocket full-duplex 24 kHz con voz nativa y VAD de servidor',
+  },
+  {
+    id: 'gemini_live',
+    title: 'Google Gemini Live API (16/24 kHz)',
+    detail: 'BidiGenerateContent 16 kHz entrada / 24 kHz salida con barge-in nativo',
+  },
+  {
+    id: 'openai',
+    title: 'OpenAI Realtime (24 kHz)',
+    detail: 'WebSocket full-duplex 24 kHz compatible con gpt-realtime',
+  },
+];
+
+const IDLE_TIMEOUT_ROWS: SelectMenuRow[] = [
+  {
+    id: '60',
+    title: '1 min',
+    detail: 'Pausa rápido tras 60s de silencio total',
+  },
+  {
+    id: '180',
+    title: '3 min (Recomendado)',
+    detail: 'Balance ideal entre charla y ahorro de cuota',
+  },
+  {
+    id: '300',
+    title: '5 min',
+    detail: 'Ventana extendida antes de cerrar el stream',
+  },
+  {
+    id: '0',
+    title: 'Desactivado',
+    detail: 'Mantiene el canal abierto sin límite automático',
+  },
+];
+
+const KNOWN_DEFAULT_ENDPOINTS = new Set<string>([
+  DEFAULT_REALTIME_ENDPOINTS.xai,
+  DEFAULT_REALTIME_ENDPOINTS.gemini_live,
+  DEFAULT_REALTIME_ENDPOINTS.openai,
+  'wss://api.openai.com/v1/realtime',
+]);
+
+function isDefaultOrEmptyRealtimeEndpoint(endpoint?: string): boolean {
+  const trimmed = (endpoint ?? '').trim();
+  return trimmed.length === 0 || KNOWN_DEFAULT_ENDPOINTS.has(trimmed);
+}
+
 const LANGUAGE_ROWS: SelectMenuRow[] = [
   { id: 'es-AR', title: 'Español (Argentina · Río de la Plata)' },
   { id: 'es-ES', title: 'Español (Neutro)' },
@@ -111,19 +172,39 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
   const [receipts, setReceipts] = useState<VoiceCallReceipt[]>([]);
   const [expandedReceiptId, setExpandedReceiptId] = useState<string | null>(null);
   const [showSttKey, setShowSttKey] = useState(false);
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [showOpenaiKey, setShowOpenaiKey] = useState(false);
   const [savedSttKey, setSavedSttKey] = useState(false);
   const [savedModel, setSavedModel] = useState(false);
+  const [voicePickerOpen, setVoicePickerOpen] = useState(false);
   const [availability, setAvailability] = useState<DictationAvailabilityPayload | null>(null);
 
   const effectiveConfig = externalConfig ?? loadOperatorConfig();
   const [modelPathInput, setModelPathInput] = useState(
     () => effectiveConfig.offlineSttModelPath || ''
   );
+  const [idleTimeoutValue, setIdleTimeoutValue] = useState<number>(() =>
+    sanitizeVoiceIdleTimeoutSec(
+      externalConfig?.voiceIdleTimeoutSec ?? unifiedAudio.voiceIdleTimeoutSec
+    )
+  );
+  const [selectedVoiceOverride, setSelectedVoiceOverride] = useState<string | null>(null);
+
   useEffect(() => {
     if (effectiveConfig.offlineSttModelPath !== undefined) {
       setModelPathInput(effectiveConfig.offlineSttModelPath);
     }
   }, [effectiveConfig.offlineSttModelPath]);
+
+  useEffect(() => {
+    if (externalConfig?.voiceIdleTimeoutSec !== undefined) {
+      setIdleTimeoutValue(sanitizeVoiceIdleTimeoutSec(externalConfig.voiceIdleTimeoutSec));
+    }
+  }, [externalConfig?.voiceIdleTimeoutSec]);
+
+  useEffect(() => {
+    setSelectedVoiceOverride(null);
+  }, [effectiveConfig.persona?.voice]);
 
   const sttKeyValue =
     effectiveConfig.grokTranscriptionApiKey ||
@@ -142,14 +223,19 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
       if (active) setReceipts(items);
     });
     const unsub = subscribeUnifiedAudioSettings((next) => {
-      if (active) setUnifiedAudio(next);
+      if (active) {
+        setUnifiedAudio(next);
+        setIdleTimeoutValue(sanitizeVoiceIdleTimeoutSec(next.voiceIdleTimeoutSec));
+      }
     });
     if (isTauriEnvironment()) {
       void invokeCommand<DictationAvailabilityPayload>('read_dictation_availability')
         .then((res) => {
           if (active && res) setAvailability(res);
         })
-        .catch(() => {});
+        .catch((err) => {
+          console.warn('[ArgosAudioSection] Failed to read dictation availability:', err);
+        });
     }
     return () => {
       active = false;
@@ -189,13 +275,33 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
           { modelPath: modelPath || null }
         );
         if (nextAvail) setAvailability(nextAvail);
-      } catch {
-        // ignore
+      } catch (err) {
+        console.warn('[ArgosAudioSection] Failed to select offline dictation Whisper model:', err);
       }
     }
     setSavedModel(true);
     window.setTimeout(() => setSavedModel(false), 1800);
     toast.success('Configuración STT offline actualizada');
+  };
+
+  const activeRealtimeProvider: RealtimeProviderId = sanitizeRealtimeProvider(
+    effectiveConfig.realtimeProvider ?? unifiedAudio.realtimeProvider
+  );
+
+  const handleRealtimeProviderSelect = (id: string) => {
+    const nextProvider = sanitizeRealtimeProvider(id);
+    updateField('realtimeProvider', nextProvider);
+    if (isDefaultOrEmptyRealtimeEndpoint(effectiveConfig.realtimeEndpoint)) {
+      updateField('realtimeEndpoint', DEFAULT_REALTIME_ENDPOINTS[nextProvider]);
+    }
+    void updateUnifiedAudioSettings({ realtimeProvider: nextProvider });
+  };
+
+  const handleIdleTimeoutSelect = (id: string) => {
+    const nextSec = sanitizeVoiceIdleTimeoutSec(Number(id));
+    setIdleTimeoutValue(nextSec);
+    updateField('voiceIdleTimeoutSec', nextSec);
+    void updateUnifiedAudioSettings({ voiceIdleTimeoutSec: nextSec });
   };
 
   const localEngines = availability?.localEngines ?? [
@@ -211,6 +317,13 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
     { id: 'automatic', title: 'Automático (Salida predeterminada)' },
     ...outputDevices.map((d) => ({ id: d.deviceId, title: d.label })),
   ];
+
+  const currentVoiceName =
+    selectedVoiceOverride ?? effectiveConfig.persona?.voice ?? 'Ara';
+  const voicePreset = getVoicePalette(currentVoiceName);
+  const voiceToneLabel = isKnownVoicePreset(currentVoiceName)
+    ? voicePreset.toneEs
+    : 'Voz personalizada';
 
   return (
     <section className="settings-group">
@@ -283,7 +396,7 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
               Clave dedicada para transcribir tu voz a texto en el dictado global y en el modo de voz de Argos. Si queda vacía, reutiliza la API Key principal de Grok o Cloudflare Whisper.
             </p>
             {sttKeyValue.trim() ? (
-              <p style={{ marginTop: 4, color: 'var(--text-success, #4ade80)' }}>
+              <p className="customizations-status customizations-status--ok">
                 Protegida en Bóveda Local SQLite
               </p>
             ) : null}
@@ -333,23 +446,16 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
             <p>
               Respaldo 100% offline usando captura nativa WASAPI cuando no hay clave Cloud o conexión a internet.
             </p>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 6 }}>
+            <div className="customizations-inline-actions" style={{ marginTop: 6 }}>
               {localEngines.map((eng) => (
-                <span
+                <Badge
                   key={eng.id}
+                  tone={eng.available ? 'success' : 'neutral'}
+                  shape="chip"
                   data-testid={`offline-stt-badge-${eng.id}`}
-                  style={{
-                    padding: '2px 8px',
-                    borderRadius: 'var(--vl-radius-sm, 6px)',
-                    fontSize: 11.5,
-                    background: eng.available
-                      ? 'rgba(52, 211, 153, 0.14)'
-                      : 'rgba(255, 255, 255, 0.06)',
-                    color: eng.available ? '#34d399' : 'var(--text-muted)',
-                  }}
                 >
                   {eng.label}: {eng.available ? 'Disponible' : 'No instalado'}
-                </span>
+                </Badge>
               ))}
             </div>
           </div>
@@ -373,7 +479,9 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
                 if (isTauriEnvironment()) {
                   void invokeCommand('update_dictation_settings', {
                     settings: { offlineSttEngine: engine },
-                  }).catch(() => {});
+                  }).catch((err) => {
+                    console.warn('[ArgosAudioSection] Failed to update offlineSttEngine:', err);
+                  });
                 }
               }}
             />
@@ -406,7 +514,7 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
           <div className="settings-row__copy">
             <h3 className="settings-row__title">Modo de Transporte de Voz</h3>
             <p>
-              Elegí entre el pipeline en cascada (STT + LLM + TTS) o el canal directo full-duplex a 24 kHz con fallback automático.
+              Elige entre el pipeline en cascada (STT + LLM + TTS) o el canal directo full-duplex a 24 kHz con fallback automático.
             </p>
           </div>
           <div
@@ -431,18 +539,131 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
               }}
             />
             {(effectiveConfig.voiceTransportMode ?? 'cascaded') === 'realtime' && (
-              <input
-                type="text"
-                className="ui-field"
-                value={effectiveConfig.realtimeEndpoint ?? ''}
-                onChange={(e) => {
-                  updateField('realtimeEndpoint', e.target.value);
-                }}
-                placeholder="wss://api.openai.com/v1/realtime?model=gpt-realtime"
-                aria-label="Endpoint WebSocket Realtime"
-                spellCheck={false}
-              />
+              <>
+                <div className="subagent-settings__field-group" data-testid="realtime-provider-select">
+                  <span className="subagent-settings__label">Proveedor Talker Realtime</span>
+                  <SelectMenu
+                    label="Proveedor Talker Realtime"
+                    value={activeRealtimeProvider}
+                    triggerLabel={
+                      REALTIME_PROVIDER_ROWS.find((r) => r.id === activeRealtimeProvider)?.title ||
+                      'xAI Realtime (24 kHz)'
+                    }
+                    rows={REALTIME_PROVIDER_ROWS}
+                    variant="field"
+                    onSelect={handleRealtimeProviderSelect}
+                  />
+                </div>
+                <input
+                  type="text"
+                  className="ui-field"
+                  value={effectiveConfig.realtimeEndpoint ?? ''}
+                  onChange={(e) => {
+                    updateField('realtimeEndpoint', e.target.value);
+                  }}
+                  placeholder={DEFAULT_REALTIME_ENDPOINTS[activeRealtimeProvider]}
+                  aria-label="Endpoint WebSocket Realtime"
+                  spellCheck={false}
+                />
+                {activeRealtimeProvider === 'gemini_live' && (
+                  <div className="subagent-settings__field-group">
+                    <span className="subagent-settings__label">Google Gemini Live API Key</span>
+                    <div className="settings-credential">
+                      <input
+                        type={showGeminiKey ? 'text' : 'password'}
+                        className="ui-field"
+                        data-testid="gemini-live-api-key-input"
+                        value={effectiveConfig.geminiLiveApiKey || ''}
+                        onChange={(e) => updateField('geminiLiveApiKey', e.target.value)}
+                        placeholder="AIza... (API Key de Google AI Studio / Gemini Live)"
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label="Google Gemini Live API Key"
+                      />
+                      <button
+                        type="button"
+                        className="settings-control ui-button"
+                        onClick={() => setShowGeminiKey((v) => !v)}
+                      >
+                        {showGeminiKey ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {activeRealtimeProvider === 'openai' && (
+                  <div className="subagent-settings__field-group">
+                    <span className="subagent-settings__label">OpenAI Realtime API Key</span>
+                    <div className="settings-credential">
+                      <input
+                        type={showOpenaiKey ? 'text' : 'password'}
+                        className="ui-field"
+                        data-testid="openai-realtime-api-key-input"
+                        value={effectiveConfig.openaiRealtimeApiKey || ''}
+                        onChange={(e) => updateField('openaiRealtimeApiKey', e.target.value)}
+                        placeholder="sk-... (API Key de OpenAI Realtime)"
+                        autoComplete="off"
+                        spellCheck={false}
+                        aria-label="OpenAI Realtime API Key"
+                      />
+                      <button
+                        type="button"
+                        className="settings-control ui-button"
+                        onClick={() => setShowOpenaiKey((v) => !v)}
+                      >
+                        {showOpenaiKey ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
+          </div>
+        </div>
+
+        <div className="ui-card__row settings-row">
+          <div className="settings-row__copy">
+            <h3 className="settings-row__title">Auto-pausa por inactividad</h3>
+            <p>
+              Protege tu cuota de audio continuo pausando automáticamente el stream S2S o micrófono abierto tras silencio total sin subagentes activos.
+            </p>
+          </div>
+          <div
+            className="settings-row__control settings-row__control--menu"
+            data-testid="voice-idle-timeout-select"
+          >
+            <SelectMenu
+              label="Auto-pausa por inactividad"
+              value={String(idleTimeoutValue)}
+              triggerLabel={
+                IDLE_TIMEOUT_ROWS.find((r) => r.id === String(idleTimeoutValue))?.title ||
+                '3 min (Recomendado)'
+              }
+              rows={IDLE_TIMEOUT_ROWS}
+              variant="field"
+              onSelect={handleIdleTimeoutSelect}
+            />
+          </div>
+        </div>
+
+        <div className="ui-card__row settings-row">
+          <div className="settings-row__copy">
+            <h3 className="settings-row__title">Voz y Paleta de Argos</h3>
+            <p>
+              Elige el perfil vocal del asistente y su paleta de 3 tonos para el brillo del compositor.
+            </p>
+            <p className="settings-note" data-testid="current-voice-summary">
+              Voz actual: <strong>{currentVoiceName}</strong> · {voiceToneLabel}
+            </p>
+          </div>
+          <div className="settings-row__control">
+            <button
+              type="button"
+              className="secondary-button"
+              data-testid="open-voice-picker-btn"
+              onClick={() => setVoicePickerOpen(true)}
+            >
+              Elegir voz y paleta
+            </button>
           </div>
         </div>
 
@@ -461,81 +682,65 @@ export const ArgosAudioSection: React.FC<ArgosAudioSectionProps> = ({
             style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}
           >
             {receipts.length === 0 ? (
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+              <span className="settings-note">
                 Todavía no hay llamadas de voz registradas.
               </span>
             ) : (
               receipts.map((rec) => {
                 const isExpanded = expandedReceiptId === rec.callId;
                 return (
-                  <div
-                    key={rec.callId}
-                    style={{
-                      border: '1px solid var(--border-subtle, rgba(255,255,255,0.1))',
-                      borderRadius: 'var(--card-radius, 12px)',
-                      padding: '8px 12px',
-                      background: 'rgba(255,255,255,0.02)',
-                    }}
-                  >
+                  <Card key={rec.callId} padding="sm">
                     <button
                       type="button"
+                      className="settings-choice-row"
                       data-testid={`voice-call-receipt-${rec.callId}`}
                       onClick={() =>
                         setExpandedReceiptId((prev) => (prev === rec.callId ? null : rec.callId))
                       }
-                      style={{
-                        width: '100%',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        background: 'transparent',
-                        border: 'none',
-                        padding: 0,
-                        minHeight: 'var(--vl-control-sm, 28px)',
-                        color: 'inherit',
-                        cursor: 'pointer',
-                        textAlign: 'left',
-                        fontSize: 12.5,
-                      }}
                     >
-                      <span>
-                        {rec.turnCount} turnos · {formatDurationSeconds(rec.durationMs)} ·{' '}
-                        {rec.transport}
-                      </span>
-                      <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>
-                        {rec.ttfaP50Ms != null ? `TTFA ${Math.round(rec.ttfaP50Ms)}ms` : 'Sin TTFA'}
-                        {rec.cacheHitRatio != null
-                          ? ` · Caché ${Math.round(rec.cacheHitRatio * 100)}%`
-                          : ''}
+                      <span className="subagent-settings__section-head">
+                        <span>
+                          {rec.turnCount} turnos · {formatDurationSeconds(rec.durationMs)} ·{' '}
+                          {rec.transport}
+                        </span>
+                        <span className="settings-note">
+                          {rec.ttfaP50Ms != null ? `TTFA ${Math.round(rec.ttfaP50Ms)}ms` : 'Sin TTFA'}
+                          {rec.cacheHitRatio != null
+                            ? ` · Caché ${Math.round(rec.cacheHitRatio * 100)}%`
+                            : ''}
+                        </span>
                       </span>
                     </button>
                     {isExpanded && (
-                      <div
-                        style={{
-                          marginTop: 8,
-                          paddingTop: 8,
-                          borderTop: '1px solid rgba(255,255,255,0.08)',
-                          fontSize: 12,
-                          color: 'var(--text-muted)',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 4,
-                        }}
-                      >
-                        {rec.boundThreadId && <div>Hilo vinculado: {rec.boundThreadId}</div>}
+                      <div className="settings-transcription-result__meta">
+                        {rec.boundThreadId && <span>Hilo vinculado: {rec.boundThreadId}</span>}
                         {rec.toolsExecuted.length > 0 && (
-                          <div>Herramientas: {rec.toolsExecuted.join(', ')}</div>
+                          <span>Herramientas: {rec.toolsExecuted.join(', ')}</span>
                         )}
-                        {rec.summary && <div>Resumen: {rec.summary}</div>}
+                        {rec.summary && <span>Resumen: {rec.summary}</span>}
                       </div>
                     )}
-                  </div>
+                  </Card>
                 );
               })
             )}
           </div>
         </div>
       </div>
+
+      <VoicePickerModal
+        isOpen={voicePickerOpen}
+        initialVoice={currentVoiceName}
+        volume={effectiveConfig.voiceVolume ?? 100}
+        onClose={() => setVoicePickerOpen(false)}
+        onSelectVoice={(voiceName) => {
+          setSelectedVoiceOverride(voiceName);
+          updateField('persona', {
+            ...effectiveConfig.persona,
+            voice: voiceName,
+          });
+        }}
+      />
     </section>
   );
 };

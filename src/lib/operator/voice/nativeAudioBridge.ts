@@ -26,6 +26,13 @@ export interface NativeCaptureStopResult {
   error?: string;
 }
 
+export interface NativeCaptureSnapshotResult {
+  ok: boolean;
+  wavBytes: number;
+  wavBase64?: string;
+  error?: string;
+}
+
 export interface NativeCaptureStatusSnapshot {
   active: boolean;
   deviceName?: string | null;
@@ -137,6 +144,22 @@ export async function stopNativeAudioCapture(options?: {
     if (!options?.keepAlive) {
       cachedNativeLevel = 0;
     }
+    return { ok: false, wavBytes: 0, error: err?.message || String(err) };
+  }
+}
+
+export async function snapshotNativeAudioWav(
+  minMs: number = 500
+): Promise<NativeCaptureSnapshotResult> {
+  if (!isNativeRustAudioSupported()) {
+    return { ok: false, wavBytes: 0, error: 'Native audio unavailable outside Tauri runtime' };
+  }
+  try {
+    const res = await invokeFlatCommand<NativeCaptureSnapshotResult>('voice_audio_snapshot_wav', {
+      minMs,
+    });
+    return res ?? { ok: false, wavBytes: 0 };
+  } catch (err: any) {
     return { ok: false, wavBytes: 0, error: err?.message || String(err) };
   }
 }

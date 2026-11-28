@@ -368,5 +368,30 @@
     "id": "seth-stt-phonetic-subagent-odd",
     "input": "Lanza su agente con anti gráviti para armar el o de de de voz",
     "expected": { "type": "spawn_subagent", "provider": "antigravity", "via": "thread", "oddMode": true }
+  },
+  {
+    "id": "argos-wake-oye-thread-clod-code",
+    "input": "Oye Argos, abre un hilo con clod code para revisar el eswarm",
+    "expected": { "type": "launch_thread", "provider": "claude" }
+  },
+  {
+    "id": "argos-wake-ok-argus-terminals",
+    "input": "Ok Argus, abre 2 terminales con Grok",
+    "expected": { "type": "open_terminals", "count": 2, "engine": "grok" }
+  },
+  {
+    "id": "argos-wake-che-hargos-close",
+    "input": "Che Hargos, cierra todas las terminales",
+    "expected": { "type": "close_terminals", "target": "all" }
+  },
+  {
+    "id": "argos-wake-hola-argo-workspace-kait",
+    "input": "Hola Argo, cambia al proyecto kait",
+    "expected": { "type": "switch_workspace" }
+  },
+  {
+    "id": "argos-wake-hey-argos-subagent-worktree",
+    "input": "Hey Argos, lanza un subagente con anti gráviti para revisar el guorktri",
+    "expected": { "type": "spawn_subagent", "provider": "antigravity", "via": "thread" }
   }
 ]

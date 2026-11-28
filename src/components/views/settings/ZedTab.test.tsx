@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { ZedTab } from './ZedTab';
+import { ArgosTab } from './ArgosTab';
 import {
   OPERATOR_CONFIG_DEBOUNCE_MS,
   OPERATOR_CONFIG_STORAGE_KEY,
+  loadOperatorConfig,
   resetOperatorConfigDebounceForTest,
 } from '../../../lib/operator/config/storage';
 
@@ -48,8 +50,8 @@ describe('ZedTab Component Refactoring', () => {
     expect(screen.getByRole('button', { name: /^Proveedor$/ })).toHaveAttribute('aria-current', 'page');
     expect(screen.getByText(/Canal y Pasarela de Proveedor IA/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^OpenCode Go/ })).toBeInTheDocument();
-    expect(screen.queryByText(/Memoria Compartida de Zed/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Identidad y Comportamiento de Zed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Memoria Compartida de Argos/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Identidad y Comportamiento de Argos/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^Latencia$/ }));
     expect(screen.getByText(/Rendimiento y Latencia por Proveedor \/ Tarea/i)).toBeInTheDocument();
@@ -59,10 +61,10 @@ describe('ZedTab Component Refactoring', () => {
     expect(screen.getByText(/Entrada de Audio y Micrófono del Asistente/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^Persona$/ }));
-    expect(screen.getByText(/Identidad y Comportamiento de Zed/i)).toBeInTheDocument();
+    expect(screen.getByText(/Identidad y Comportamiento de Argos/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /^Memoria$/ }));
-    const memoryTitle = screen.getByText(/Memoria Compartida de Zed/i);
+    const memoryTitle = screen.getByText(/Memoria Compartida de Argos/i);
     expect(memoryTitle.closest('.qt-providers-container')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /^Proveedor$/ }));
@@ -153,5 +155,79 @@ describe('ZedTab Component Refactoring', () => {
     // Verify zero Unicode emojis inside the Persona settings view
     const emojiPattern = /\p{Extended_Pictographic}/u;
     expect(emojiPattern.test(container.textContent || '')).toBe(false);
+  });
+
+  it('defaults persona name to Argos, migrates legacy Zed/Seth defaults, and preserves custom names (S1.1)', () => {
+    expect(ArgosTab).toBe(ZedTab);
+    expect(loadOperatorConfig().persona.name).toBe('Argos');
+
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({ persona: { name: 'Zed' } })
+    );
+    expect(loadOperatorConfig().persona.name).toBe('Argos');
+
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({ persona: { name: 'Seth' } })
+    );
+    expect(loadOperatorConfig().persona.name).toBe('Argos');
+
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({ persona: { name: 'Atlas' } })
+    );
+    expect(loadOperatorConfig().persona.name).toBe('Atlas');
+  });
+
+  it('persists Antigravity and gemini-4-hydrogen-low across QuotaExceededError cleanup and component remount', () => {
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        activeProvider: 'opencode',
+        antigravityModel: 'gemini-4-carbon-low',
+      })
+    );
+    localStorage.setItem('kite.chat.thread.legacy-bloated', 'x'.repeat(250_000));
+
+    const origSetItem = localStorage.setItem.bind(localStorage);
+    const setItemSpy = vi
+      .spyOn(localStorage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (
+          key === OPERATOR_CONFIG_STORAGE_KEY &&
+          localStorage.getItem('kite.chat.thread.legacy-bloated') !== null
+        ) {
+          throw new DOMException('QuotaExceededError', 'QuotaExceededError');
+        }
+        return origSetItem(key, value);
+      });
+
+    try {
+      const firstMount = render(<ArgosTab />);
+      fireEvent.click(screen.getByRole('button', { name: /^Antigravity/ }));
+
+      expect(localStorage.getItem('kite.chat.thread.legacy-bloated')).toBeNull();
+      expect(screen.getByText('Antigravity · gemini-4-carbon-low')).toBeInTheDocument();
+
+      const modelTrigger = screen.getByRole('combobox', { name: 'Modelo de Antigravity' });
+      fireEvent.click(modelTrigger);
+      fireEvent.click(screen.getByRole('option', { name: /Gemini 4 Hydrogen \(Low\)/i }));
+
+      expect(screen.getByText('Antigravity · gemini-4-hydrogen-low')).toBeInTheDocument();
+      expect(loadOperatorConfig()).toEqual(
+        expect.objectContaining({
+          activeProvider: 'antigravity',
+          antigravityModel: 'gemini-4-hydrogen-low',
+        })
+      );
+
+      firstMount.unmount();
+
+      render(<ArgosTab />);
+      expect(screen.getByText('Antigravity · gemini-4-hydrogen-low')).toBeInTheDocument();
+    } finally {
+      setItemSpy.mockRestore();
+    }
   });
 });

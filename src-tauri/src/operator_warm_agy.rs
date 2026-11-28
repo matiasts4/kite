@@ -1,7 +1,7 @@
 //! Persistent warm `agy --input-format stream-json` transport for the Zed Operator.
 //! Reuses one headless Antigravity CLI process across turns so repeated commands avoid
 //! cold CLI/auth/workspace startup overhead, while cleaning up on timeout, model switch,
-//! turn cap, 5-minute idle TTL, or application exit.
+//! turn cap, 90-second idle TTL, or application exit.
 
 use crate::chat::persistent::antigravity::{parse_antigravity_line, turn_line};
 use crate::chat::persistent::controls::ANTIGRAVITY_STREAM_ARGS;
@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const WARM_ANTIGRAVITY_MAX_TURNS: u32 = 24;
-const WARM_ANTIGRAVITY_IDLE_TTL: Duration = Duration::from_secs(300);
+const WARM_ANTIGRAVITY_IDLE_TTL: Duration = Duration::from_secs(90);
 const WARM_STDERR_TAIL_LIMIT: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,6 +206,34 @@ impl WarmAntigravityPool {
         })
     }
 
+    pub(crate) fn prewarm_session(
+        &self,
+        spawner: &dyn Fn(&Path, Option<&str>) -> Result<Box<dyn StreamSessionIO>, String>,
+        bin: &Path,
+        model: Option<&str>,
+    ) -> Result<bool, String> {
+        let _turn_guard = self.turn_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let normalized_model = model.map(str::trim).filter(|s| !s.is_empty());
+
+        if let Some(existing) = self
+            .take_matching_or_kill_stale(bin, normalized_model)
+            .map_err(|e| e.message)?
+        {
+            self.park_entry(existing);
+            return Ok(false);
+        }
+
+        let io = spawner(bin, normalized_model)?;
+        self.park_entry(WarmEntry {
+            bin: bin.to_path_buf(),
+            model: normalized_model.map(str::to_string),
+            turn_count: 0,
+            last_used: Instant::now(),
+            io,
+        });
+        Ok(true)
+    }
+
     fn take_matching_or_kill_stale(
         &self,
         bin: &Path,
@@ -295,6 +323,34 @@ impl WarmAntigravityPool {
         }
     }
 
+    pub(crate) fn reap_if_idle(&self) -> bool {
+        self.reap_if_idle_after(self.idle_ttl)
+    }
+
+    pub(crate) fn reap_if_idle_after(&self, idle_ttl: Duration) -> bool {
+        let (lock, cvar) = &*self.slot;
+        let stale = {
+            let mut state = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let expired = state
+                .entry
+                .as_ref()
+                .is_some_and(|entry| entry.last_used.elapsed() >= idle_ttl);
+            if expired {
+                let taken = state.entry.take();
+                cvar.notify_all();
+                taken
+            } else {
+                None
+            }
+        };
+        if let Some(mut entry) = stale {
+            entry.io.kill_and_wait();
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn shutdown(&self) {
         let (lock, cvar) = &*self.slot;
         let stale = {
@@ -368,6 +424,7 @@ struct RealHiddenChildIO {
 impl RealHiddenChildIO {
     pub(crate) fn spawn(bin: &Path, model: Option<&str>) -> Result<Box<dyn StreamSessionIO>, String> {
         let mut args: Vec<&str> = ANTIGRAVITY_STREAM_ARGS.to_vec();
+        // `agy --help` accepts `--disable-slash-commands` in stream-json print mode (`--disable-telemetry` is ACP-only).
         args.push("--disable-slash-commands");
         if let Some(m) = model.map(str::trim).filter(|s| !s.is_empty()) {
             args.push("--model");
@@ -509,10 +566,27 @@ pub(crate) fn run_warm_antigravity_turn(
     pool.execute_turn(&RealHiddenChildIO::spawn, bin, model, prompt, timeout)
 }
 
+pub(crate) fn prewarm_warm_antigravity_session(
+    bin: &Path,
+    model: Option<&str>,
+) -> Result<bool, String> {
+    let pool = WARM_ANTIGRAVITY_POOL.get_or_init(|| {
+        WarmAntigravityPool::new(WARM_ANTIGRAVITY_MAX_TURNS, WARM_ANTIGRAVITY_IDLE_TTL)
+    });
+    pool.prewarm_session(&RealHiddenChildIO::spawn, bin, model)
+}
+
 pub fn shutdown_warm_operator_sessions() {
     if let Some(pool) = WARM_ANTIGRAVITY_POOL.get() {
         pool.shutdown();
     }
+}
+
+#[allow(dead_code)]
+pub fn reap_idle_warm_operator() -> bool {
+    WARM_ANTIGRAVITY_POOL
+        .get()
+        .is_some_and(WarmAntigravityPool::reap_if_idle)
 }
 
 #[cfg(test)]
@@ -828,6 +902,71 @@ mod tests {
     }
 
     #[test]
+    fn prewarm_spawns_once_reuses_on_first_turn_and_replaces_on_model_change() {
+        let pool = WarmAntigravityPool::new(24, Duration::from_secs(300));
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let kills = Arc::new(AtomicUsize::new(0));
+        let models = Arc::new(Mutex::new(Vec::new()));
+        let written = Arc::new(Mutex::new(Vec::new()));
+
+        let mut s1 = VecDeque::new();
+        s1.push_back(FakeAction::Lines(ok_turn_lines(&["PREWARMED_OK"])));
+        let s2 = VecDeque::new();
+
+        let scripts = Arc::new(Mutex::new(VecDeque::from([s1, s2])));
+        let spawner = make_spawner(
+            Arc::clone(&spawns),
+            Arc::clone(&kills),
+            Arc::clone(&models),
+            Arc::clone(&written),
+            scripts,
+        );
+
+        assert_eq!(
+            pool.prewarm_session(&spawner, Path::new("agy"), Some("gemini-4-hydrogen-low"))
+                .unwrap(),
+            true
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(kills.load(Ordering::SeqCst), 0);
+
+        // Second prewarm with identical model reuses existing idle warm child
+        assert_eq!(
+            pool.prewarm_session(&spawner, Path::new("agy"), Some("gemini-4-hydrogen-low"))
+                .unwrap(),
+            false
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(kills.load(Ordering::SeqCst), 0);
+
+        // First real turn reuses the prewarmed child without respawning
+        let reply = pool
+            .execute_turn(
+                &spawner,
+                Path::new("agy"),
+                Some("gemini-4-hydrogen-low"),
+                "hola",
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(reply, "PREWARMED_OK");
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert_eq!(kills.load(Ordering::SeqCst), 0);
+
+        // Prewarm with a different model replaces the stale session cleanly
+        assert_eq!(
+            pool.prewarm_session(&spawner, Path::new("agy"), Some("gemini-4-hydrogen-medium"))
+                .unwrap(),
+            true
+        );
+        assert_eq!(spawns.load(Ordering::SeqCst), 2);
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+
+        pool.shutdown();
+        assert_eq!(kills.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     #[ignore = "live agy CLI latency verification"]
     fn test_live_warm_antigravity_operator_latency() {
         let t1 = crate::operator_runtime::query_operator_agent_direct(json!({
@@ -855,5 +994,44 @@ mod tests {
         assert_eq!(t1["success"], true);
         assert_eq!(t2["success"], true);
         assert_eq!(t3["success"], true);
+    }
+
+    #[test]
+    fn warm_pool_uses_90s_idle_ttl_and_reap_if_idle_evicts_expired_slot() {
+        assert_eq!(WARM_ANTIGRAVITY_IDLE_TTL, Duration::from_secs(90));
+        assert!(!reap_idle_warm_operator() || WARM_ANTIGRAVITY_POOL.get().is_some());
+
+        let pool = WarmAntigravityPool::new(24, Duration::from_secs(90));
+        let spawns = Arc::new(AtomicUsize::new(0));
+        let kills = Arc::new(AtomicUsize::new(0));
+        let models = Arc::new(Mutex::new(Vec::new()));
+        let written = Arc::new(Mutex::new(Vec::new()));
+
+        let scripts = Arc::new(Mutex::new(VecDeque::from([VecDeque::new()])));
+        let spawner = make_spawner(
+            Arc::clone(&spawns),
+            Arc::clone(&kills),
+            Arc::clone(&models),
+            Arc::clone(&written),
+            scripts,
+        );
+
+        assert!(pool.prewarm_session(&spawner, Path::new("agy"), Some("m")).unwrap());
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        assert!(!pool.reap_if_idle(), "freshly warmed slot must not be reaped before 90s");
+        assert_eq!(kills.load(Ordering::SeqCst), 0);
+
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(
+            pool.reap_if_idle_after(Duration::from_millis(10)),
+            "idle slot past TTL must be reaped"
+        );
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        assert!(
+            !pool.reap_if_idle_after(Duration::from_millis(10)),
+            "second reap on empty slot must return false"
+        );
+        pool.shutdown();
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
     }
 }

@@ -9,6 +9,7 @@ import {
   prewarmVoiceSession,
   resetSessionPrewarmForTests,
 } from '../voice/sessionPrewarm';
+import { voiceSessionStore } from '../voice/voiceSessionStore';
 import * as ipc from '../../ipc';
 
 vi.mock('../../ipc', async () => {
@@ -41,6 +42,7 @@ describe('planTurnLLM — KV-Cache Split, Tool Pruning, History Compaction & Pre
   afterEach(() => {
     runLedger.clearHistory();
     resetSessionPrewarmForTests();
+    voiceSessionStore.clearDraftProposal('thr-echo-fallback');
   });
 
   it('keeps messages[0] byte-identical across turns and places dynamicTail in a trailing context block', async () => {
@@ -194,5 +196,87 @@ describe('planTurnLLM — KV-Cache Split, Tool Pruning, History Compaction & Pre
     expect(ipc.listChatSummaries).toHaveBeenCalledTimes(2);
 
     await expect(prewarmVoiceSession({ workspaceId: 'ws-1' })).resolves.toBeUndefined();
+  });
+
+  it('accepts confirm_proposal whose reply repeats the active draftProposal phrasing without prompt-echo retry', async () => {
+    const proposal = {
+      proposalId: 'prop-1795651197444-4m8i',
+      status: 'awaiting_confirmation' as const,
+      targetKind: 'subagent' as const,
+      title: 'Corregir recorte superior del aura del asistente',
+      taskBrief:
+        'Localizar el componente de animación o figura del asistente en el proyecto kite, inspeccionar su contenedor, propiedades de overflow, máscaras o gradientes del aura/desvanecimiento en la parte superior y corregir el recorte.',
+      questionForUser:
+        '¿Quieres que lance un subagente para localizar el componente del asistente y revisar ese recorte en el desvanecimiento superior?',
+      revision: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    const planSpy = vi.fn(async () => ({
+      rawText: JSON.stringify({
+        reply:
+          'Perfecto, ya lanzo el subagente para localizar el componente del asistente y revisar ese recorte en el desvanecimiento superior.',
+        actions: [{ type: 'confirm_proposal', proposalId: proposal.proposalId }],
+      }),
+      latencyMs: 140,
+      model: 'gemini-4-hydrogen-low',
+    }));
+    const mockProvider: PlannerProvider = { id: 'antigravity', plan: planSpy };
+
+    const plan = await planTurnLLM(
+      'sí, quiero que lo lances.',
+      mockProvider,
+      { workspaceId: 'ws-1', workspaceName: 'kite', mode: 'thread', voiceSessionActive: true },
+      'turn-confirm-no-echo',
+      undefined,
+      { draftProposal: proposal }
+    );
+
+    expect(planSpy).toHaveBeenCalledTimes(1);
+    expect(plan.strategy).toBe('llm');
+    expect(plan.fallbackReason).toBeUndefined();
+    expect(plan.actions).toEqual([
+      { type: 'confirm_proposal', proposalId: proposal.proposalId },
+    ]);
+  });
+
+  it('passes proposal scopeKey to heuristic fallback so natural confirmation recovers confirm_proposal if LLM errors', async () => {
+    const proposalScope = 'thr-echo-fallback';
+    voiceSessionStore.setDraftProposal(proposalScope, {
+      proposalId: 'prop-1795651197444-4m8i',
+      status: 'awaiting_confirmation',
+      targetKind: 'subagent',
+      title: 'Corregir recorte superior del aura del asistente',
+      taskBrief: 'Revisar el recorte superior del aura.',
+      questionForUser: '¿Quieres que lance el subagente?',
+      revision: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const failingProvider: PlannerProvider = {
+      id: 'antigravity',
+      plan: vi.fn(async () => {
+        throw new Error('transient gateway failure');
+      }),
+    };
+
+    const fallbackPlan = await planTurnLLM(
+      'sí, quiero que lo lances.',
+      failingProvider,
+      {
+        workspaceId: 'ws-1',
+        boundThreadId: proposalScope,
+        mode: 'thread',
+        voiceSessionActive: true,
+      },
+      'turn-fallback-scope'
+    );
+
+    expect(fallbackPlan.strategy).toBe('heuristic-fallback');
+    expect(fallbackPlan.actions).toEqual([
+      { type: 'confirm_proposal', proposalId: 'prop-1795651197444-4m8i' },
+    ]);
   });
 });

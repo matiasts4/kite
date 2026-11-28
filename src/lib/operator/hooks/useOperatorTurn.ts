@@ -2,7 +2,7 @@
 // Coordinates operator turn execution, live stage tracking (Pensando -> Ejecutando -> Verificando -> Listo),
 // and trace timeline inspection.
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { toast } from '../../toast';
 import {
   runOperatorTurn,
@@ -112,7 +112,7 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
         }
 
         if (ev.error) {
-          toast.error('Asistente Zed', ev.error);
+          toast.error('Asistente Argos', ev.error);
         }
         if (ev.overallSuccess) {
           setStage('done');
@@ -188,7 +188,7 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
                 : String(err);
           setStage('error');
           setStageLabel(getStageLabelEs('error', detail));
-          toast.error('Asistente Zed', detail);
+          toast.error('Asistente Argos', detail);
           if (resetTimerRef.current) window.clearTimeout(resetTimerRef.current);
           resetTimerRef.current = window.setTimeout(() => {
             setStage('idle');
@@ -280,17 +280,32 @@ export function useOperatorTurn(defaultWorkspaceId?: string | null): UseOperator
     setStageLabel('');
   }, []);
 
-  return {
-    busy,
-    stage,
-    stageLabel,
-    lastTurn,
-    turns,
-    runTurn,
-    copyTurnTrace,
-    openLogsFolder,
-    clearLogs,
-    rerunTurn,
-    resetStage,
-  };
+  return useMemo(
+    () => ({
+      busy,
+      stage,
+      stageLabel,
+      lastTurn,
+      turns,
+      runTurn,
+      copyTurnTrace,
+      openLogsFolder,
+      clearLogs,
+      rerunTurn,
+      resetStage,
+    }),
+    [
+      busy,
+      stage,
+      stageLabel,
+      lastTurn,
+      turns,
+      runTurn,
+      copyTurnTrace,
+      openLogsFolder,
+      clearLogs,
+      rerunTurn,
+      resetStage,
+    ]
+  );
 }

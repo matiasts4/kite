@@ -325,4 +325,191 @@ describe('zedVoice — Native Rust WASAPI Capture, Adaptive VAD, Barge-In & Stre
       expect.objectContaining({ method: 'POST' })
     );
   });
+
+  it('resolves browser deviceId to WASAPI label, triggers VAD at quiet 0.011 RMS, and surfaces rolling WAV snapshot previews', async () => {
+    vi.useFakeTimers();
+    (window as any).__TAURI_INTERNALS__ = { invoke: vi.fn() };
+    localStorage.setItem('kite_selected_mic_device_id', 'browser-hash-123');
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn(),
+        enumerateDevices: vi.fn(async () => [
+          {
+            kind: 'audioinput',
+            deviceId: 'browser-hash-123',
+            label: 'USB Podcast Mic (0d8c:0014)',
+            groupId: 'grp-1',
+            toJSON: () => ({}),
+          } as MediaDeviceInfo,
+        ]),
+      },
+    });
+
+    vi.mocked(ipc.proxyOperatorHttp)
+      .mockResolvedValueOnce({
+        success: true,
+        status: 200,
+        body: JSON.stringify({ text: 'abre el explorador' }),
+      } as any)
+      .mockResolvedValue({
+        success: true,
+        status: 200,
+        body: JSON.stringify({ text: 'abre el explorador ahora' }),
+      } as any);
+
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'proxy_operator_http') {
+        return {
+          success: true,
+          status: 200,
+          body: JSON.stringify({ text: 'abre el explorador ahora' }),
+        };
+      }
+      return {};
+    });
+
+    vi.mocked(ipc.invokeFlatCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'voice_audio_start_capture') {
+        return {
+          ok: true,
+          deviceName: 'USB Podcast Mic (0d8c:0014)',
+          sampleRate: 16000,
+          channels: 1,
+        };
+      }
+      if (cmd === 'voice_audio_mark_speech_start') {
+        return { ok: true };
+      }
+      if (cmd === 'voice_audio_snapshot_wav') {
+        return {
+          ok: true,
+          wavBase64: btoa('R'.repeat(400)),
+          wavBytes: 6400,
+          speechMs: 700,
+        };
+      }
+      if (cmd === 'voice_audio_stop_capture') {
+        return {
+          ok: true,
+          wavBase64: btoa('F'.repeat(400)),
+          wavBytes: 12000,
+          speechMs: 1400,
+        };
+      }
+      return { ok: true };
+    });
+
+    const interims: string[] = [];
+    const listenPromise = startOperatorListening({
+      onInterim: (txt) => {
+        interims.push(txt);
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    expect(ipc.invokeFlatCommand).toHaveBeenCalledWith(
+      'voice_audio_start_capture',
+      expect.objectContaining({ deviceId: 'wasapi:USB Podcast Mic (0d8c:0014)' })
+    );
+
+    // Emit quiet RMS 0.011 frames (below 0.016 browser threshold, above 0.008 native threshold)
+    for (let i = 0; i < 6; i++) {
+      emitNativeEvent('voice:audio-level', { level: 0.14, rms: 0.011, durationMs: 40 });
+      await vi.advanceTimersByTimeAsync(40);
+    }
+    expect(ipc.invokeFlatCommand).toHaveBeenCalledWith(
+      'voice_audio_mark_speech_start',
+      expect.anything()
+    );
+
+    // Advance enough for rolling WAV cloud snapshot timer to fire and project interim text
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(ipc.invokeFlatCommand).toHaveBeenCalledWith(
+      'voice_audio_snapshot_wav',
+      expect.objectContaining({ minMs: 500 })
+    );
+    expect(interims).toContain('abre el explorador');
+
+    // Finish turn with trailing silence
+    for (let i = 0; i < 6; i++) {
+      emitNativeEvent('voice:audio-level', { level: 0.005, rms: 0.002, durationMs: 40 });
+    }
+    await vi.advanceTimersByTimeAsync(1600);
+    await vi.runAllTimersAsync();
+
+    await expect(listenPromise).resolves.toBe('abre el explorador ahora');
+  });
+
+  it('keeps locked prefix smooth across rust-ws revisions and blocks WebSpeech onend or rolling overwrites', async () => {
+    vi.useFakeTimers();
+
+    let recognitionInstance: any = null;
+    (window as any).SpeechRecognition = vi.fn(function (this: any) {
+      recognitionInstance = this;
+      this.start = vi.fn();
+      this.stop = vi.fn();
+      this.abort = vi.fn();
+    });
+
+    vi.mocked(ipc.invokeFlatCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'voice_audio_start_capture') return { ok: true, sampleRate: 16000 };
+      if (cmd === 'voice_audio_mark_speech_start') return { ok: true, preRollSamples: 6400 };
+      if (cmd === 'voice_audio_stop_capture') {
+        return {
+          ok: true,
+          wavBytes: 0,
+          sttTranscript: 'Quiero que continuemos con toda la parte de voz mejor',
+        };
+      }
+      return { ok: true };
+    });
+
+    const interims: string[] = [];
+    const listenPromise = startOperatorListening({
+      continuous: true,
+      language: 'es-ES',
+      onInterim: (txt) => interims.push(txt),
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    expect(recognitionInstance).not.toBeNull();
+
+    emitNativeEvent('voice:stt-partial', {
+      kind: 'partial',
+      text: 'Quiero que continuemos con toda la parte',
+    });
+    emitNativeEvent('voice:stt-partial', {
+      kind: 'partial',
+      text: 'Quiero que continuemos con toda la parte de',
+    });
+    // Retroactive edit earlier in the phrase must not rewrite locked words backwards
+    emitNativeEvent('voice:stt-partial', {
+      kind: 'partial',
+      text: 'Quise que continuemos por toda la parte de voz mejor',
+    });
+
+    // Competing WebSpeech result and onend flush must NOT clobber authoritative rust-ws
+    recognitionInstance.onresult({
+      resultIndex: 0,
+      results: [{ isFinal: true, 0: { transcript: 'texto web speech obsoleto' } }],
+    });
+    recognitionInstance.onend();
+
+    // Rolling preview must stay suppressed when streaming STT is authoritative
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(ipc.invokeFlatCommand).not.toHaveBeenCalledWith(
+      'voice_audio_snapshot_wav',
+      expect.anything()
+    );
+
+    const lastInterim = interims[interims.length - 1];
+    expect(lastInterim).toBe('Quiero que continuemos con toda la parte de voz mejor');
+    expect(interims).not.toContain('texto web speech obsoleto');
+
+    await vi.advanceTimersByTimeAsync(1500);
+    await expect(listenPromise).resolves.toBe(
+      'Quiero que continuemos con toda la parte de voz mejor'
+    );
+  });
 });

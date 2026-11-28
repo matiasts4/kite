@@ -2,6 +2,8 @@
 // Replaces static RMS thresholds and fixed 2.4s silence windows with ambient noise calibration,
 // Schmitt-trigger hysteresis, syntactic Spanish endpointing, and echo-resistant barge-in detection.
 
+import { isSpanishOpenClause } from './speechPartial';
+
 export interface AdaptiveVadConfig {
   minOnsetRms?: number;
   minReleaseRms?: number;
@@ -81,6 +83,167 @@ export class PcmPreRollBuffer {
 
   public getSampleCount(): number {
     return this.totalSamples;
+  }
+}
+
+export type PreConnectBufferState = 'buffering' | 'live';
+
+export interface PreConnectAudioRingBufferConfig {
+  maxDurationMs?: number;
+  sampleRate?: number;
+  leadingSilenceThreshold?: number;
+  preRollMs?: number;
+}
+
+/**
+ * 15-30s circular PCM ring buffer used during session/WebSocket/mic warmup ("buffering" -> "live").
+ * On `releaseAndDrain()`, trims leading dead silence while retaining `preRollMs` (default 100ms)
+ * before the first voiced frame (`rms >= leadingSilenceThreshold`) so opening words are never clipped.
+ */
+export class PreConnectAudioRingBuffer {
+  private maxDurationMs: number;
+  private sampleRate: number;
+  private leadingSilenceThreshold: number;
+  private preRollMs: number;
+  private maxSamples: number;
+  private preRollSamples: number;
+
+  private state: PreConnectBufferState = 'buffering';
+  private chunks: Float32Array[] = [];
+  private totalSamples = 0;
+
+  constructor(
+    configOrMaxDurationMs: PreConnectAudioRingBufferConfig | number = {},
+    sampleRate: number = 16000,
+    leadingSilenceThreshold: number = 0.003,
+    preRollMs: number = 100
+  ) {
+    const cfg: PreConnectAudioRingBufferConfig =
+      typeof configOrMaxDurationMs === 'number'
+        ? {
+            maxDurationMs: configOrMaxDurationMs,
+            sampleRate,
+            leadingSilenceThreshold,
+            preRollMs,
+          }
+        : configOrMaxDurationMs;
+
+    this.maxDurationMs = Math.max(100, cfg.maxDurationMs ?? 20000);
+    this.sampleRate = Math.max(8000, cfg.sampleRate ?? 16000);
+    this.leadingSilenceThreshold = Math.max(0, cfg.leadingSilenceThreshold ?? 0.003);
+    this.preRollMs = Math.max(0, cfg.preRollMs ?? 100);
+    this.maxSamples = Math.max(1, Math.round((this.sampleRate * this.maxDurationMs) / 1000));
+    this.preRollSamples = Math.max(0, Math.round((this.sampleRate * this.preRollMs) / 1000));
+  }
+
+  public getState(): PreConnectBufferState {
+    return this.state;
+  }
+
+  public getSampleCount(): number {
+    return this.totalSamples;
+  }
+
+  public getDurationMs(): number {
+    return Math.round((this.totalSamples / this.sampleRate) * 1000);
+  }
+
+  public push(samples: Float32Array): void {
+    if (this.state !== 'buffering' || !samples || samples.length === 0) return;
+    const copy = new Float32Array(samples);
+    this.chunks.push(copy);
+    this.totalSamples += copy.length;
+
+    while (this.totalSamples > this.maxSamples && this.chunks.length > 0) {
+      const oldest = this.chunks[0];
+      if (this.totalSamples - oldest.length >= this.maxSamples) {
+        this.chunks.shift();
+        this.totalSamples -= oldest.length;
+      } else {
+        const overflow = this.totalSamples - this.maxSamples;
+        this.chunks[0] = oldest.slice(overflow);
+        this.totalSamples -= overflow;
+        break;
+      }
+    }
+  }
+
+  public clear(): void {
+    this.chunks = [];
+    this.totalSamples = 0;
+  }
+
+  public reset(nextSampleRate?: number): void {
+    if (typeof nextSampleRate === 'number' && Number.isFinite(nextSampleRate) && nextSampleRate > 0) {
+      this.sampleRate = Math.max(8000, nextSampleRate);
+      this.maxSamples = Math.max(1, Math.round((this.sampleRate * this.maxDurationMs) / 1000));
+      this.preRollSamples = Math.max(0, Math.round((this.sampleRate * this.preRollMs) / 1000));
+    }
+    this.clear();
+    this.state = 'buffering';
+  }
+
+  public releaseAndDrain(): Float32Array[] {
+    const drained = this.chunks;
+    this.chunks = [];
+    this.totalSamples = 0;
+    this.state = 'live';
+
+    if (drained.length === 0) return [];
+    if (this.leadingSilenceThreshold <= 0) {
+      return drained;
+    }
+
+    const windowSamples = Math.max(16, Math.round((this.sampleRate * 10) / 1000));
+    let firstVoicedSample = -1;
+    let globalOffset = 0;
+
+    for (const chunk of drained) {
+      for (let i = 0; i < chunk.length; i += windowSamples) {
+        const end = Math.min(chunk.length, i + windowSamples);
+        const len = end - i;
+        let sumSq = 0;
+        for (let j = i; j < end; j++) {
+          const s = chunk[j];
+          sumSq += s * s;
+        }
+        const rms = Math.sqrt(sumSq / len);
+        if (rms >= this.leadingSilenceThreshold) {
+          firstVoicedSample = globalOffset + i;
+          break;
+        }
+      }
+      if (firstVoicedSample >= 0) break;
+      globalOffset += chunk.length;
+    }
+
+    // All buffered audio was dead silence below threshold
+    if (firstVoicedSample < 0) {
+      return [];
+    }
+
+    const keepFromSample = Math.max(0, firstVoicedSample - this.preRollSamples);
+    if (keepFromSample === 0) {
+      return drained;
+    }
+
+    const result: Float32Array[] = [];
+    let cursor = 0;
+    for (const chunk of drained) {
+      const chunkEnd = cursor + chunk.length;
+      if (chunkEnd <= keepFromSample) {
+        cursor = chunkEnd;
+        continue;
+      }
+      if (cursor < keepFromSample) {
+        result.push(chunk.slice(keepFromSample - cursor));
+      } else {
+        result.push(chunk);
+      }
+      cursor = chunkEnd;
+    }
+
+    return result;
   }
 }
 
@@ -198,17 +361,15 @@ export class AdaptiveVadController {
   }
 }
 
-const OPEN_TRAILING_CONNECTOR_RE =
-  /(?:[,:;]\s*|\b(?:y|e|o|u|que|para|por|con|sin|de|del|en|a|al|pero|sino|porque|como|si|cuando|donde|aunque|mientras|luego|despu[eé]s|adem[aá]s|entonces|eh+|em+|este|mmm+|o\s+sea|es\s+decir|bueno|pues|digamos|quiero|necesito|abre|abrir|cierra|cerrar|lanza|lanzar|delega|delegar|dile|p[aá]sale))\s*$/i;
-
 const COMPLETE_SHORT_COMMAND_RE =
   /^(?:hola|silencio|c[aá]llate|callate|para|det[eé]n|gracias|listo|s[ií]|no|ok|okey|vale|dale|cancelar|d[eé]jalo|olv[ií]dalo|(?:cierra|sierra|abre|resume|enfoca|iguala)\s+\S+(?:\s+\S+){0,4})$/i;
 
 /**
- * Computes an adaptive end-of-speech trailing silence window (650ms–2200ms)
+ * Computes an adaptive end-of-speech trailing silence window (700ms–2100ms)
  * based on interim Spanish syntax and utterance duration.
- * - Complete/closed utterances settle quickly (700–850ms) to minimize latency.
- * - Mid-clause pauses after conjunctions/hesitations hold open (1800–2100ms) to avoid premature cutoffs.
+ * - Complete/closed utterances settle quickly (700–750ms) to minimize latency.
+ * - Normal multi-word clauses maintain at least a 950ms floor so natural pauses do not cut off speech.
+ * - Mid-clause pauses after conjunctions/hesitations hold open (1850–2100ms) to avoid premature cutoffs.
  */
 export function computeAdaptiveEndpointMs(
   interimText: string = '',
@@ -224,11 +385,11 @@ export function computeAdaptiveEndpointMs(
     return 1250;
   }
 
-  if (OPEN_TRAILING_CONNECTOR_RE.test(clean)) {
+  if (isSpanishOpenClause(clean)) {
     return 1950;
   }
 
-  if (/[.!?]\s*$/.test(clean) && !/\.\.\.\s*$/.test(clean)) {
+  if (/[.!?]\s*$/.test(clean) && !/(?:\.\.\.|…)\s*$/.test(clean)) {
     return 700;
   }
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   parseOperatorIntent,
   parseOperatorCommandLocal,
@@ -15,6 +15,8 @@ import {
   saveOperatorConfig,
   loadOperatorConfig,
   syncNativeCredentialsWithVault,
+  resetOperatorConfigDebounceForTest,
+  OPERATOR_CONFIG_STORAGE_KEY,
   DEFAULT_OPERATOR_CONFIG,
 } from './operatorConfig';
 import * as operatorProvidersModule from './operatorProviders';
@@ -635,15 +637,66 @@ describe('runOperatorTurn — negation short-circuit & run ledger closure', () =
     });
 
     expect(res.overallSuccess).toBe(false);
+    expect(res.reply).toMatch(/sin cuota/i);
+    expect(res.reply).not.toContain('No reconocí una acción concreta');
     expect(getTurnTrace('turn-quota-1')?.error).toMatch(/sin cuota/i);
+  });
+
+  it('surfaces real LLM fallback errors instead of the local heuristic unrecognized message', async () => {
+    const { runOperatorTurn } = await import('./index');
+    vi.mocked(planTurnLLM).mockResolvedValue({
+      strategy: 'heuristic-fallback',
+      actions: [],
+      fallbackReason: 'Antigravity CLI falló con código 1',
+    });
+
+    const res = await runOperatorTurn('hola, ¿cómo vamos?', {
+      provider: { id: 'antigravity' } as any,
+      turnId: 'turn-agy-err-1',
+    });
+
+    expect(res.overallSuccess).toBe(false);
+    expect(res.reply).toContain('Antigravity CLI falló con código 1');
+    expect(res.reply).not.toContain('No reconocí una acción concreta');
+  });
+
+  it('surfaces URL-stripped HTTP 403 subscription errors with provider context on turn failure', async () => {
+    const { runOperatorTurn } = await import('./index');
+    vi.mocked(planTurnLLM).mockResolvedValue({
+      strategy: 'heuristic-fallback',
+      actions: [],
+      fallbackReason:
+        'Error HTTP 403 desde https://opencode.ai/inference/go/openai/v1/chat/completions: {"error":{"type":"permission_error","message":"An active OpenCode Go subscription is required to use OpenCode Go models."}}',
+    });
+
+    const res = await runOperatorTurn('quiero analizar los errores de la última conversación', {
+      provider: { id: 'opencode' } as any,
+      turnId: 'turn-opencode-403-1',
+    });
+
+    expect(res.overallSuccess).toBe(false);
+    expect(res.reply).toContain('OpenCode');
+    expect(res.reply).toContain(
+      'HTTP 403: An active OpenCode Go subscription is required to use OpenCode Go models.'
+    );
+    expect(res.reply).not.toContain('https://');
+    expect(res.reply).not.toContain('No reconocí una acción concreta');
   });
 });
 
 describe('OperatorConfig SQLite Vault Sync & Protection', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    const { invokeCommand } = await import('../ipc');
     localStorage.clear();
+    resetOperatorConfigDebounceForTest();
     vi.clearAllMocks();
+    vi.mocked(invokeCommand).mockResolvedValue({});
     (window as any).__TAURI_INTERNALS__ = {};
+  });
+
+  afterEach(() => {
+    delete (window as any).__TAURI_INTERNALS__;
+    resetOperatorConfigDebounceForTest();
   });
 
   it('never wipes SQLite vault credentials when saving unrelated settings while localStorage keys are empty', async () => {
@@ -728,6 +781,244 @@ describe('OperatorConfig SQLite Vault Sync & Protection', () => {
     const reloaded = loadOperatorConfig();
     expect(reloaded.grokTranscriptionApiKey).toBe('xai-voice-stt-key');
     expect(reloaded.elevenlabsApiKey).toBe('xi-eleven-tts-key');
+  });
+
+  it('migrates legacy gemini-3.8-flash-low hydrated from SQLite vault to gemini-4-hydrogen-low', async () => {
+    const { invokeCommand } = await import('../ipc');
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'get_active_provider_key' && args?.provider === 'operator_settings_json') {
+        return {
+          success: true,
+          key: JSON.stringify({
+            activeProvider: 'antigravity',
+            antigravityModel: 'gemini-3.8-flash-low',
+          }),
+        };
+      }
+      return { success: false, key: null };
+    });
+
+    const synced = await syncNativeCredentialsWithVault();
+    expect(synced.antigravityModel).toBe('gemini-4-hydrogen-low');
+  });
+
+  it('reclaims oversized kite.chat.thread.* keys on QuotaExceededError and persists Antigravity + gemini-4-hydrogen-low to both localStorage and SQLite operator_settings_json', async () => {
+    const { invokeCommand } = await import('../ipc');
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_OPERATOR_CONFIG,
+        activeProvider: 'opencode',
+        antigravityModel: 'gemini-3.8-flash',
+      })
+    );
+    localStorage.setItem('kite.chat.thread.legacy-1', 'x'.repeat(250_000));
+    localStorage.setItem('kite.chat.thread.legacy-2', 'y'.repeat(250_000));
+
+    const origSetItem = localStorage.setItem.bind(localStorage);
+    const setItemSpy = vi
+      .spyOn(localStorage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (
+          key === OPERATOR_CONFIG_STORAGE_KEY &&
+          (localStorage.getItem('kite.chat.thread.legacy-1') !== null ||
+            localStorage.getItem('kite.chat.thread.legacy-2') !== null)
+        ) {
+          throw new DOMException('QuotaExceededError', 'QuotaExceededError');
+        }
+        return origSetItem(key, value);
+      });
+
+    const updatedEvents: any[] = [];
+    const onUpdated = (e: Event) => updatedEvents.push((e as CustomEvent).detail);
+    window.addEventListener('kite:operator-config-updated', onUpdated);
+    try {
+      const saved = saveOperatorConfig({
+        activeProvider: 'antigravity',
+        antigravityModel: 'gemini-4-hydrogen-low',
+      });
+
+      expect(saved.activeProvider).toBe('antigravity');
+      expect(saved.antigravityModel).toBe('gemini-4-hydrogen-low');
+      expect(typeof saved.updatedAtMs).toBe('number');
+      expect(localStorage.getItem('kite.chat.thread.legacy-1')).toBeNull();
+      expect(localStorage.getItem('kite.chat.thread.legacy-2')).toBeNull();
+
+      const stored = JSON.parse(localStorage.getItem(OPERATOR_CONFIG_STORAGE_KEY) || '{}');
+      expect(stored.activeProvider).toBe('antigravity');
+      expect(stored.antigravityModel).toBe('gemini-4-hydrogen-low');
+      expect(typeof stored.updatedAtMs).toBe('number');
+
+      expect(updatedEvents[updatedEvents.length - 1]?.activeProvider).toBe('antigravity');
+
+      const snapshotCall = vi
+        .mocked(invokeCommand)
+        .mock.calls.find(
+          ([cmd, args]: any) =>
+            cmd === 'save_provider_credential' && args?.provider === 'operator_settings_json'
+        );
+      expect(snapshotCall).toBeTruthy();
+      const snapshotPayload = JSON.parse((snapshotCall![1] as any).key);
+      expect(snapshotPayload.activeProvider).toBe('antigravity');
+      expect(snapshotPayload.antigravityModel).toBe('gemini-4-hydrogen-low');
+      expect(snapshotPayload.updatedAtMs).toBe(saved.updatedAtMs);
+    } finally {
+      setItemSpy.mockRestore();
+      window.removeEventListener('kite:operator-config-updated', onUpdated);
+    }
+  });
+
+  it('keeps SQLite operator_settings_json save, event dispatch, and in-memory fallback active when localStorage.setItem permanently throws, without burning kite_operator_seed_v6', async () => {
+    const { invokeCommand } = await import('../ipc');
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_OPERATOR_CONFIG,
+        activeProvider: 'opencode',
+        antigravityModel: 'gemini-3.8-flash',
+      })
+    );
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const origSetItem = localStorage.setItem.bind(localStorage);
+    const setItemSpy = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new DOMException('QuotaExceededError', 'QuotaExceededError');
+    });
+
+    const events: string[] = [];
+    const onUpdated = () => events.push('updated');
+    const onChanged = () => events.push('changed');
+    window.addEventListener('kite:operator-config-updated', onUpdated);
+    window.addEventListener('kite:operator-config-changed', onChanged);
+
+    try {
+      const saved = saveOperatorConfig({
+        activeProvider: 'antigravity',
+        antigravityModel: 'gemini-4-hydrogen-low',
+      });
+
+      expect(saved.activeProvider).toBe('antigravity');
+      expect(saved.antigravityModel).toBe('gemini-4-hydrogen-low');
+      expect(events).toEqual(['updated', 'changed']);
+      expect(localStorage.getItem('kite_operator_seed_v6')).toBeNull();
+
+      const snapshotCall = vi
+        .mocked(invokeCommand)
+        .mock.calls.find(
+          ([cmd, args]: any) =>
+            cmd === 'save_provider_credential' && args?.provider === 'operator_settings_json'
+        );
+      expect(snapshotCall).toBeTruthy();
+      const snapshotPayload = JSON.parse((snapshotCall![1] as any).key);
+      expect(snapshotPayload.activeProvider).toBe('antigravity');
+      expect(snapshotPayload.antigravityModel).toBe('gemini-4-hydrogen-low');
+
+      expect(loadOperatorConfig().activeProvider).toBe('antigravity');
+      expect(loadOperatorConfig().antigravityModel).toBe('gemini-4-hydrogen-low');
+
+      setItemSpy.mockImplementation(origSetItem);
+      localStorage.clear();
+      expect(loadOperatorConfig().activeProvider).toBe(DEFAULT_OPERATOR_CONFIG.activeProvider);
+    } finally {
+      warnSpy.mockRestore();
+      setItemSpy.mockRestore();
+      window.removeEventListener('kite:operator-config-updated', onUpdated);
+      window.removeEventListener('kite:operator-config-changed', onChanged);
+    }
+  });
+
+  it('hydrates newer SQLite operator_settings_json, purges >200KB thread blobs on startup, and prevents concurrent syncNativeCredentialsWithVault from clobbering a fresher save', async () => {
+    const { invokeCommand } = await import('../ipc');
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_OPERATOR_CONFIG,
+        activeProvider: 'opencode',
+        updatedAtMs: 1_000,
+      })
+    );
+    localStorage.setItem('kite.chat.thread.oversized-startup', 'a'.repeat(210_000));
+    localStorage.setItem('kite.chat.thread.recent-small', 'b'.repeat(500));
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'get_active_provider_key') {
+        if (args?.provider === 'operator_settings_json') {
+          return {
+            success: true,
+            key: JSON.stringify({
+              activeProvider: 'antigravity',
+              antigravityModel: 'gemini-4-hydrogen-low',
+              updatedAtMs: 5_000,
+            }),
+          };
+        }
+        if (args?.provider === 'grok_transcription') {
+          return { success: true, key: 'xai-key-from-vault' };
+        }
+        return { success: false, key: null };
+      }
+      return {};
+    });
+
+    const synced = await syncNativeCredentialsWithVault();
+    expect(synced.activeProvider).toBe('antigravity');
+    expect(synced.antigravityModel).toBe('gemini-4-hydrogen-low');
+    expect(synced.grokTranscriptionApiKey).toBe('xai-key-from-vault');
+    expect(localStorage.getItem('kite.chat.thread.oversized-startup')).toBeNull();
+    expect(localStorage.getItem('kite.chat.thread.recent-small')).not.toBeNull();
+
+    // Verify race guard: a save made while syncNativeCredentialsWithVault is awaiting IPC cannot be clobbered
+    vi.clearAllMocks();
+    resetOperatorConfigDebounceForTest();
+    localStorage.setItem(
+      OPERATOR_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        ...DEFAULT_OPERATOR_CONFIG,
+        activeProvider: 'opencode',
+        updatedAtMs: 1_000,
+      })
+    );
+
+    let resolveSnapshotIpc!: (value: any) => void;
+    const deferredSnapshotIpc = new Promise((resolve) => {
+      resolveSnapshotIpc = resolve;
+    });
+
+    vi.mocked(invokeCommand).mockImplementation(async (cmd: string, args?: any) => {
+      if (cmd === 'get_active_provider_key') {
+        if (args?.provider === 'operator_settings_json') {
+          return deferredSnapshotIpc;
+        }
+        if (args?.provider === 'elevenlabs') {
+          return { success: true, key: 'xi-key-from-vault' };
+        }
+        return { success: false, key: null };
+      }
+      return {};
+    });
+
+    const syncPromise = syncNativeCredentialsWithVault();
+
+    saveOperatorConfig({
+      activeProvider: 'antigravity',
+      antigravityModel: 'gemini-4-hydrogen-low',
+    });
+
+    resolveSnapshotIpc({
+      success: true,
+      key: JSON.stringify({
+        activeProvider: 'opencode',
+        opencodeModel: 'deepseek-v4.1-flash',
+        updatedAtMs: 9_999_999_999_999,
+      }),
+    });
+
+    const afterRaceSync = await syncPromise;
+    expect(afterRaceSync.activeProvider).toBe('antigravity');
+    expect(afterRaceSync.antigravityModel).toBe('gemini-4-hydrogen-low');
+    expect(afterRaceSync.elevenlabsApiKey).toBe('xi-key-from-vault');
+    expect(loadOperatorConfig().activeProvider).toBe('antigravity');
+    expect(loadOperatorConfig().antigravityModel).toBe('gemini-4-hydrogen-low');
   });
 });
 

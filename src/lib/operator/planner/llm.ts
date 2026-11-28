@@ -293,7 +293,7 @@ export async function planTurnLLM(
     draftProposal: activeDraftProposal,
     nativeToolsEnabled,
   });
-  const systemPrompt = promptParts.fullPrompt;
+  const staticSystemPrompt = promptParts.staticPrefix;
   const pending = planOptions?.pendingDisambiguation;
   const pendingPromptSuffix = pending
     ? `\n\nDESAMBIGUACIÓN PENDIENTE DEL TURNO ANTERIOR:\n- Orden original: "${pending.originalInput}"\n- Pregunta ya formulada: "${pending.question}"\n- Dato faltante: ${pending.missingSlot}${pending.candidates?.length ? `\n- Candidatos ofrecidos: ${pending.candidates.join(', ')}` : ''}\n- Instrucción: Usa la respuesta actual del usuario para resolver este dato y ejecutar la acción (o cancela si pide dejarlo). NO hagas otra pregunta de aclaración consecutiva.`
@@ -515,7 +515,7 @@ export async function planTurnLLM(
     }
 
     try {
-      const validated = parseAndValidateModelPlan(rawOutput, systemPrompt, input);
+      const validated = parseAndValidateModelPlan(rawOutput, staticSystemPrompt, input);
 
       emitTrace({
         turnId: currentTurnId,
@@ -563,7 +563,7 @@ export async function planTurnLLM(
         recordTurnTokenBreakdown(retryRes.tokenCounts, activeTools);
       }
 
-      const retryValidated = parseAndValidateModelPlan(rawOutput, systemPrompt, input);
+      const retryValidated = parseAndValidateModelPlan(rawOutput, staticSystemPrompt, input);
 
       emitTrace({
         turnId: currentTurnId,
@@ -604,7 +604,7 @@ export async function planTurnLLM(
 
     // Graceful fallback to heuristic
     const fallbackReason = err?.message || 'Error invocando proveedor LLM';
-    const heuristicPlan = planTurnHeuristic(input);
+    const heuristicPlan = planTurnHeuristic(input, { scopeKey: proposalScope });
 
     heuristicPlan.strategy = 'heuristic-fallback';
     heuristicPlan.fallbackReason = fallbackReason;

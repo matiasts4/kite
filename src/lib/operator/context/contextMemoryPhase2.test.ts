@@ -67,12 +67,12 @@ describe('SETH Voice Mode — Phase 2 (Workspace Isolation, Unified Inspection, 
     expect(prompt).not.toContain('Billing beta');
   });
 
-  it('S4/S5: wires configured SETH persona identity and concise roster into buildOperatorSystemPrompt', () => {
+  it('S4/S5: wires configured Argos persona identity and concise roster into buildOperatorSystemPrompt', () => {
     saveOperatorConfig({
       ...DEFAULT_OPERATOR_CONFIG,
       persona: {
         ...DEFAULT_OPERATOR_CONFIG.persona,
-        name: 'SETH',
+        name: 'Argos',
         builderCallMe: 'Alan',
         tone: 'direct',
         standingInstructions: 'Priorizar arquitectura limpia.',
@@ -86,7 +86,7 @@ describe('SETH Voice Mode — Phase 2 (Workspace Isolation, Unified Inspection, 
       mode: 'thread',
     });
 
-    expect(prompt).toContain('Eres SETH');
+    expect(prompt).toContain('Eres Argos');
     expect(prompt).toContain('Alan');
     expect(prompt).toContain('feat/response-thread');
     expect(prompt).toContain('Priorizar arquitectura limpia.');

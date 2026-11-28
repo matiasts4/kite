@@ -395,7 +395,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                 <span
                   style={{
                     fontSize: '11px',
-                    color: 'var(--text-success, #4ade80)',
+                    color: 'var(--status-running, #4ade80)',
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '4px',
@@ -534,7 +534,7 @@ export const VoiceTab: React.FC<VoiceTabProps> = ({
                 <span
                   style={{
                     fontSize: '11px',
-                    color: 'var(--text-success, #4ade80)',
+                    color: 'var(--status-running, #4ade80)',
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '4px',

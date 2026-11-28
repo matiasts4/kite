@@ -38,6 +38,10 @@ const buildProps = (config: OperatorConfig) => ({
   syncingCloudflareModels: false,
   cloudflareSavedAt: null,
   onSyncCloudflareModels: vi.fn(),
+  effectiveAntigravityModels: [],
+  syncingAntigravityModels: false,
+  antigravitySavedAt: null,
+  onSyncAntigravityModels: vi.fn(),
 });
 
 const providerGroup = () => screen.getByRole('group', { name: 'Proveedores del asistente' });

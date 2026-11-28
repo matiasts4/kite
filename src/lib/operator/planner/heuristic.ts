@@ -8,6 +8,8 @@ import type {
   SwitchWorkspaceAction,
 } from '../contract';
 import { AGENT_CODENAMES } from '../../agentNames';
+import { voiceSessionStore } from '../voice/voiceSessionStore';
+import { isProposalCancellation, isProposalConfirmation } from './disambiguation';
 
 export interface LegacyOperatorIntent {
   kind:
@@ -560,11 +562,55 @@ export {
   parseLaunchThreadIntent,
 };
 
+const DIRECT_LOCAL_CONTROL_TYPES = new Set([
+  'stop_speaking',
+  'manage_pane_layout',
+  'switch_workspace',
+  'close_terminals',
+  'open_terminals',
+  'confirm_proposal',
+  'cancel_proposal',
+]);
+
+const IMMEDIATE_EXECUTION_CUE_RE =
+  /\b(?:hazlo\s+directo|sin\s+preguntar|directamente|ejecuta\s+ya|l[aá]nzalo\s+ya)\b/i;
+
+export function isDirectLocalControlAction(actionType: string): boolean {
+  return DIRECT_LOCAL_CONTROL_TYPES.has(actionType);
+}
+
+export function hasExplicitImmediateExecutionCue(input: string): boolean {
+  return IMMEDIATE_EXECUTION_CUE_RE.test(input || '');
+}
+
 /**
  * Plans a turn deterministically using the heuristic engine.
  */
-export function planTurnHeuristic(input: string): OperatorPlan {
+export function planTurnHeuristic(
+  input: string,
+  options?: { scopeKey?: string | null }
+): OperatorPlan {
   const sttNormalized = normalizeSpanishVoiceStt(input).normalized;
+
+  // S3: Active DraftTaskProposal fast confirmation/cancellation
+  const activeProposal = voiceSessionStore.getDraftProposal(options?.scopeKey);
+  if (activeProposal) {
+    if (isProposalConfirmation(sttNormalized) || isProposalConfirmation(input)) {
+      return {
+        strategy: 'heuristic',
+        actions: [{ type: 'confirm_proposal', proposalId: activeProposal.proposalId }],
+        reply: 'Confirmado, ejecutando la propuesta.',
+      };
+    }
+    if (isProposalCancellation(sttNormalized) || isProposalCancellation(input)) {
+      return {
+        strategy: 'heuristic',
+        actions: [{ type: 'cancel_proposal', proposalId: activeProposal.proposalId }],
+        reply: 'Entendido, dejo esa propuesta cancelada.',
+      };
+    }
+  }
+
   const polarity = analyzeClausePolarity(sttNormalized);
 
   // S4/S7: Full negation refuses; mixed polarity executes only the affirmative clause.

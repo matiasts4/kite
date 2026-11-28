@@ -333,7 +333,7 @@ describe('useOperatorTurn hook', () => {
       emitTurnEnd(listener, { ev: 'turn.end', overallSuccess: false, error: notice });
     });
 
-    expect(toast.error).toHaveBeenCalledWith('Asistente Zed', notice);
+    expect(toast.error).toHaveBeenCalledWith('Asistente Argos', notice);
     expect(result.current.stage).toBe('error');
     expect(result.current.stageLabel).toContain('sin cuota');
   });
@@ -356,7 +356,7 @@ describe('useOperatorTurn hook', () => {
     });
 
     expect(toast.error).toHaveBeenCalledWith(
-      'Asistente Zed',
+      'Asistente Argos',
       'El modelo del asistente se quedó sin cuota.'
     );
     expect(result.current.stage).toBe('done');

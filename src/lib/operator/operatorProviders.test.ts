@@ -7,6 +7,7 @@ import {
   clearLatencyHistory,
   getProviderLatencyStats,
   DEFAULT_OPERATOR_CONFIG,
+  expandAntigravityModels,
 } from './operatorConfig';
 import {
   queryOperatorLLM,
@@ -66,7 +67,7 @@ describe('Operator Providers & Latency Benchmarks', () => {
       const config = getOperatorConfig();
       expect(config.activeProvider).toBe(DEFAULT_OPERATOR_CONFIG.activeProvider);
       expect(config.opencodeModel).toBe('deepseek-v4.1-flash');
-      expect(config.antigravityModel).toBe('gemini-3.8-flash-low');
+      expect(config.antigravityModel).toBe('gemini-4-hydrogen-low');
       expect(config.grokModel).toBe('grok-4.7');
     });
 
@@ -90,14 +91,14 @@ describe('Operator Providers & Latency Benchmarks', () => {
       window.removeEventListener('kite:operator-config-changed', eventSpy);
     });
 
-    it('upgrades untouched legacy gemini-3.8-flash default once while preserving explicit selection', () => {
+    it('upgrades untouched legacy gemini-3.8-flash default to gemini-4-hydrogen-low once while preserving explicit selection', () => {
       localStorage.setItem(
         'kite.operator.providerConfig.v2',
         JSON.stringify({ activeProvider: 'antigravity', antigravityModel: 'gemini-3.8-flash' })
       );
       localStorage.setItem('kite_operator_seed_v4', '1');
 
-      expect(getOperatorConfig().antigravityModel).toBe('gemini-3.8-flash-low');
+      expect(getOperatorConfig().antigravityModel).toBe('gemini-4-hydrogen-low');
 
       saveOperatorConfig({ activeProvider: 'antigravity', antigravityModel: 'gemini-3.8-flash' });
       expect(getOperatorConfig().antigravityModel).toBe('gemini-3.8-flash');
@@ -554,6 +555,34 @@ describe('Operator Providers & Latency Benchmarks', () => {
 
       expect(zedChatConnections([claudeChat])).toEqual([]);
       expect(zedChatProviderIdsForConnections([claudeChat])).toEqual([]);
+    });
+  });
+
+  describe('expandAntigravityModels', () => {
+    it('expands dynamic agy effortLevels into selectable ids with gemini-4-hydrogen-low first and zero duplicates', () => {
+      const expanded = expandAntigravityModels([
+        {
+          id: 'gemini-4-carbon',
+          name: 'Gemini 4 Carbon',
+          effortLevels: ['low', 'medium', 'high'],
+        },
+        {
+          id: 'gemini-4-hydrogen',
+          name: 'Gemini 4 Hydrogen',
+          effortLevels: ['low', 'medium', 'high', 'xhigh'],
+        },
+        {
+          id: 'gemini-4-hydrogen-low',
+          name: 'Gemini 4 Hydrogen (Low)',
+        },
+      ]);
+
+      const ids = expanded.map((m) => m.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids[0]).toBe('gemini-4-hydrogen-low');
+      expect(ids.indexOf('gemini-4-carbon-low')).toBeLessThan(ids.indexOf('gemini-4-carbon-medium'));
+      expect(ids.indexOf('gemini-4-carbon-medium')).toBeLessThan(ids.indexOf('gemini-4-carbon-high'));
+      expect(ids).toContain('gemini-4-hydrogen-xhigh');
     });
   });
 });

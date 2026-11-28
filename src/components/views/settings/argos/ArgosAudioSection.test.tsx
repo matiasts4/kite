@@ -128,4 +128,156 @@ describe('ArgosAudioSection — Offline STT, Realtime Mode, Unified Audio & Rece
       expect(screen.getByText(/peek_workspace/i)).toBeInTheDocument();
     });
   });
+
+  it('T6/S5: renders Proveedor Talker Realtime SelectMenu, auto-updates default endpoints, and exposes Gemini Live / OpenAI key inputs', async () => {
+    const onFieldChange = vi.fn();
+    const { container, rerender } = render(
+      <ArgosAudioSection
+        config={{
+          ...DEFAULT_OPERATOR_CONFIG,
+          voiceTransportMode: 'realtime',
+          realtimeProvider: 'xai',
+          realtimeEndpoint: 'wss://api.x.ai/v1/realtime',
+        }}
+        onFieldChange={onFieldChange}
+      />
+    );
+
+    expect(container.querySelectorAll('select')).toHaveLength(0);
+    const providerWrap = screen.getByTestId('realtime-provider-select');
+    const providerTrigger = providerWrap.querySelector('[role="combobox"]') as HTMLElement;
+    expect(providerTrigger).toBeInTheDocument();
+    expect(providerTrigger).toHaveTextContent(/xAI Realtime \(24 kHz\)/i);
+
+    fireEvent.click(providerTrigger);
+    const geminiOption = await screen.findByText(/Google Gemini Live API \(16\/24 kHz\)/i);
+    fireEvent.click(geminiOption);
+
+    expect(onFieldChange).toHaveBeenCalledWith('realtimeProvider', 'gemini_live');
+    expect(onFieldChange).toHaveBeenCalledWith(
+      'realtimeEndpoint',
+      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent'
+    );
+
+    rerender(
+      <ArgosAudioSection
+        config={{
+          ...DEFAULT_OPERATOR_CONFIG,
+          voiceTransportMode: 'realtime',
+          realtimeProvider: 'gemini_live',
+          geminiLiveApiKey: '',
+        }}
+        onFieldChange={onFieldChange}
+      />
+    );
+
+    const geminiInput = screen.getByTestId('gemini-live-api-key-input') as HTMLInputElement;
+    expect(geminiInput).toHaveAttribute('type', 'password');
+    fireEvent.change(geminiInput, { target: { value: 'AIza-test-key' } });
+    expect(onFieldChange).toHaveBeenCalledWith('geminiLiveApiKey', 'AIza-test-key');
+
+    rerender(
+      <ArgosAudioSection
+        config={{
+          ...DEFAULT_OPERATOR_CONFIG,
+          voiceTransportMode: 'realtime',
+          realtimeProvider: 'openai',
+          openaiRealtimeApiKey: '',
+        }}
+        onFieldChange={onFieldChange}
+      />
+    );
+
+    const openaiInput = screen.getByTestId('openai-realtime-api-key-input') as HTMLInputElement;
+    expect(openaiInput).toHaveAttribute('type', 'password');
+    fireEvent.change(openaiInput, { target: { value: 'sk-realtime-test' } });
+    expect(onFieldChange).toHaveBeenCalledWith('openaiRealtimeApiKey', 'sk-realtime-test');
+
+    // Switching providers when a custom endpoint is set must NOT overwrite the custom URL
+    onFieldChange.mockClear();
+    rerender(
+      <ArgosAudioSection
+        config={{
+          ...DEFAULT_OPERATOR_CONFIG,
+          voiceTransportMode: 'realtime',
+          realtimeProvider: 'xai',
+          realtimeEndpoint: 'wss://custom-proxy.internal/realtime',
+        }}
+        onFieldChange={onFieldChange}
+      />
+    );
+    fireEvent.click(screen.getByTestId('realtime-provider-select').querySelector('[role="combobox"]') as HTMLElement);
+    fireEvent.click(await screen.findByText(/OpenAI Realtime \(24 kHz\)/i));
+    expect(onFieldChange).toHaveBeenCalledWith('realtimeProvider', 'openai');
+    expect(onFieldChange).not.toHaveBeenCalledWith('realtimeEndpoint', expect.any(String));
+  });
+
+  it('T6/S6: renders Auto-pausa por inactividad SelectMenu and syncs voiceIdleTimeoutSec via updateUnifiedAudioSettings', async () => {
+    const onFieldChange = vi.fn();
+    render(
+      <ArgosAudioSection
+        config={{ ...DEFAULT_OPERATOR_CONFIG, voiceIdleTimeoutSec: 180 }}
+        onFieldChange={onFieldChange}
+      />
+    );
+
+    const idleWrap = screen.getByTestId('voice-idle-timeout-select');
+    const idleTrigger = idleWrap.querySelector('[role="combobox"]') as HTMLElement;
+    expect(idleTrigger).toHaveTextContent(/3 min \(Recomendado\)/i);
+
+    fireEvent.click(idleTrigger);
+    expect(await screen.findByText('1 min')).toBeInTheDocument();
+    expect(screen.getByText('5 min')).toBeInTheDocument();
+    expect(screen.getByText('Desactivado')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('1 min'));
+
+    expect(onFieldChange).toHaveBeenCalledWith('voiceIdleTimeoutSec', 60);
+    await waitFor(() => {
+      expect(ipc.invokeCommand).toHaveBeenCalledWith(
+        'update_dictation_settings',
+        expect.objectContaining({
+          settings: expect.objectContaining({
+            voiceIdleTimeoutSec: 60,
+          }),
+        })
+      );
+    });
+
+    fireEvent.click(idleTrigger);
+    fireEvent.click(await screen.findByText('Desactivado'));
+    expect(onFieldChange).toHaveBeenCalledWith('voiceIdleTimeoutSec', 0);
+  });
+
+  it('T6/S8: opens VoicePickerModal from "Elegir voz y paleta" and updates persona.voice', async () => {
+    const onFieldChange = vi.fn();
+    render(
+      <ArgosAudioSection
+        config={{
+          ...DEFAULT_OPERATOR_CONFIG,
+          persona: { ...DEFAULT_OPERATOR_CONFIG.persona, voice: 'Ara' },
+        }}
+        onFieldChange={onFieldChange}
+      />
+    );
+
+    expect(screen.getByTestId('current-voice-summary')).toHaveTextContent(/Ara/i);
+    expect(screen.getByTestId('current-voice-summary')).toHaveTextContent(/Clara y cercana/i);
+
+    fireEvent.click(screen.getByTestId('open-voice-picker-btn'));
+    expect(await screen.findByTestId('voice-picker')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('voice-picker-next'));
+    expect(screen.getByTestId('voice-picker-name')).toHaveTextContent('Vega');
+
+    fireEvent.click(screen.getByTestId('voice-picker-use'));
+
+    expect(onFieldChange).toHaveBeenCalledWith(
+      'persona',
+      expect.objectContaining({ voice: 'Vega' })
+    );
+    await waitFor(() => {
+      expect(screen.queryByTestId('voice-picker')).not.toBeInTheDocument();
+    });
+  });
 });

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { zedAssistantFailureMessage } from './assistantFailureNotice';
+import {
+  extractSafeFailureDetail,
+  zedAssistantFailureMessage,
+} from './assistantFailureNotice';
 
 describe('zedAssistantFailureMessage', () => {
   it('explains a quota failure when the model never answered', () => {
@@ -22,6 +25,32 @@ describe('zedAssistantFailureMessage', () => {
     });
 
     expect(message).toBe('El modelo del asistente se quedó sin cuota.');
+  });
+
+  it('explains HTTP 403/401 permission or subscription errors with provider context', () => {
+    const message = zedAssistantFailureMessage({
+      strategy: 'heuristic-fallback',
+      providerId: 'opencode',
+      fallbackReason:
+        'Error HTTP 403 desde https://opencode.ai/inference/go/openai/v1/chat/completions: {"error":{"type":"permission_error","message":"An active OpenCode Go subscription is required to use OpenCode Go models."}}',
+      actionCount: 0,
+    });
+
+    expect(message).toContain('OpenCode');
+    expect(message).toMatch(/permisos o suscripción/i);
+    expect(message).toMatch(/Ajustes → Argos → Proveedor/i);
+  });
+
+  it('extracts clean failure details without exposing URLs or secrets', () => {
+    const detail = extractSafeFailureDetail(
+      'Error HTTP 403 desde https://opencode.ai/inference/go/openai/v1/chat/completions: {"error":{"type":"permission_error","message":"An active OpenCode Go subscription is required to use OpenCode Go models."}}'
+    );
+    expect(detail).toBe(
+      'HTTP 403: An active OpenCode Go subscription is required to use OpenCode Go models.'
+    );
+
+    expect(extractSafeFailureDetail('Bearer sk-secret-token-123456')).toBe('');
+    expect(extractSafeFailureDetail('Invalid key xai-abc123456')).toBe('');
   });
 
   it('explains a timeout as no response', () => {

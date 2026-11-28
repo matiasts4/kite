@@ -8,11 +8,13 @@ import {
   OPENCODE_MODEL_CATALOG,
   VERCEL_MODEL_CATALOG,
   CLOUDFLARE_MODEL_CATALOG,
+  ANTIGRAVITY_MODEL_CATALOG,
   OPENCODE_GO_MODELS_URL,
   normalizeOpenCodeBaseUrl,
   isOpenCodeGoChatBaseUrl,
   isOpenCodeGoChatCompatibleModel,
 } from './modelCatalogs';
+import { invokeCommand, isTauriEnvironment } from '../../ipc';
 import { operatorHttpFetch } from './httpFetch';
 import { loadOperatorConfig } from './storage';
 
@@ -20,6 +22,7 @@ const MODEL_CATALOG_KEYS = {
   opencode: 'kite.operator.modelCatalog.opencode.v2',
   vercel: 'kite.operator.modelCatalog.vercel.v1',
   cloudflare: 'kite.operator.modelCatalog.cloudflare.v1',
+  antigravity: 'kite.operator.modelCatalog.antigravity.v1',
 } as const;
 
 const MAX_CACHED_MODELS = 2000;
@@ -406,6 +409,164 @@ export async function fetchCloudflareModels(
       'cloudflare',
       CLOUDFLARE_MODEL_CATALOG,
       'No se pudo consultar Cloudflare.'
+    );
+  }
+}
+
+export interface AntigravityDynamicModelRow {
+  id: string;
+  name?: string;
+  label?: string;
+  description?: string;
+  effortLevels?: string[];
+}
+
+const AGY_EFFORT_SUFFIX_RE = /-(minimal|low|medium|high|xhigh|max|ultra)$/i;
+
+function formatEffortBadgeText(effort: string): string {
+  switch (effort.toLowerCase()) {
+    case 'minimal':
+      return 'Minimal';
+    case 'low':
+      return 'Low';
+    case 'medium':
+      return 'Medium';
+    case 'high':
+      return 'High';
+    case 'xhigh':
+      return 'X-High';
+    case 'max':
+      return 'Max';
+    case 'ultra':
+      return 'Ultra';
+    default:
+      return effort;
+  }
+}
+
+function rankAntigravityModelId(id: string): number {
+  const lower = id.toLowerCase();
+  if (lower === 'gemini-4-hydrogen-low') return 0;
+  if (lower.endsWith('-low') || lower.endsWith('-minimal')) return 1;
+  if (lower.endsWith('-medium')) return 2;
+  if (!AGY_EFFORT_SUFFIX_RE.test(lower)) return 3;
+  return 4;
+}
+
+export function expandAntigravityModels(
+  rows: AntigravityDynamicModelRow[]
+): OpenCodeModelOption[] {
+  const seen = new Set<string>();
+  const expanded: OpenCodeModelOption[] = [];
+
+  for (const row of rows) {
+    const rawId = typeof row?.id === 'string' ? row.id.trim() : '';
+    if (!rawId) continue;
+
+    const efforts = Array.isArray(row.effortLevels)
+      ? row.effortLevels
+          .map((e) => (typeof e === 'string' ? e.trim().toLowerCase() : ''))
+          .filter(Boolean)
+      : [];
+
+    const variants: Array<{ fullId: string; effort: string | null }> =
+      efforts.length > 0 && !AGY_EFFORT_SUFFIX_RE.test(rawId)
+        ? efforts.map((effort) => ({ fullId: `${rawId}-${effort}`, effort }))
+        : [{ fullId: rawId, effort: null }];
+
+    const baseDisplayName = (row.name || row.label || rawId).trim();
+
+    for (const variant of variants) {
+      if (seen.has(variant.fullId)) continue;
+      seen.add(variant.fullId);
+
+      const curated = ANTIGRAVITY_MODEL_CATALOG.find((k) => k.id === variant.fullId);
+      if (curated) {
+        expanded.push(curated);
+        continue;
+      }
+
+      const effort = variant.effort;
+      const isFastEffort =
+        effort === 'low' ||
+        effort === 'minimal' ||
+        variant.fullId.toLowerCase().endsWith('-low') ||
+        variant.fullId.toLowerCase().includes('flash');
+      const isDeepEffort =
+        effort === 'high' ||
+        effort === 'xhigh' ||
+        effort === 'max' ||
+        variant.fullId.toLowerCase().endsWith('-high') ||
+        variant.fullId.toLowerCase().endsWith('-xhigh');
+
+      expanded.push({
+        id: variant.fullId,
+        label: effort ? `${baseDisplayName} (${formatEffortBadgeText(effort)})` : baseDisplayName,
+        badge: isFastEffort ? 'Fast' : isDeepEffort ? 'Deep Reasoning' : 'Balanced',
+        tier: isFastEffort ? 'Subscription · Fast' : 'Subscription',
+        description:
+          row.description ||
+          `Modelo ${variant.fullId} disponible en tu suscripción de Antigravity CLI.`,
+      });
+    }
+  }
+
+  return expanded
+    .map((model, idx) => ({ model, idx, rank: rankAntigravityModelId(model.id) }))
+    .sort((a, b) => (a.rank !== b.rank ? a.rank - b.rank : a.idx - b.idx))
+    .map((item) => item.model);
+}
+
+export async function fetchAntigravityModels(
+  forceRefresh = false
+): Promise<ModelCatalogFetchResult> {
+  if (!isTauriEnvironment()) {
+    return keptCatalog(
+      'antigravity',
+      ANTIGRAVITY_MODEL_CATALOG,
+      'Catálogo dinámico de Antigravity disponible solo en la app de escritorio.'
+    );
+  }
+
+  try {
+    const res = await invokeCommand<{
+      provider?: string;
+      catalogState?: string;
+      models?: AntigravityDynamicModelRow[];
+    }>('list_chat_provider_models', { provider: 'antigravity', forceRefresh });
+
+    const rows = Array.isArray(res?.models) ? res.models : [];
+    if (rows.length === 0) {
+      const reason =
+        res?.catalogState === 'missing-binary'
+          ? 'No se encontró el CLI agy en el sistema.'
+          : res?.catalogState === 'signed-out'
+            ? 'Inicia sesión en Antigravity CLI para consultar los modelos de tu suscripción.'
+            : 'Antigravity CLI no devolvió modelos disponibles.';
+      return keptCatalog('antigravity', ANTIGRAVITY_MODEL_CATALOG, reason);
+    }
+
+    const expanded = expandAntigravityModels(rows);
+    if (expanded.length === 0) {
+      return keptCatalog(
+        'antigravity',
+        ANTIGRAVITY_MODEL_CATALOG,
+        'Antigravity CLI no devolvió modelos utilizables.'
+      );
+    }
+
+    const saved = saveModelCatalog('antigravity', expanded);
+    return {
+      models: saved.models,
+      fresh: true,
+      savedAt: saved.savedAt,
+      detail: '',
+    };
+  } catch {
+    return keptCatalog(
+      'antigravity',
+      ANTIGRAVITY_MODEL_CATALOG,
+      'No se pudo consultar la lista de modelos de Antigravity CLI.'
     );
   }
 }

@@ -13,7 +13,7 @@ use tauri::Emitter;
 #[path = "operator_warm_agy.rs"]
 mod warm_agy;
 
-pub use warm_agy::shutdown_warm_operator_sessions;
+pub use warm_agy::{reap_idle_warm_operator, shutdown_warm_operator_sessions};
 
 pub fn query_operator_agent_direct(request: Value) -> Value {
     let req = request.get("request").unwrap_or(&request);
@@ -177,6 +177,60 @@ pub async fn query_operator_agent(request: Value) -> Value {
                 "success": false,
                 "error": format!("Operator runtime join error: {err}"),
                 "latencyMs": 0
+            })
+        })
+}
+
+pub fn prewarm_operator_agent_direct(request: Value) -> Value {
+    let req = request.get("request").unwrap_or(&request);
+    let engine = req
+        .get("engine")
+        .and_then(|v| v.as_str())
+        .unwrap_or("antigravity");
+    let model = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if engine != "antigravity" && engine != "agy" {
+        return json!({
+            "success": true,
+            "warmed": false,
+            "engine": engine,
+            "model": model
+        });
+    }
+
+    let Some(bin) = crate::chat::utils::resolve_agy_bin() else {
+        return json!({
+            "success": false,
+            "error": "Antigravity CLI (agy) no está instalado o no se encuentra en el PATH."
+        });
+    };
+
+    match warm_agy::prewarm_warm_antigravity_session(&bin, model) {
+        Ok(warmed) => json!({
+            "success": true,
+            "warmed": warmed,
+            "engine": engine,
+            "model": model
+        }),
+        Err(error) => json!({
+            "success": false,
+            "error": error
+        }),
+    }
+}
+
+#[tauri::command]
+pub async fn prewarm_operator_agent(request: Value) -> Value {
+    tauri::async_runtime::spawn_blocking(move || prewarm_operator_agent_direct(request))
+        .await
+        .unwrap_or_else(|err| {
+            json!({
+                "success": false,
+                "error": format!("Operator runtime join error: {err}")
             })
         })
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ZedStripHost, type ZedCallState } from './ZedStrip';
+import { ZedStripHost, ArgosStripHost, POST_TTS_ECHO_GUARD_MS, type ZedCallState } from './ZedStrip';
 import { ZedTab } from './views/settings/ZedTab';
 import { voiceSessionStore } from '../lib/operator/voice/voiceSessionStore';
 import { saveOperatorConfig } from '../lib/operator/operatorConfig';
@@ -665,6 +665,222 @@ describe('ZedStripHost & ZedTab (Clean Native Kite UI)', () => {
       voiceSessionStore.clearThreadVoiceTurns('thread-return-1');
       voiceSessionStore.stopSession();
       voiceTurnArbitrator.resetForTests();
+    }
+  });
+
+  it('enforces 180ms anti-echo settle guard before re-arming mic and opens hands-free reply in Orb mode (S1.3, S3.4)', async () => {
+    vi.useFakeTimers();
+    const zedVoice = await import('../lib/operator/voice/zedVoice');
+    const { ttsNarrator } = await import('../lib/operator/ttsNarrator');
+    const operatorIndex = await import('../lib/operator');
+    const { emitTrace } = await import('../lib/operator/trace/trace');
+
+    vi.spyOn(zedVoice, 'isVoiceRecognitionSupported').mockReturnValue(true);
+    const startSpy = vi.spyOn(zedVoice, 'startOperatorListening').mockImplementation(
+      () => new Promise(() => {})
+    );
+    vi.spyOn(operatorIndex, 'runOperatorTurn').mockImplementationOnce(async () => {
+      emitTrace({
+        turnId: 'turn-echo-1',
+        ev: 'turn.end',
+        overallSuccess: true,
+        durationMs: 25,
+      });
+      return {
+        turnId: 'turn-echo-1',
+        reply: '¿Confirmas lanzar el subagente?',
+        strategy: 'llm',
+        providerId: 'local',
+        durationMs: 25,
+        overallSuccess: true,
+        receipts: [],
+      } as any;
+    });
+
+    expect(ArgosStripHost).toBe(ZedStripHost);
+    expect(POST_TTS_ECHO_GUARD_MS).toBe(180);
+
+    try {
+      act(() => {
+        voiceSessionStore.setDraftProposal(null, {
+          proposalId: 'prop-orb-1',
+          status: 'awaiting_confirmation',
+          targetKind: 'subagent',
+          title: 'Revisar tests',
+          taskBrief: 'Ejecutar vitest en el módulo de voz',
+          role: 'QA Runner',
+          provider: 'claude',
+          oddMode: true,
+          revision: 1,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+      });
+
+      render(<ArgosStripHost call={activeCall} />);
+
+      // ConsultativeDraftCard is visible in floating Orb mode
+      expect(screen.getByTestId('consultative-draft-card')).toBeInTheDocument();
+      expect(screen.getByText('Revisar tests')).toBeInTheDocument();
+
+      startSpy.mockClear();
+      const input = screen.getByPlaceholderText(/abre 2 terminales/i);
+      fireEvent.change(input, { target: { value: 'prepara la tarea' } });
+      await act(async () => {
+        fireEvent.submit(input.closest('form')!);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(ttsNarrator.speak).toHaveBeenCalled();
+      const rawSpeakOpts = vi.mocked(ttsNarrator.speak).mock.calls[0]?.[1];
+      const speakOpts =
+        typeof rawSpeakOpts === 'object' && rawSpeakOpts !== null ? rawSpeakOpts : undefined;
+
+      // Finish TTS playback -> must NOT immediately re-arm before 180ms guard
+      act(() => {
+        speakOpts?.onEnd?.();
+      });
+      expect(startSpy).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120);
+      });
+      expect(startSpy).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(80);
+      });
+      expect(startSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      startSpy.mockRestore();
+      voiceSessionStore.clearDraftProposal(null);
+      voiceSessionStore.setHandsFreeReplyWindow(0);
+      vi.useRealTimers();
+    }
+  });
+
+  it('accumulates Realtime delta user speech, filters input_audio_transcription from agent stream, subscribes native audio levels, and clears stale errors (T12)', async () => {
+    const realtimeMod = await import('../lib/operator/voice/realtimeBridge');
+    const nativeAudioMod = await import('../lib/operator/voice/nativeAudioBridge');
+
+    let capturedHandlers: any = null;
+    let audioLevelCb: ((level: number, rms: number, durationMs: number) => void) | undefined;
+
+    const subscribeSpy = vi
+      .spyOn(realtimeMod.RealtimeVoiceBridge.prototype, 'subscribeEvents')
+      .mockResolvedValue();
+    const connectSpy = vi
+      .spyOn(realtimeMod.RealtimeVoiceBridge.prototype, 'connect')
+      .mockImplementation(async function (this: any) {
+        capturedHandlers = this.handlers;
+        return { activeTransport: 'realtime' as const };
+      });
+    const disconnectSpy = vi
+      .spyOn(realtimeMod.RealtimeVoiceBridge.prototype, 'disconnect')
+      .mockResolvedValue();
+    const nativeSubSpy = vi
+      .spyOn(nativeAudioMod, 'subscribeNativeAudioEvents')
+      .mockImplementation(async (handlers) => {
+        audioLevelCb = handlers.onAudioLevel;
+        return () => {};
+      });
+
+    (window as any).__TAURI_INTERNALS__ = { invoke: vi.fn() };
+    saveOperatorConfig({
+      activeProvider: 'grok',
+      grokApiKey: 'xai-rt-test',
+      voiceTransportMode: 'realtime',
+      realtimeProvider: 'xai',
+      ttsEnabled: false,
+    });
+
+    voiceSessionStore.clearThreadVoiceTurns('thread-rt-test');
+    act(() => {
+      voiceSessionStore.startSession('thread-rt-test', 'thread');
+      voiceSessionStore.setVoiceError({
+        message: 'Error previo de micrófono',
+        at: 1000,
+        retryable: true,
+      });
+    });
+
+    try {
+      render(<ArgosStripHost call={activeCall} />);
+
+      await waitFor(() => {
+        expect(connectSpy).toHaveBeenCalledTimes(1);
+        expect(capturedHandlers).toBeTruthy();
+        expect(nativeSubSpy).toHaveBeenCalled();
+      });
+
+      // Native audio-level subscription drives live mic meter in Realtime mode
+      act(() => {
+        audioLevelCb?.(0.42, 0.03, 33);
+      });
+      expect(voiceSessionStore.getSnapshot().liveAudioLevel).toBeCloseTo(0.42, 2);
+
+      // Incremental user deltas accumulate without overwriting and clear stale errors
+      act(() => {
+        capturedHandlers.onUserSpeech?.({ text: 'Hola ', interim: true, delta: true });
+        capturedHandlers.onUserSpeech?.({ text: 'Argos', interim: true, delta: true });
+      });
+      expect(voiceSessionStore.getSnapshot().voiceError).toBeNull();
+      expect(voiceSessionStore.getSnapshot().interimTranscript).toBe('Hola Argos');
+      const liveLinesAfterDelta = voiceSessionStore.getSnapshot().liveTeleprompterLines ?? [];
+      expect(liveLinesAfterDelta[liveLinesAfterDelta.length - 1]?.text).toBe('Hola Argos');
+
+      // Cumulative snapshot overwrites cleanly; finalized user speech creates thread turn and clears interim
+      act(() => {
+        capturedHandlers.onUserSpeech?.({
+          text: 'Hola Argos abre diffs',
+          interim: true,
+          delta: false,
+        });
+        capturedHandlers.onUserSpeech?.({
+          text: 'Hola Argos abre diffs',
+          interim: false,
+          delta: false,
+        });
+      });
+      expect(voiceSessionStore.getSnapshot().interimTranscript).toBe('');
+      const turnsAfterUser = voiceSessionStore.getThreadVoiceTurns('thread-rt-test');
+      expect(turnsAfterUser).toHaveLength(1);
+      expect(turnsAfterUser[0]?.userPrompt).toBe('Hola Argos abre diffs');
+
+      // User input_audio_transcription events must never pollute assistant agent teleprompter lines
+      act(() => {
+        capturedHandlers.onTranscript?.({
+          type: 'conversation.item.input_audio_transcription.completed',
+          transcript: 'texto del usuario duplicado',
+        });
+      });
+      expect(
+        (voiceSessionStore.getSnapshot().liveTeleprompterLines ?? []).some(
+          (l) => l.kind === 'voice' && l.text.includes('texto del usuario duplicado')
+        )
+      ).toBe(false);
+
+      // Assistant transcript delta + done settles turn reply
+      act(() => {
+        capturedHandlers.onTranscript?.({
+          type: 'response.audio_transcript.delta',
+          delta: 'Abriendo diffs.',
+        });
+        capturedHandlers.onTranscript?.({
+          type: 'response.audio_transcript.done',
+        });
+      });
+      const turnsAfterReply = voiceSessionStore.getThreadVoiceTurns('thread-rt-test');
+      expect(turnsAfterReply[0]?.reply).toBe('Abriendo diffs.');
+    } finally {
+      subscribeSpy.mockRestore();
+      connectSpy.mockRestore();
+      disconnectSpy.mockRestore();
+      nativeSubSpy.mockRestore();
+      delete (window as any).__TAURI_INTERNALS__;
+      voiceSessionStore.stopSession();
+      voiceSessionStore.clearThreadVoiceTurns('thread-rt-test');
     }
   });
 });

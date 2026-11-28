@@ -17,6 +17,7 @@ import { emitTrace } from '../trace/trace';
 import {
   joinSpeechPartial,
   isSpanishOpenClause,
+  LiveTranscriptStabilizer,
   SpeculativePartialPreCapture,
 } from './speechPartial';
 import { getCachedLiveChatCatalog } from './sessionPrewarm';
@@ -29,6 +30,7 @@ import {
   markNativeSpeechStart,
   setCachedNativeAudioLevel,
   setNativeAudioMuted,
+  snapshotNativeAudioWav,
   startNativeAudioCapture,
   stopNativeAudioCapture,
   subscribeNativeAudioEvents,
@@ -159,6 +161,14 @@ registerProcessor('${PCM_WORKLET_PROCESSOR_NAME}', KitePcmVadProcessor);
 `;
 
 const adaptiveVad = new AdaptiveVadController();
+const nativeAdaptiveVad = new AdaptiveVadController({
+  minOnsetRms: 0.008,
+  minReleaseRms: 0.005,
+  onsetMultiplier: 2.6,
+  releaseMultiplier: 1.5,
+  initialNoiseFloorRms: 0.0025,
+  minSpeechOnsetMs: 120,
+});
 const bargeInGate = new BargeInGate();
 let preRollBuffer = new PcmPreRollBuffer(16000, 400);
 const preConnectBuffer = new PreConnectAudioRingBuffer({
@@ -193,6 +203,12 @@ let trailingSilenceSamples = 0;
 let lastRecognizedText = '';
 let activeStreamingStt: GrokStreamingSttSession | null = null;
 let streamingSttTranscript = '';
+let hasStreamingSttAuthority = false;
+const liveTranscriptStabilizer = new LiveTranscriptStabilizer({ mutableTailWords: 3 });
+let rollingPreviewTimer: ReturnType<typeof setTimeout> | null = null;
+let rollingPreviewInFlight = false;
+let lastNativeLiveUpdateTs = 0;
+let rollingPreviewTranscript = '';
 let sessionMuted = false;
 let recognitionEpoch = 0;
 let recognitionRestartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -201,6 +217,138 @@ let nativeStreamWarm = false;
 let nativeDevicePref: string | null = null;
 let lastNativeLevelTs = 0;
 let nativeEventUnsub: (() => void) | null = null;
+
+const ROLLING_PREVIEW_INITIAL_MS = 950;
+const ROLLING_PREVIEW_REPEAT_MS = 1400;
+
+function clearRollingPreviewTimer(): void {
+  if (rollingPreviewTimer !== null) {
+    clearTimeout(rollingPreviewTimer);
+    rollingPreviewTimer = null;
+  }
+}
+
+function scheduleRollingCloudPreview(
+  epoch: number,
+  delayMs: number = ROLLING_PREVIEW_INITIAL_MS
+): void {
+  if (
+    rollingPreviewTimer !== null ||
+    !isSessionActive ||
+    !isSpeechCaptureOpen ||
+    sessionMuted ||
+    epoch !== recognitionEpoch
+  ) {
+    return;
+  }
+  rollingPreviewTimer = setTimeout(() => {
+    rollingPreviewTimer = null;
+    void runRollingCloudPreview(epoch);
+  }, delayMs);
+}
+
+async function runRollingCloudPreview(epoch: number): Promise<void> {
+  if (!isSessionActive || !isSpeechCaptureOpen || sessionMuted || epoch !== recognitionEpoch) {
+    return;
+  }
+  const hasWebSpeechLive =
+    currentSpeechTranscript.trim().length > 0 || lastInterimTranscript.trim().length > 0;
+  if (
+    rollingPreviewInFlight ||
+    hasStreamingSttAuthority ||
+    streamingSttTranscript.trim().length > 0 ||
+    hasWebSpeechLive
+  ) {
+    if (isSessionActive && isSpeechCaptureOpen && !sessionMuted && epoch === recognitionEpoch) {
+      scheduleRollingCloudPreview(epoch, ROLLING_PREVIEW_REPEAT_MS);
+    }
+    return;
+  }
+  if (lastNativeLiveUpdateTs > 0 && Date.now() - lastNativeLiveUpdateTs < 2500) {
+    if (isSessionActive && isSpeechCaptureOpen && !sessionMuted && epoch === recognitionEpoch) {
+      scheduleRollingCloudPreview(epoch, ROLLING_PREVIEW_REPEAT_MS);
+    }
+    return;
+  }
+
+  rollingPreviewInFlight = true;
+  try {
+    let previewBlob: Blob | null = null;
+    if (nativeCaptureActive) {
+      const snap = await snapshotNativeAudioWav(500);
+      if (snap.ok && snap.wavBase64 && snap.wavBytes > 200) {
+        previewBlob = decodeWavBase64ToBlob(snap.wavBase64);
+      }
+    } else if (rawPcmChunks.length > 0) {
+      const totalSamples = rawPcmChunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      if (totalSamples >= Math.max(4000, Math.round(audioSampleRate * 0.5))) {
+        previewBlob = encodeWavBlob(rawPcmChunks, audioSampleRate);
+      }
+    }
+
+    if (
+      !previewBlob ||
+      previewBlob.size <= 200 ||
+      !isSessionActive ||
+      !isSpeechCaptureOpen ||
+      sessionMuted ||
+      epoch !== recognitionEpoch
+    ) {
+      return;
+    }
+
+    const rawText = await transcribeOperatorAudioBlob(previewBlob);
+    if (
+      !isSessionActive ||
+      !isSpeechCaptureOpen ||
+      sessionMuted ||
+      epoch !== recognitionEpoch ||
+      hasStreamingSttAuthority ||
+      streamingSttTranscript.trim().length > 0 ||
+      currentSpeechTranscript.trim().length > 0 ||
+      lastInterimTranscript.trim().length > 0
+    ) {
+      return;
+    }
+    const speechDurationSecs = Math.max(
+      0.5,
+      speechStartTimestamp > 0 ? (Date.now() - speechStartTimestamp) / 1000 : 1
+    );
+    const clean = cleanTranscriptionText(rawText, speechDurationSecs).trim();
+    if (clean) {
+      rollingPreviewTranscript = clean;
+      lastRecognizedText = clean;
+      speculativePreCapture.update(clean);
+      currentOptions.onInterim?.(liveTranscriptStabilizer.pushPartial(clean));
+    }
+  } catch (err) {
+    console.debug('[ArgosVoice] Rolling preview skipped:', err);
+  } finally {
+    rollingPreviewInFlight = false;
+    if (isSessionActive && isSpeechCaptureOpen && !sessionMuted && epoch === recognitionEpoch) {
+      scheduleRollingCloudPreview(epoch, ROLLING_PREVIEW_REPEAT_MS);
+    }
+  }
+}
+
+async function resolveNativeDevicePreference(rawId: string | null): Promise<string | null> {
+  const clean = (rawId ?? '').trim();
+  if (!clean || clean === 'automatic' || clean === 'default' || clean.toLowerCase().startsWith('wasapi:')) {
+    return clean || null;
+  }
+  if (typeof navigator !== 'undefined' && typeof navigator.mediaDevices?.enumerateDevices === 'function') {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const matched = devices.find((d) => d.kind === 'audioinput' && d.deviceId === clean);
+      if (matched?.label && matched.label.trim()) {
+        return `wasapi:${matched.label.trim()}`;
+      }
+    } catch {
+      // Fallback to raw ID if enumeration is restricted
+    }
+  }
+  return clean;
+}
 
 const speculativePreCapture = new SpeculativePartialPreCapture<TurnContext>({
   stabilityMs: 250,
@@ -272,6 +420,7 @@ function clearVadTimers(): void {
     clearTimeout(noSpeechTimer);
     noSpeechTimer = null;
   }
+  clearRollingPreviewTimer();
 }
 
 function armNoSpeechTimer(): void {
@@ -368,7 +517,10 @@ function startStreamingSttIfConfigured(initialChunks: Float32Array[] = []): void
       if (!isSessionActive || activeStreamingStt !== session) return;
       const clean = partial.trim();
       if (!clean) return;
+      hasStreamingSttAuthority = true;
+      clearRollingPreviewTimer();
       streamingSttTranscript = clean;
+      lastNativeLiveUpdateTs = Date.now();
       hasDetectedSpeech = true;
       if (!speechStartTimestamp) {
         speechStartTimestamp = Date.now();
@@ -379,17 +531,20 @@ function startStreamingSttIfConfigured(initialChunks: Float32Array[] = []): void
       }
       resetSilenceTimer();
       speculativePreCapture.update(clean);
-      currentOptions.onInterim?.(clean);
+      currentOptions.onInterim?.(liveTranscriptStabilizer.pushPartial(clean));
     },
     onFinal: (finalText) => {
       if (!isSessionActive || activeStreamingStt !== session) return;
       const clean = finalText.trim();
       if (!clean) return;
+      hasStreamingSttAuthority = true;
+      clearRollingPreviewTimer();
       streamingSttTranscript = clean;
+      lastNativeLiveUpdateTs = Date.now();
       lastRecognizedText = clean;
       resetSilenceTimer();
       speculativePreCapture.update(clean);
-      currentOptions.onInterim?.(clean);
+      currentOptions.onInterim?.(liveTranscriptStabilizer.pushFinal(clean));
     },
     onError: (err) => {
       handshakeRing.clear();
@@ -437,6 +592,7 @@ function openSpeechPcmCapture(): boolean {
     rawPcmChunks.push(...initialChunks);
   }
   startStreamingSttIfConfigured(initialChunks);
+  scheduleRollingCloudPreview(recognitionEpoch);
   return true;
 }
 
@@ -478,9 +634,11 @@ export function setOperatorMicMuted(muted: boolean): void {
     void setNativeAudioMuted(next);
   }
   if (next) {
+    clearRollingPreviewTimer();
     flushSilenceOnMute(500);
   } else {
     adaptiveVad.resetTurn(true);
+    nativeAdaptiveVad.resetTurn(true);
   }
 }
 
@@ -504,7 +662,7 @@ function handleNativeAudioLevel(level: number, rms: number, durationMs?: number)
   currentOptions.onAudioLevel?.(level);
 
   if (isBargeInMonitoring && !isSessionActive) {
-    if (bargeInGate.evaluateFrame(rms, frameDurationMs, adaptiveVad.getNoiseFloorRms(), now)) {
+    if (bargeInGate.evaluateFrame(rms, frameDurationMs, nativeAdaptiveVad.getNoiseFloorRms(), now)) {
       isBargeInMonitoring = false;
       const cb = bargeInCallback;
       bargeInCallback = null;
@@ -520,7 +678,7 @@ function handleNativeAudioLevel(level: number, rms: number, durationMs?: number)
 
   if (!isSessionActive) return;
 
-  const decision = adaptiveVad.processFrame(rms, frameDurationMs);
+  const decision = nativeAdaptiveVad.processFrame(rms, frameDurationMs);
   if (decision.speechStartedNow) {
     hasDetectedSpeech = true;
     hasVadVoicedFrame = true;
@@ -530,6 +688,7 @@ function handleNativeAudioLevel(level: number, rms: number, durationMs?: number)
     if (!isSpeechCaptureOpen) {
       isSpeechCaptureOpen = true;
       void markNativeSpeechStart(400);
+      scheduleRollingCloudPreview(recognitionEpoch);
     }
     trailingSilenceSamples = 0;
     voiceTurnArbitrator.transition('user_speaking');
@@ -552,6 +711,7 @@ function handleNativeAudioLevel(level: number, rms: number, durationMs?: number)
     if (!isSpeechCaptureOpen) {
       isSpeechCaptureOpen = true;
       void markNativeSpeechStart(400);
+      scheduleRollingCloudPreview(recognitionEpoch);
     }
     trailingSilenceSamples = 0;
     resetSilenceTimer();
@@ -884,10 +1044,17 @@ function createAndStartRecognition(
     const currentText = joinSpeechPartial(currentSpeechTranscript, interim);
     if (currentText.length > 1) {
       hasDetectedSpeech = true;
+      lastNativeLiveUpdateTs = Date.now();
       if (!speechStartTimestamp) {
         speechStartTimestamp = Date.now();
       }
-      openSpeechPcmCapture();
+      if (nativeCaptureActive) {
+        isSpeechCaptureOpen = true;
+        void markNativeSpeechStart(400);
+        scheduleRollingCloudPreview(epoch);
+      } else {
+        openSpeechPcmCapture();
+      }
       if (currentText !== lastRecognizedText) {
         lastRecognizedText = currentText;
         trailingSilenceSamples = 0;
@@ -895,8 +1062,8 @@ function createAndStartRecognition(
       resetSilenceTimer();
       speculativePreCapture.update(currentText);
     }
-    if (options.onInterim) {
-      options.onInterim(currentText);
+    if (options.onInterim && !hasStreamingSttAuthority && !streamingSttTranscript) {
+      options.onInterim(liveTranscriptStabilizer.pushPartial(currentText));
     }
   };
 
@@ -915,8 +1082,13 @@ function createAndStartRecognition(
 
     currentSpeechTranscript = joinSpeechPartial(currentSpeechTranscript, lastInterimTranscript);
     lastInterimTranscript = '';
-    if (currentSpeechTranscript && options.onInterim) {
-      options.onInterim(currentSpeechTranscript);
+    if (
+      currentSpeechTranscript &&
+      options.onInterim &&
+      !hasStreamingSttAuthority &&
+      !streamingSttTranscript
+    ) {
+      options.onInterim(liveTranscriptStabilizer.pushFinal(currentSpeechTranscript));
     }
     if (isSessionActive && epoch === recognitionEpoch) {
       try {
@@ -980,6 +1152,10 @@ export async function startOperatorListening(
   isPersistentGraphActive = currentContinuousMode;
   currentRecordedChunks = [];
   streamingSttTranscript = '';
+  hasStreamingSttAuthority = false;
+  liveTranscriptStabilizer.reset();
+  rollingPreviewTranscript = '';
+  lastNativeLiveUpdateTs = 0;
   if (options.fromBargeIn) {
     preConnectBuffer.clear();
     if (preConnectBuffer.getState() === 'buffering') {
@@ -1005,6 +1181,7 @@ export async function startOperatorListening(
   speechStartTimestamp = options.fromBargeIn ? Date.now() : 0;
   currentTurnTraceId = `voice-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   adaptiveVad.resetTurn(true);
+  nativeAdaptiveVad.resetTurn(true);
   clearVadTimers();
   isSessionActive = true;
   lastNativeLevelTs = 0;
@@ -1037,22 +1214,30 @@ export async function startOperatorListening(
             if (!isSessionActive) return;
             const clean = txt.trim();
             if (!clean) return;
+            hasStreamingSttAuthority = true;
+            clearRollingPreviewTimer();
             streamingSttTranscript = clean;
+            lastNativeLiveUpdateTs = Date.now();
             hasDetectedSpeech = true;
             if (!speechStartTimestamp) speechStartTimestamp = Date.now();
             resetSilenceTimer();
             speculativePreCapture.update(clean);
-            currentOptions.onInterim?.(clean);
+            currentOptions.onInterim?.(liveTranscriptStabilizer.pushPartial(clean));
           },
           onSttFinal: (txt) => {
             if (!isSessionActive) return;
             const clean = txt.trim();
             if (!clean) return;
+            hasStreamingSttAuthority = true;
+            clearRollingPreviewTimer();
             streamingSttTranscript = clean;
+            lastNativeLiveUpdateTs = Date.now();
+            hasDetectedSpeech = true;
+            if (!speechStartTimestamp) speechStartTimestamp = Date.now();
             lastRecognizedText = clean;
             resetSilenceTimer();
             speculativePreCapture.update(clean);
-            currentOptions.onInterim?.(clean);
+            currentOptions.onInterim?.(liveTranscriptStabilizer.pushFinal(clean));
           },
           onSttError: (err) => {
             console.warn('[ArgosVoice] Native Rust streaming STT error:', err);
@@ -1078,6 +1263,17 @@ export async function startOperatorListening(
           return;
         }
         ({ grokKey, grokBaseUrl } = resolveGrokSttConfigSync());
+      }
+      if (
+        preferredDeviceId &&
+        preferredDeviceId !== 'automatic' &&
+        preferredDeviceId !== 'default' &&
+        !preferredDeviceId.toLowerCase().startsWith('wasapi:')
+      ) {
+        preferredDeviceId = await resolveNativeDevicePreference(preferredDeviceId);
+        if (!isSessionActive) {
+          return;
+        }
       }
       const keepExistingNative = Boolean(
         options.continuous &&
@@ -1184,8 +1380,8 @@ export async function startOperatorListening(
       }
     }
 
-    // 2. Start SpeechRecognition only as browser-preview/fallback when native Rust capture is inactive
-    const SpeechImpl = !nativeCaptureActive ? getSpeechRecognitionImpl() : null;
+    // 2. Keep SpeechRecognition running alongside native capture as zero-latency live preview
+    const SpeechImpl = getSpeechRecognitionImpl();
     if (SpeechImpl && isSessionActive && turnRecognitionEpoch === recognitionEpoch) {
       try {
         createAndStartRecognition(SpeechImpl, options, turnRecognitionEpoch, false);
@@ -1237,6 +1433,11 @@ export async function stopOperatorListening(options?: {
   wsHandshakeBuffer = null;
   const cachedStreamingTranscript = streamingSttTranscript.trim();
   streamingSttTranscript = '';
+  hasStreamingSttAuthority = false;
+  liveTranscriptStabilizer.reset();
+  const cachedRollingTranscript = rollingPreviewTranscript.trim();
+  rollingPreviewTranscript = '';
+  lastNativeLiveUpdateTs = 0;
 
   const speechWasDetected = speechDetectedBeforeStop || hasDetectedSpeech;
   const wasVadVoiced = hasVadVoicedFrame;
@@ -1307,7 +1508,10 @@ export async function stopOperatorListening(options?: {
 
   const localTranscript = joinSpeechPartial(currentSpeechTranscript, lastInterimTranscript).trim();
   let hasSpeechPayload =
-    speechWasDetected || Boolean(localTranscript) || Boolean(cachedStreamingTranscript);
+    speechWasDetected ||
+    Boolean(localTranscript) ||
+    Boolean(cachedStreamingTranscript) ||
+    Boolean(cachedRollingTranscript);
 
   // 2. Prioritize already-captured PCM WAV, trimming dead trailing endpointing silence
   //    while retaining a ~250ms acoustic decay pad so closing consonants are never clipped.
@@ -1462,10 +1666,14 @@ export async function stopOperatorListening(options?: {
       }
     }
 
-    // Fallback to streaming partial or local Web Speech transcript whenever cloud STT failed or returned empty
-    if (!finalText && (localTranscript || cachedStreamingTranscript)) {
-      finalText = localTranscript || cachedStreamingTranscript;
-      sttBackend = localTranscript ? 'webspeech-fallback' : 'grok-ws-partial';
+    // Fallback to streaming partial, rolling preview, or local Web Speech transcript whenever cloud STT failed or returned empty
+    if (!finalText && (localTranscript || cachedStreamingTranscript || cachedRollingTranscript)) {
+      finalText = localTranscript || cachedStreamingTranscript || cachedRollingTranscript;
+      sttBackend = localTranscript
+        ? 'webspeech-fallback'
+        : cachedStreamingTranscript
+          ? 'grok-ws-partial'
+          : 'rolling-preview';
     }
   } else if (streamingSession) {
     streamingSession.abort();
@@ -1623,6 +1831,8 @@ export async function releaseOperatorCapture(): Promise<void> {
   trailingSilenceSamples = 0;
   lastRecognizedText = '';
   streamingSttTranscript = '';
+  rollingPreviewTranscript = '';
+  lastNativeLiveUpdateTs = 0;
   if (activeStreamingStt) {
     activeStreamingStt.abort();
     activeStreamingStt = null;
@@ -1631,6 +1841,8 @@ export async function releaseOperatorCapture(): Promise<void> {
   wsHandshakeBuffer = null;
   preConnectBuffer.clear();
   clearVadTimers();
+  adaptiveVad.resetTurn(true);
+  nativeAdaptiveVad.resetTurn(true);
   disarmBargeInMonitor();
   voiceTurnArbitrator.transition('idle');
   teardownActiveRecognition('abort');

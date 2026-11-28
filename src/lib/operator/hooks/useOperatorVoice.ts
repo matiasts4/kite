@@ -74,10 +74,14 @@ export function useOperatorVoice({
       errorTimerRef.current = null;
     }
     const fatal = Boolean(msg && (isFatalSttError(rawErr) || isFatalSttError(msg)));
+    const inContinuousSession =
+      typeof window !== 'undefined' && Boolean((window as any).__kiteVoiceSessionActive);
     setError(msg);
     setIsFatalError(fatal);
     if (msg) {
-      toast.error('Asistente Zed', msg);
+      if (!inContinuousSession) {
+        toast.error('Asistente Argos', msg);
+      }
       if (!fatal) {
         errorTimerRef.current = window.setTimeout(() => {
           setError(null);
@@ -181,7 +185,10 @@ export function useOperatorVoice({
             err instanceof Error ? err.message : 'No se pudo ejecutar la orden de voz.';
           setErrorWithAutoClear(message);
         }
-      } else if (!(typeof window !== 'undefined' && (window as any).__kiteVoiceSessionActive)) {
+      } else if (
+        !callOpts?.continuous &&
+        !(typeof window !== 'undefined' && (window as any).__kiteVoiceSessionActive)
+      ) {
         setErrorWithAutoClear(
           'No te entendí o el audio quedó en silencio. Habla un poco más cerca del micrófono e inténtalo de nuevo.'
         );

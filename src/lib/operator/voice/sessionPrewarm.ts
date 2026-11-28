@@ -85,9 +85,18 @@ export async function prewarmVoiceSession(options?: {
   }));
 
   if (isTauriEnvironment()) {
+    let operatorProvider: string | undefined;
+    let operatorModel: string | undefined;
+    try {
+      const cfg = loadOperatorConfig();
+      operatorProvider = cfg.activeProvider;
+      operatorModel = cfg.antigravityModel;
+    } catch {
+      // ignore config read issues
+    }
     const endpoints = resolvePrewarmEndpoints();
-    await Promise.allSettled(
-      endpoints.map((url) =>
+    await Promise.allSettled([
+      ...endpoints.map((url) =>
         invokeCommand('proxy_operator_http', {
           url,
           method: 'HEAD',
@@ -95,8 +104,16 @@ export async function prewarmVoiceSession(options?: {
           body: null,
           timeoutSecs: 5,
         }).catch(() => undefined)
-      )
-    );
+      ),
+      ...(operatorProvider === 'antigravity'
+        ? [
+            invokeCommand('prewarm_operator_agent', {
+              engine: 'antigravity',
+              model: operatorModel || 'gemini-4-hydrogen-low',
+            }).catch(() => undefined),
+          ]
+        : []),
+    ]);
   }
 }
 

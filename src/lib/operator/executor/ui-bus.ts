@@ -5,10 +5,18 @@ import { emitTrace } from '../trace/trace';
 
 export type UiRequestKind =
   | 'navigate'
+  | 'navigate-view'
   | 'spawn-terminal'
   | 'close-terminal'
   | 'inject-prompt'
   | 'query-status';
+
+export interface NavigateViewPayload {
+  view: 'threads' | 'code' | 'agents' | 'diffs' | 'tasks' | 'routines' | 'settings';
+  threadId?: string;
+  filePath?: string;
+  taskId?: string;
+}
 
 export interface UiBusRequestPayload {
   reqId: string;

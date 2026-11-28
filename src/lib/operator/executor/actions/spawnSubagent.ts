@@ -5,6 +5,7 @@
 
 import { invokeCommand } from '../../../ipc';
 import { appOperatorController } from '../../appOperatorController';
+import { ctxClient } from '../../context/ctxClient';
 import type { ActionReceipt, SubagentDelegationMode, TurnContext } from '../../contract';
 import { trackDelegatedSubagent } from '../../subagentReturnWatcher';
 import { voiceSessionStore } from '../../voice/voiceSessionStore';
@@ -20,6 +21,7 @@ export interface SpawnSubagentActionPayload {
   mode?: SubagentDelegationMode;
   oddMode?: boolean;
   task: string;
+  alreadyAnnounced?: boolean;
 }
 
 function normalizeThreadProvider(raw?: string): string | undefined {
@@ -127,6 +129,9 @@ export async function executeSpawnSubagentAction(
 
     const threadId = extractThreadId(res?.address, res?.threadId);
 
+    // S2.3: Persist agreed task brief in SharedContextStore (`brief:<role>`) for fast subagent handoff
+    void ctxClient.sharePut(`brief:${role}`, taskBody).catch(() => {});
+
     // S2: Register child subagent with the closed-loop return watcher so its findings
     // are read via `dispatch_read`, stored in Working Context, and spoken on completion.
     if (threadId) {
@@ -151,8 +156,9 @@ export async function executeSpawnSubagentAction(
     const oddLabel = effectiveOddMode ? ' con enfoque ODD' : '';
     const modeLabel = effectiveMode === 'explore' ? ' (solo lectura)' : oddLabel;
     const summaryEs = `Subagente «${role}»${providerLabel}${modeLabel} iniciado en segundo plano.`;
-    const spokenSummaryEs =
-      effectiveMode === 'explore'
+    const spokenSummaryEs = args.alreadyAnnounced
+      ? ''
+      : effectiveMode === 'explore'
         ? `Mandé un subagente explorador${providerLabel} a revisar eso en segundo plano; apenas vuelva te cuento qué encontró.`
         : `Lancé el subagente ${role}${providerLabel}${oddLabel} en segundo plano; apenas termine te aviso con el resultado.`;
 
@@ -167,6 +173,7 @@ export async function executeSpawnSubagentAction(
         role,
         mode: effectiveMode,
         workspace: workspaceMode,
+        ...(args.alreadyAnnounced ? { alreadyAnnounced: true } : {}),
         ...(provider ? { provider } : {}),
         ...(res?.address ? { address: res.address } : {}),
         ...(threadId ? { threadId } : {}),

@@ -1,15 +1,15 @@
 import type {
-  ZedPersonaConfig,
-  ZedMemoryNote,
-  ZedTone,
-  ZedBrevity,
-  ZedFigureId,
-  ZedFigureDescriptor,
+  ArgosPersonaConfig,
+  ArgosMemoryNote,
+  ArgosTone,
+  ArgosBrevity,
+  ArgosFigureId,
+  ArgosFigureDescriptor,
   OperatorProviderConfig,
 } from './types';
 import { legacyOperatorMemoryNotesStorageKey } from '../../kiteLegacyIds';
 
-export const ZED_FIGURE_OPTIONS: readonly ZedFigureDescriptor[] = [
+export const ARGOS_FIGURE_OPTIONS: readonly ArgosFigureDescriptor[] = [
   {
     id: 'plasma-orb',
     label: 'Orbe Plasma',
@@ -76,11 +76,13 @@ export const ZED_FIGURE_OPTIONS: readonly ZedFigureDescriptor[] = [
   },
 ] as const;
 
-export type ResolvedZedFigureId = ZedFigureId;
+export type ResolvedArgosFigureId = ArgosFigureId;
+export type ResolvedZedFigureId = ResolvedArgosFigureId;
+export const ZED_FIGURE_OPTIONS = ARGOS_FIGURE_OPTIONS;
 
-const VALID_ZED_FIGURES = new Set<ZedFigureId>(ZED_FIGURE_OPTIONS.map((item) => item.id));
+const VALID_ARGOS_FIGURES = new Set<ArgosFigureId>(ARGOS_FIGURE_OPTIONS.map((item) => item.id));
 
-const LEGACY_ZED_FIGURE_MIGRATION: Record<string, ZedFigureId> = {
+const LEGACY_ARGOS_FIGURE_MIGRATION: Record<string, ArgosFigureId> = {
   'theme-sync': 'plasma-orb',
   'aurora-ring': 'orbital-gyro',
   'acoustic-pulse': 'silk-wave',
@@ -92,27 +94,46 @@ const LEGACY_ZED_FIGURE_MIGRATION: Record<string, ZedFigureId> = {
   'editorial-botanical': 'frosted-sphere',
 };
 
-export function sanitizeZedFigure(figure?: string | null): ZedFigureId {
-  if (figure && VALID_ZED_FIGURES.has(figure as ZedFigureId)) {
-    return figure as ZedFigureId;
+export function sanitizeArgosFigure(figure?: string | null): ArgosFigureId {
+  if (figure && VALID_ARGOS_FIGURES.has(figure as ArgosFigureId)) {
+    return figure as ArgosFigureId;
   }
-  if (figure && figure in LEGACY_ZED_FIGURE_MIGRATION) {
-    return LEGACY_ZED_FIGURE_MIGRATION[figure];
+  if (figure && figure in LEGACY_ARGOS_FIGURE_MIGRATION) {
+    return LEGACY_ARGOS_FIGURE_MIGRATION[figure];
   }
   return 'plasma-orb';
 }
 
-export function resolveZedFigure(figure?: ZedFigureId | null): ResolvedZedFigureId {
-  return sanitizeZedFigure(figure);
+export const sanitizeZedFigure = sanitizeArgosFigure;
+
+export function resolveArgosFigure(figure?: ArgosFigureId | null): ResolvedArgosFigureId {
+  return sanitizeArgosFigure(figure);
 }
 
-export function getZedFigureShaderMode(figure?: ZedFigureId | null): number {
-  const safe = sanitizeZedFigure(figure);
-  return ZED_FIGURE_OPTIONS.find((item) => item.id === safe)?.shaderMode ?? 0;
+export const resolveZedFigure = resolveArgosFigure;
+
+export function getArgosFigureShaderMode(figure?: ArgosFigureId | null): number {
+  const safe = sanitizeArgosFigure(figure);
+  return ARGOS_FIGURE_OPTIONS.find((item) => item.id === safe)?.shaderMode ?? 0;
 }
 
-export const DEFAULT_ZED_PERSONA: ZedPersonaConfig = {
-  name: 'Zed',
+export const getZedFigureShaderMode = getArgosFigureShaderMode;
+
+/**
+ * Migrate stored legacy default names ('Zed', 'Seth', or blank) to canonical 'Argos'
+ * while preserving any custom user-chosen assistant name.
+ */
+export function migrateLegacyPersonaName(rawName?: string | null): string {
+  const trimmed = (rawName ?? '').trim();
+  const lower = trimmed.toLowerCase();
+  if (!trimmed || lower === 'zed' || lower === 'seth') {
+    return 'Argos';
+  }
+  return trimmed;
+}
+
+export const DEFAULT_ARGOS_PERSONA: ArgosPersonaConfig = {
+  name: 'Argos',
   voice: 'Ara',
   tone: 'crisp',
   brevity: 'one-breath',
@@ -124,9 +145,11 @@ export const DEFAULT_ZED_PERSONA: ZedPersonaConfig = {
   figure: 'plasma-orb',
 };
 
+export const DEFAULT_ZED_PERSONA: ArgosPersonaConfig = DEFAULT_ARGOS_PERSONA;
+
 const MEMORY_NOTES_STORAGE_KEY = 'kite.zed.memoryNotes.v1';
 
-export function loadZedMemoryNotes(): ZedMemoryNote[] {
+export function loadArgosMemoryNotes(): ArgosMemoryNote[] {
   try {
     let raw = localStorage.getItem(MEMORY_NOTES_STORAGE_KEY);
     if (!raw) {
@@ -141,7 +164,7 @@ export function loadZedMemoryNotes(): ZedMemoryNote[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .map((item, idx): ZedMemoryNote | null => {
+      .map((item, idx): ArgosMemoryNote | null => {
         if (typeof item === 'string') {
           return {
             id: `mem-legacy-${idx}`,
@@ -159,13 +182,15 @@ export function loadZedMemoryNotes(): ZedMemoryNote[] {
         }
         return null;
       })
-      .filter((n): n is ZedMemoryNote => n !== null);
+      .filter((n): n is ArgosMemoryNote => n !== null);
   } catch {
     return [];
   }
 }
 
-export function saveZedMemoryNotes(notes: ZedMemoryNote[]): void {
+export const loadZedMemoryNotes = loadArgosMemoryNotes;
+
+export function saveArgosMemoryNotes(notes: ArgosMemoryNote[]): void {
   try {
     localStorage.setItem(MEMORY_NOTES_STORAGE_KEY, JSON.stringify(notes.slice(0, 50)));
   } catch {
@@ -173,8 +198,10 @@ export function saveZedMemoryNotes(notes: ZedMemoryNote[]): void {
   }
 }
 
-export function buildZedOpeningPreview(persona: ZedPersonaConfig): string {
-  const assistantName = persona.name.trim() || 'Zed';
+export const saveZedMemoryNotes = saveArgosMemoryNotes;
+
+export function buildArgosOpeningPreview(persona: ArgosPersonaConfig): string {
+  const assistantName = persona.name.trim() || 'Argos';
   const callMe = persona.builderCallMe.trim();
   const isEs = persona.language === 'es' || persona.language === 'auto';
 
@@ -202,17 +229,19 @@ export function buildZedOpeningPreview(persona: ZedPersonaConfig): string {
   return `${greetingEn} ${assistantName} connected. Which terminals, prompts, or subagents should we run?`;
 }
 
-export function buildZedSystemInstructions(config: OperatorProviderConfig): string {
-  const p = config.persona ?? DEFAULT_ZED_PERSONA;
-  const name = p.name.trim() || 'Zed';
-  const toneDesc: Record<ZedTone, string> = {
+export const buildZedOpeningPreview = buildArgosOpeningPreview;
+
+export function buildArgosSystemInstructions(config: OperatorProviderConfig): string {
+  const p = config.persona ?? DEFAULT_ARGOS_PERSONA;
+  const name = migrateLegacyPersonaName(p.name);
+  const toneDesc: Record<ArgosTone, string> = {
     calm: 'Steady, unhurried, and composed.',
     crisp: 'Concise, sharp, and technical with zero fluff.',
     warm: 'Collaborative, approachable, and supportive.',
     direct: 'Blunt, immediate, and action-first.',
     chill: 'Relaxed, conversational, and helpful.',
   };
-  const brevityDesc: Record<ZedBrevity, string> = {
+  const brevityDesc: Record<ArgosBrevity, string> = {
     'one-breath': 'Keep spoken/text replies to one short sentence (under 20 words) whenever possible.',
     tight: 'Keep spoken/text replies to one short sentence (under 20 words) whenever possible.',
     normal: 'Keep replies to 1-2 short sentences.',
@@ -220,7 +249,7 @@ export function buildZedSystemInstructions(config: OperatorProviderConfig): stri
     detailed: 'Provide complete context and step breakdowns when helpful.',
   };
 
-  const memoryNotes = p.rememberBetweenCalls ? loadZedMemoryNotes() : [];
+  const memoryNotes = p.rememberBetweenCalls ? loadArgosMemoryNotes() : [];
   const memoryBlock =
     memoryNotes.length > 0
       ? `\nShared Memory Notes:\n${memoryNotes.map((n) => `- ${n.content}`).join('\n')}`
@@ -240,3 +269,5 @@ export function buildZedSystemInstructions(config: OperatorProviderConfig): stri
     .filter(Boolean)
     .join('\n');
 }
+
+export const buildZedSystemInstructions = buildArgosSystemInstructions;

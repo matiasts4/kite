@@ -36,19 +36,23 @@ export function detectPromptEcho(text: string, systemPrompt?: string): boolean {
     return true;
   }
 
-  // Contiguous slice overlap check against systemPrompt (>= 40 contiguous characters)
-  // Strip few-shot reference examples so legitimate conversational replies (like greetings) are never falsely flagged.
+  // Contiguous slice overlap check against static system instructions only (>= 40 contiguous characters).
+  // Exclude few-shot reference examples and dynamic system context (active proposals, memory, workspace roster)
+  // so legitimate confirmations repeating user/proposal details are never falsely flagged as leaks.
   if (systemPrompt && systemPrompt.length >= 40) {
-    const promptWithoutExamples = systemPrompt
+    const staticOnlyPrompt = systemPrompt
       .toLowerCase()
-      .replace(/ejemplos de referencia:[\s\S]*?(?=contexto actual del sistema:|$)/i, ' ');
-    const cleanPrompt = promptWithoutExamples.replace(/\s+/g, ' ');
-    const cleanText = lower.replace(/\s+/g, ' ');
+      .replace(/contexto actual del sistema:[\s\S]*$/i, ' ')
+      .replace(/ejemplos de referencia:[\s\S]*$/i, ' ');
+    const cleanPrompt = staticOnlyPrompt.replace(/\s+/g, ' ').trim();
+    const cleanText = lower.replace(/\s+/g, ' ').trim();
     const windowSize = 40;
-    for (let i = 0; i <= cleanText.length - windowSize; i += 20) {
-      const chunk = cleanText.slice(i, i + windowSize);
-      if (chunk.length === windowSize && cleanPrompt.includes(chunk)) {
-        return true;
+    if (cleanPrompt.length >= windowSize && cleanText.length >= windowSize) {
+      for (let i = 0; i <= cleanText.length - windowSize; i += 20) {
+        const chunk = cleanText.slice(i, i + windowSize);
+        if (chunk.length === windowSize && cleanPrompt.includes(chunk)) {
+          return true;
+        }
       }
     }
   }

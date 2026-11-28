@@ -9,7 +9,7 @@ export interface NormalizedVoiceUtterance {
 }
 
 const LEADING_WAKE_WORD_RE =
-  /^(?:(?:oye|che|hey|hola|mira|escucha)\s+)?(?:seth|set|zed|ced|sef)(?:\s*[,.:;!?-]+\s*|\s+)(?=\S)/i;
+  /^(?:(?:oye|che|hey|hola|mira|escucha|ok|okay)\s+)?(?:seth|set|zed|ced|sef|argos|argus|hargos|argo)(?:\s*[,.:;!?-]+\s*|\s+)(?=\S)/i;
 
 const LEADING_COURTESY_RE = /^(?:por\s+favor|che|oye|mira)\s*[,.:;]+\s*(?=\S)/i;
 
@@ -25,7 +25,7 @@ export function normalizeSpanishVoiceStt(rawInput: string): NormalizedVoiceUtter
   const corrections: string[] = [];
   let text = raw.trim();
 
-  // 1. Strip wake-word prefix ("oye Seth, abre un hilo..." -> "abre un hilo...")
+  // 1. Strip wake-word prefix ("oye Argos, abre un hilo..." / "oye Seth, ..." -> "abre un hilo...")
   const withoutWake = text.replace(LEADING_WAKE_WORD_RE, '').trim();
   if (withoutWake && withoutWake !== text) {
     corrections.push('wake_word');
@@ -36,6 +36,20 @@ export function normalizeSpanishVoiceStt(rawInput: string): NormalizedVoiceUtter
   if (withoutCourtesy && withoutCourtesy !== text) {
     corrections.push('courtesy_prefix');
     text = withoutCourtesy;
+  }
+
+  // 1b. Phonetic normalization for Argos when addressed inside the utterance or standalone
+  const argosDirectFixed = text.replace(
+    /(?<![a-záéíóúñ])(?:argos|argus|hargos)(?![a-záéíóúñ])/gi,
+    'Argos'
+  );
+  const argosContextFixed = argosDirectFixed.replace(
+    /\b(oye|che|hey|hola|ok|okay|mira|escucha|a|al|para|con|de|asistente)\s+argo(?![a-záéíóúñ])/gi,
+    '$1 Argos'
+  );
+  if (argosContextFixed !== text) {
+    corrections.push('phonetic_argos');
+    text = argosContextFixed;
   }
 
   // 2. Normalize STT pauses between numbers and resource nouns ("dos. Terminales", "un. Hilo")
@@ -87,13 +101,17 @@ export function normalizeSpanishVoiceStt(rawInput: string): NormalizedVoiceUtter
     text = oddFixed;
   }
 
-  // 7. Phonetic Spanish STT provider names
+  // 7. Phonetic Spanish STT provider & orchestration term repairs
   const providerFixes: Array<[RegExp, string, string]> = [
     [/\b(?:anti[- ]?gr[aá]vit(?:i|y)|antigrabiti|anti[- ]?gravedad|de\s+gravity|the\s+gravity)\b/gi, 'antigravity', 'provider_antigravity'],
+    [/(?<![a-záéíóúñ])(?:clod|cloud|clot|claud)\s+code(?![a-záéíóúñ])/gi, 'claude code', 'phonetic_claude_code'],
     [/\b(con|de|en|usando|para|motor|modelo)\s+(?:clot|clod|claudio|claud)\b/gi, '$1 claude', 'provider_claude'],
     [/\b(?:c[oó]dec|c[oó]dex|code[- ]x)\b/gi, 'codex', 'provider_codex'],
     [/\b(?:open[- ]coud|open[- ]code)\b/gi, 'opencode', 'provider_opencode'],
-    [/\b(con|de|en|usando|motor|modelo)\s+(?:groc|brok|gro)\b/gi, '$1 grok', 'provider_grok'],
+    [/\b(con|de|en|usando|para|motor|modelo)\s+(?:groc|brok|gro)\b/gi, '$1 grok', 'provider_grok'],
+    [/(?<![a-záéíóúñ])(?:eswarm|suarm|esuarm|sworm)(?![a-záéíóúñ])/gi, 'swarm', 'phonetic_swarm'],
+    [/(?<![a-záéíóúñ])(?:g[uü]ork[-\s]?tri|work\s+tree|worktri)(?![a-záéíóúñ])/gi, 'worktree', 'phonetic_worktree'],
+    [/(?<![a-záéíóúñ])(?:kait|cait)(?![a-záéíóúñ])/gi, 'kite', 'phonetic_kite'],
   ];
 
   for (const [re, replacement, tag] of providerFixes) {

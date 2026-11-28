@@ -202,3 +202,45 @@ In strict compliance with [E:\kite\AGENTS.md](file:///E:/kite/AGENTS.md):
 - Unit tests: `src/components/quota/ProviderConnectionPanel.test.tsx` and `src/components/updates/AgentUpdatesBadge.test.tsx`.
 - Rust tests in `src-tauri` for semver comparison and command resolution.
 - Sanitizer audit: `node .kite/sanitizer/audit-references.mjs --check`.
+
+---
+
+## Specs
+
+- **S1 — Direct executable resolution & PATH resilience for agent update/install jobs**:
+  - Verbatim:
+    > "verifica el porque en la parte de actualizacion cuando le doy en actualizar antigravity no lo hace"
+  - Behavior:
+    - `execute_tool_job_background` in `src-tauri/src/agent_maintenance.rs` resolves the target binary via `terminal::resolve_engine_program`, `terminal::where_program`, and `terminal::known_program_path` (supporting `.exe`, `.cmd`/`.bat`, `.ps1` on Windows and direct binary execution without relying on `cmd.exe /c` resolving `PATH`) and compacts/deduplicates child `PATH` (stripping stale `kite-e2e-` entries) so `cmd.exe` never exceeds Windows' 8191-character variable limit when `.cmd` shims or compound commands run.
+    - When a background job fails, `job.error` captures non-empty stderr or fallback stdout error lines; when an `update` command exits `0`, Kite invalidates caches and re-probes installed versions before emitting final `succeeded` status, marking the job `failed` with a clear error if the installed version remained `outdated`.
+  - Checks: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features agent_maintenance::tests`
+
+- **S2 — Prevent E2E sandbox pollution of Windows User `PATH`**:
+  - Verbatim:
+    > "hazlo"
+  - Behavior:
+    - `ensure_kite_bin_on_user_path` in `src-tauri/src/user_path.rs` skips mutating `HKCU\Environment\Path` under E2E sandboxes (`KITE_E2E_SANDBOX_ROOT` set or paths containing `kite-e2e-`), and `merge_user_path_value` prunes stale `kite-e2e-` temp segments rather than preserving them.
+  - Checks: `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features user_path::tests`
+
+- **S3 — Accurate UI state & visible error feedback in update surfaces**:
+  - Verbatim:
+    > "hazlo"
+  - Behavior:
+    - `AgentUpdatesPopover.tsx` clears its local pending flag once `triggerAgentToolJob` resolves or rejects and tracks live `activeJobs[engine]` status (`running`, `succeeded`, `failed`) without getting stuck on `"Actualizando..."`, displaying `job.error` when a job fails alongside `"Reintentar"`.
+    - `ProviderConnectionPanel.tsx` displays an explicit error banner (with `job.error`) when `job?.status === 'failed'` so failures never revert silently to the idle button.
+  - Checks: `npx vitest run src/components/updates/AgentUpdates.test.tsx src/components/quota/ProviderConnectionPanel.test.tsx`
+
+## Tasks
+
+- [x] **T1** (`S2`, Risk: `item 3 (shared user_path helper & Registry PATH)`): Guard `src-tauri/src/user_path.rs` against E2E sandbox runs, prune stale `kite-e2e-` segments, add regression tests, and clean stale `kite-e2e-` entries from local `HKCU\Environment\Path`.
+- [x] **T2** (`S1`, Risk: `item 3 (shared multi-engine tool runner)`): Update `src-tauri/src/agent_maintenance.rs` to resolve executables directly, compact child `PATH`, capture stdout fallback errors, verify post-update version state before reporting `succeeded`, and add Rust unit tests.
+- [x] **T3** (`S3`, Risk: `none`): Fix stuck loading state and display `job.error` in `AgentUpdatesPopover.tsx` and `ProviderConnectionPanel.tsx` using existing design tokens, with Vitest regression coverage.
+- [x] **T4** (`S1-S3`, Risk: `item 3`): Run `npm run verify:gate -- --rebuild-rust` and independent verifier audit.
+
+## Log
+
+- **L1 (2026-11-27)**:
+  > "verifica el porque en la parte de actualizacion cuando le doy en actualizar antigravity no lo hace"
+- **L2 (2026-11-27)**:
+  > "hazlo"
+- **L3 (2026-11-27)**: Verified Tier 3 closeout. `verify:gate` (`--tier large --rebuild-rust --spec topbar-popovers,settings-tasks`) passed all 10 stages (`test-results/quality-gate/2026-11-27T18-52-17-048Z/report.json`), post-E2E `HKCU\Environment\Path` stayed clean (`822` chars, `has_e2e: False`), and Independent Verifier (`thread:ec010c14-0f29-4656-b4c9-961afd411c31`) returned Round 2 `APPROVE` (`S1: PASS`, `S2: PASS`, `S3: PASS`, `Defects: None.`).

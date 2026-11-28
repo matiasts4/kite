@@ -3,10 +3,10 @@
 // TTL-based registry caching, and zero intrusive UI popups.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
@@ -558,6 +558,243 @@ pub fn compute_agent_updates_summary(force_refresh: bool) -> AgentUpdatesSummary
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedToolCommand {
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) extra_path_dir: Option<PathBuf>,
+}
+
+fn normalize_path_key(seg: &str) -> String {
+    if cfg!(windows) {
+        seg.trim()
+            .trim_matches('"')
+            .trim_end_matches(['\\', '/'])
+            .to_ascii_lowercase()
+    } else {
+        seg.trim().trim_end_matches('/').to_string()
+    }
+}
+
+/// Deduplicates `PATH`, drops stale `kite-e2e-` sandbox entries, and prepends `prepend_dir`
+/// so child shells (`cmd.exe`) stay safely below Windows' 8191-character variable ceiling.
+pub(crate) fn compact_path_env(raw_path: &str, prepend_dir: Option<&Path>) -> String {
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let mut seen = HashSet::new();
+    let mut entries: Vec<String> = Vec::new();
+
+    if let Some(dir) = prepend_dir {
+        let dir_str = dir.to_string_lossy().trim().to_string();
+        if !dir_str.is_empty() {
+            let key = normalize_path_key(&dir_str);
+            if !key.is_empty() && seen.insert(key) {
+                entries.push(dir_str);
+            }
+        }
+    }
+
+    for part in raw_path.split(sep) {
+        let trimmed = part.trim();
+        if trimmed.is_empty() || trimmed.to_ascii_lowercase().contains("kite-e2e-") {
+            continue;
+        }
+        let key = normalize_path_key(trimmed);
+        if !key.is_empty() && seen.insert(key) {
+            entries.push(trimmed.to_string());
+        }
+    }
+
+    let sep_str = if cfg!(windows) { ";" } else { ":" };
+    let mut joined = entries.join(sep_str);
+    if cfg!(windows) && joined.len() > 7500 {
+        let prepend_key = prepend_dir
+            .map(|d| normalize_path_key(&d.to_string_lossy()))
+            .unwrap_or_default();
+        entries.retain(|seg| {
+            let norm = normalize_path_key(seg);
+            norm == prepend_key || norm.contains("\\windows") || Path::new(seg).is_dir()
+        });
+        joined = entries.join(sep_str);
+    }
+    joined
+}
+
+fn resolve_windows_system_binary(rel_under_system32: &str, fallback_name: &str) -> PathBuf {
+    if let Ok(root) = std::env::var("SystemRoot").or_else(|_| std::env::var("WINDIR")) {
+        let candidate = PathBuf::from(root).join("System32").join(rel_under_system32);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(fallback_name)
+}
+
+fn path_stem_matches(path: &str, expected_token: &str) -> bool {
+    Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(expected_token))
+}
+
+fn has_shell_metachars(cmd: &str) -> bool {
+    cmd.contains('|')
+        || cmd.contains('&')
+        || cmd.contains(';')
+        || cmd.contains('>')
+        || cmd.contains('<')
+        || cmd.contains('$')
+        || cmd.contains('`')
+}
+
+pub(crate) fn prepare_tool_command_with(
+    engine: &str,
+    command_to_run: &str,
+    is_windows: bool,
+    resolve_engine: &dyn Fn(&str) -> Option<String>,
+    known_path: &dyn Fn(&str) -> Option<String>,
+    where_prog: &dyn Fn(&str) -> Option<String>,
+) -> PreparedToolCommand {
+    if is_windows {
+        if command_to_run.contains("| iex")
+            || command_to_run.contains("irm ")
+            || command_to_run.trim_end().ends_with(".ps1")
+        {
+            return PreparedToolCommand {
+                program: resolve_windows_system_binary(
+                    r"WindowsPowerShell\v1.0\powershell.exe",
+                    "powershell.exe",
+                ),
+                args: vec![
+                    "-NoProfile".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    command_to_run.to_string(),
+                ],
+                extra_path_dir: None,
+            };
+        }
+
+        let mut parts = command_to_run.split_whitespace();
+        if let Some(program_token) = parts.next() {
+            if !has_shell_metachars(command_to_run) {
+                let resolved = resolve_engine(engine)
+                    .filter(|p| path_stem_matches(p, program_token))
+                    .or_else(|| known_path(program_token))
+                    .or_else(|| where_prog(program_token));
+
+                if let Some(bin_str) = resolved {
+                    let bin_path = PathBuf::from(&bin_str);
+                    let extra_path_dir = bin_path
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .map(Path::to_path_buf);
+                    let rest: Vec<String> = parts.map(str::to_string).collect();
+                    let ext = bin_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+
+                    if ext == "cmd" || ext == "bat" {
+                        let mut args = vec!["/c".to_string(), bin_str];
+                        args.extend(rest);
+                        return PreparedToolCommand {
+                            program: resolve_windows_system_binary("cmd.exe", "cmd.exe"),
+                            args,
+                            extra_path_dir,
+                        };
+                    }
+                    if ext == "ps1" {
+                        let mut args = vec![
+                            "-NoProfile".to_string(),
+                            "-ExecutionPolicy".to_string(),
+                            "Bypass".to_string(),
+                            "-File".to_string(),
+                            bin_str,
+                        ];
+                        args.extend(rest);
+                        return PreparedToolCommand {
+                            program: resolve_windows_system_binary(
+                                r"WindowsPowerShell\v1.0\powershell.exe",
+                                "powershell.exe",
+                            ),
+                            args,
+                            extra_path_dir,
+                        };
+                    }
+                    return PreparedToolCommand {
+                        program: bin_path,
+                        args: rest,
+                        extra_path_dir,
+                    };
+                }
+            }
+        }
+
+        return PreparedToolCommand {
+            program: resolve_windows_system_binary("cmd.exe", "cmd.exe"),
+            args: vec!["/c".to_string(), command_to_run.to_string()],
+            extra_path_dir: None,
+        };
+    }
+
+    if !has_shell_metachars(command_to_run) {
+        let mut parts = command_to_run.split_whitespace();
+        if let Some(program_token) = parts.next() {
+            let resolved = resolve_engine(engine)
+                .filter(|p| path_stem_matches(p, program_token))
+                .or_else(|| known_path(program_token))
+                .or_else(|| where_prog(program_token));
+            if let Some(bin_str) = resolved {
+                let bin_path = PathBuf::from(&bin_str);
+                let extra_path_dir = bin_path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(Path::to_path_buf);
+                return PreparedToolCommand {
+                    program: bin_path,
+                    args: parts.map(str::to_string).collect(),
+                    extra_path_dir,
+                };
+            }
+        }
+    }
+
+    PreparedToolCommand {
+        program: PathBuf::from("sh"),
+        args: vec!["-c".to_string(), command_to_run.to_string()],
+        extra_path_dir: None,
+    }
+}
+
+pub(crate) fn validate_post_update_advisory(
+    engine: &str,
+    action: &str,
+    summary: &AgentUpdatesSummary,
+    fallback_output: Option<&str>,
+) -> Option<String> {
+    if action != "update" {
+        return None;
+    }
+    let advisory = summary.advisories.get(engine)?;
+    if advisory.state != "outdated" {
+        return None;
+    }
+    let detail = match (&advisory.current_version, &advisory.latest_version) {
+        (Some(cur), Some(lat)) => {
+            format!("El comando terminó sin actualizar (sigue en v{cur}, disponible v{lat})")
+        }
+        _ => "El comando terminó pero la versión instalada sigue desactualizada".to_string(),
+    };
+    if let Some(line) = fallback_output.map(str::trim).filter(|s| !s.is_empty()) {
+        let clipped: String = line.chars().take(140).collect();
+        Some(format!("{detail}: {clipped}"))
+    } else {
+        Some(detail)
+    }
+}
+
 pub fn execute_tool_job_background(
     app: AppHandle,
     job_id: String,
@@ -581,46 +818,53 @@ pub fn execute_tool_job_background(
     };
 
     std::thread::spawn(move || {
-        log_trace(&format!("[agent_maintenance] Starting {action} for {engine}: '{command_to_run}'"));
+        let prepared = prepare_tool_command_with(
+            &engine,
+            &command_to_run,
+            cfg!(windows),
+            &terminal::resolve_engine_program,
+            &terminal::known_program_path,
+            &terminal::where_program,
+        );
+        log_trace(&format!(
+            "[agent_maintenance] Starting {action} for {engine}: {:?} {:?}",
+            prepared.program, prepared.args
+        ));
 
-        let child_res = if cfg!(windows) {
-            let mut cmd = if command_to_run.contains("| iex") || command_to_run.contains("irm ") || command_to_run.ends_with(".ps1") {
-                let mut c = std::process::Command::new("powershell.exe");
-                c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &command_to_run]);
-                c
-            } else {
-                let mut c = std::process::Command::new("cmd.exe");
-                c.args(["/c", &command_to_run]);
-                c
-            };
-            #[cfg(windows)]
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
-            cmd.spawn()
-        } else {
-            let mut cmd = std::process::Command::new("sh");
-            cmd.args(["-c", &command_to_run]);
-            cmd.stdout(std::process::Stdio::piped());
-            cmd.stderr(std::process::Stdio::piped());
-            cmd.spawn()
-        };
+        let mut cmd = std::process::Command::new(&prepared.program);
+        cmd.args(&prepared.args);
+        if let Ok(raw_path) = std::env::var("PATH") {
+            let compacted = compact_path_env(&raw_path, prepared.extra_path_dir.as_deref());
+            if !compacted.is_empty() {
+                cmd.env("PATH", compacted);
+            }
+        }
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
-        match child_res {
+        match cmd.spawn() {
             Ok(mut child) => {
                 use std::io::{BufRead, BufReader};
 
                 let stdout_reader = child.stdout.take().map(BufReader::new);
                 let stderr_reader = child.stderr.take().map(BufReader::new);
+                let last_stdout: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
                 // Pipe stdout tracking
-                if let Some(reader) = stdout_reader {
+                let stdout_thread = stdout_reader.map(|reader| {
                     let job_id_clone = job_id.clone();
                     let app_clone = app.clone();
+                    let last_stdout_clone = Arc::clone(&last_stdout);
                     std::thread::spawn(move || {
                         for line in reader.lines().flatten() {
                             let trimmed = line.trim();
                             if !trimmed.is_empty() {
+                                if let Ok(mut guard) = last_stdout_clone.lock() {
+                                    *guard = Some(trimmed.to_string());
+                                }
                                 let mut jobs = get_active_jobs().lock().unwrap();
                                 if let Some(job) = jobs.get_mut(&job_id_clone) {
                                     job.last_line = Some(trimmed.to_string());
@@ -628,8 +872,8 @@ pub fn execute_tool_job_background(
                                 }
                             }
                         }
-                    });
-                }
+                    })
+                });
 
                 let mut stderr_accum = String::new();
                 if let Some(reader) = stderr_reader {
@@ -640,41 +884,70 @@ pub fn execute_tool_job_background(
                 }
 
                 let status = child.wait();
-                let success = match status {
-                    Ok(exit_status) => exit_status.success(),
-                    Err(_) => false,
-                };
-
-                let finished_now = now_unix_ms();
-                {
-                    let mut jobs = get_active_jobs().lock().unwrap();
-                    if let Some(job) = jobs.get_mut(&job_id) {
-                        job.finished_at_unix_ms = Some(finished_now);
-                        if success {
-                            job.status = "succeeded".to_string();
-                            job.percent = Some(100.0);
-                        } else {
-                            job.status = "failed".to_string();
-                            job.error = Some(if !stderr_accum.is_empty() {
-                                stderr_accum.chars().take(200).collect()
-                            } else {
-                                "El proceso finalizó con error".to_string()
-                            });
-                        }
-                        let _ = app.emit("agent:tool-job-changed", &*job);
-                    }
+                if let Some(handle) = stdout_thread {
+                    let _ = handle.join();
                 }
 
+                let (success, exit_code) = match status {
+                    Ok(exit_status) => (exit_status.success(), exit_status.code()),
+                    Err(_) => (false, None),
+                };
+
+                let last_stdout_line = last_stdout.lock().ok().and_then(|g| g.clone());
+                let stderr_trimmed = stderr_accum.trim().to_string();
+                let fallback_output = if !stderr_trimmed.is_empty() {
+                    Some(stderr_trimmed.as_str())
+                } else {
+                    last_stdout_line.as_deref()
+                };
+
                 if success {
-                    // Invalidate caches and broadcast fresh summary
+                    // Recompute summary before finalizing job status so an update that exited 0
+                    // without advancing the version never reports false success.
                     invalidate_remote_cache(&engine);
                     crate::account_switcher::invalidate_detected_cli_accounts_cache();
                     let summary = compute_agent_updates_summary(true);
+                    let post_check_err =
+                        validate_post_update_advisory(&engine, &action, &summary, fallback_output);
+
+                    let finished_now = now_unix_ms();
+                    {
+                        let mut jobs = get_active_jobs().lock().unwrap();
+                        if let Some(job) = jobs.get_mut(&job_id) {
+                            job.finished_at_unix_ms = Some(finished_now);
+                            if let Some(err_msg) = post_check_err {
+                                job.status = "failed".to_string();
+                                job.error = Some(err_msg);
+                            } else {
+                                job.status = "succeeded".to_string();
+                                job.percent = Some(100.0);
+                            }
+                            let _ = app.emit("agent:tool-job-changed", &*job);
+                        }
+                    }
                     let _ = app.emit("agent:updates-summary-changed", &summary);
+                } else {
+                    let finished_now = now_unix_ms();
+                    let mut jobs = get_active_jobs().lock().unwrap();
+                    if let Some(job) = jobs.get_mut(&job_id) {
+                        job.finished_at_unix_ms = Some(finished_now);
+                        job.status = "failed".to_string();
+                        job.error = Some(if let Some(msg) = fallback_output {
+                            msg.chars().take(240).collect()
+                        } else if let Some(code) = exit_code {
+                            format!("El proceso finalizó con error (código {code})")
+                        } else {
+                            "El proceso finalizó con error".to_string()
+                        });
+                        let _ = app.emit("agent:tool-job-changed", &*job);
+                    }
                 }
             }
             Err(e) => {
-                log_trace(&format!("[agent_maintenance] Failed to spawn {command_to_run}: {e}"));
+                log_trace(&format!(
+                    "[agent_maintenance] Failed to spawn {:?}: {e}",
+                    prepared.program
+                ));
                 let mut jobs = get_active_jobs().lock().unwrap();
                 if let Some(job) = jobs.get_mut(&job_id) {
                     job.status = "failed".to_string();
@@ -897,5 +1170,107 @@ mod tests {
         });
         assert_eq!(compute_count.load(Ordering::SeqCst), 3);
         assert_eq!(after_inv.last_checked_unix_ms, 3);
+    }
+
+    #[test]
+    fn compact_path_env_strips_e2e_entries_dedups_and_prepends_binary_dir() {
+        let raw = r"C:\Windows\System32;C:\Users\PC\AppData\Local\Temp\kite-e2e-1\bin;C:\WINDOWS\system32;C:\Tools\bin";
+        let extra = Path::new(r"C:\Users\PC\AppData\Local\agy\bin");
+        let compacted = compact_path_env(raw, Some(extra));
+        assert_eq!(
+            compacted,
+            r"C:\Users\PC\AppData\Local\agy\bin;C:\Windows\System32;C:\Tools\bin"
+        );
+    }
+
+    #[test]
+    fn resolve_command_invocation_executes_matching_exe_directly_without_cmd_shell() {
+        let prepared = prepare_tool_command_with(
+            "antigravity",
+            "agy update",
+            true,
+            &|engine| {
+                if engine == "antigravity" {
+                    Some(r"C:\Users\PC\AppData\Local\agy\bin\agy.exe".to_string())
+                } else {
+                    None
+                }
+            },
+            &|_| None,
+            &|_| None,
+        );
+        assert_eq!(
+            prepared.program,
+            std::path::PathBuf::from(r"C:\Users\PC\AppData\Local\agy\bin\agy.exe")
+        );
+        assert_eq!(prepared.args, vec!["update".to_string()]);
+        assert_eq!(
+            prepared.extra_path_dir,
+            Some(std::path::PathBuf::from(r"C:\Users\PC\AppData\Local\agy\bin"))
+        );
+
+        // Non-engine binary (e.g., npm for opencode) uses `where` rather than `opencode.exe`.
+        let npm_cmd = prepare_tool_command_with(
+            "opencode",
+            "npm install -g opencode-ai",
+            true,
+            &|_| Some(r"C:\Users\PC\.opencode\bin\opencode.exe".to_string()),
+            &|_| None,
+            &|name| {
+                if name == "npm" {
+                    Some(r"C:\Program Files\nodejs\npm.cmd".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+        assert!(
+            npm_cmd
+                .program
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("cmd.exe")),
+            "expected cmd.exe wrapper for .cmd shim, got {:?}",
+            npm_cmd.program
+        );
+        assert_eq!(
+            npm_cmd.args,
+            vec![
+                "/c".to_string(),
+                r"C:\Program Files\nodejs\npm.cmd".to_string(),
+                "install".to_string(),
+                "-g".to_string(),
+                "opencode-ai".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn evaluate_update_completion_rejects_exit_zero_when_still_outdated() {
+        let mut advisories = HashMap::new();
+        advisories.insert(
+            "antigravity".to_string(),
+            AgentUpdateAdvisory {
+                engine: "antigravity".to_string(),
+                display_name: "Antigravity".to_string(),
+                state: "outdated".to_string(),
+                current_version: Some("1.5.17".to_string()),
+                latest_version: Some("1.5.18".to_string()),
+                update_command: "agy update".to_string(),
+                install_command: None,
+                binary_path: Some(r"C:\Users\PC\AppData\Local\agy\bin\agy.exe".to_string()),
+                checked_at_unix_ms: 1,
+            },
+        );
+        let summary = AgentUpdatesSummary {
+            total_supported: 1,
+            installed_count: 1,
+            outdated_count: 1,
+            advisories,
+            last_checked_unix_ms: 1,
+        };
+        let err = validate_post_update_advisory("antigravity", "update", &summary, None);
+        assert!(err.is_some());
+        assert!(err.unwrap().contains("1.5.17"));
     }
 }

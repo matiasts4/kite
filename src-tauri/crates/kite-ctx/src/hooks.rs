@@ -182,6 +182,19 @@ fn split_shell_chain(command: &str) -> Option<Vec<(String, &'static str)>> {
         }
 
         if !in_single && !in_double {
+            // Allow `2>&1` stderr-to-stdout merge (common in agent shell commands).
+            if b == b'2'
+                && i + 4 <= len
+                && &bytes[i..i + 4] == b"2>&1"
+                && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+                && (i + 4 == len
+                    || bytes[i + 4].is_ascii_whitespace()
+                    || bytes[i + 4] == b';'
+                    || bytes[i + 4] == b'&')
+            {
+                i += 4;
+                continue;
+            }
             // Reject unsafe operators outside quotes
             if b == b'>' || b == b'<' || b == b'`' {
                 return None;
@@ -272,6 +285,123 @@ fn split_shell_words(segment: &str) -> Vec<String> {
     words
 }
 
+fn strip_standalone_stderr_merge(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    let mut in_single = false;
+    let mut in_double = false;
+    let bytes = segment.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+
+    while i < len {
+        let ch = match segment[i..].chars().next() {
+            Some(c) => c,
+            None => break,
+        };
+        if ch == '\\' && !in_single {
+            out.push(ch);
+            i += ch.len_utf8();
+            if let Some(next_ch) = segment[i..].chars().next() {
+                out.push(next_ch);
+                i += next_ch.len_utf8();
+            }
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            out.push('\'');
+            i += 1;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if !in_single
+            && !in_double
+            && ch == '2'
+            && i + 4 <= len
+            && &bytes[i..i + 4] == b"2>&1"
+            && (i == 0 || bytes[i - 1].is_ascii_whitespace())
+            && (i + 4 == len || bytes[i + 4].is_ascii_whitespace())
+        {
+            i += 4;
+            continue;
+        }
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn has_interactive_or_streaming_flags(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "-f" | "--follow"
+                | "-i"
+                | "--interactive"
+                | "-t"
+                | "--tty"
+                | "-it"
+                | "-ti"
+                | "-w"
+                | "--watch"
+                | "--web"
+                | "-d"
+                | "--detach"
+                | "-e"
+                | "--editor"
+        )
+    })
+}
+
+fn is_safe_gh_read_command(args: &[String]) -> bool {
+    if has_interactive_or_streaming_flags(args) {
+        return false;
+    }
+    let Some(sub) = args.first().map(|s| s.to_ascii_lowercase()) else {
+        return false;
+    };
+    let action = args.get(1).map(|s| s.to_ascii_lowercase());
+    match sub.as_str() {
+        "pr" => matches!(
+            action.as_deref(),
+            Some("list" | "view" | "status" | "diff" | "checks")
+        ),
+        "issue" | "repo" => matches!(action.as_deref(), Some("list" | "view" | "status")),
+        "run" => matches!(action.as_deref(), Some("list" | "view")),
+        "api" => !args.iter().any(|a| {
+            let l = a.to_ascii_lowercase();
+            matches!(l.as_str(), "-x" | "--method" | "-f" | "-f@" | "--field" | "--raw-field" | "--input")
+                || l.starts_with("--method=")
+        }),
+        _ => false,
+    }
+}
+
+fn is_safe_docker_read_command(args: &[String]) -> bool {
+    if has_interactive_or_streaming_flags(args) {
+        return false;
+    }
+    let Some(sub) = args.first().map(|s| s.to_ascii_lowercase()) else {
+        return false;
+    };
+    match sub.as_str() {
+        "ps" | "images" | "info" | "version" | "inspect" | "history" | "logs" => true,
+        "stats" => args.iter().any(|a| a == "--no-stream"),
+        "compose" => args
+            .get(1)
+            .map(|a| a.to_ascii_lowercase())
+            .is_some_and(|act| matches!(act.as_str(), "ps" | "config" | "images" | "ls")),
+        _ => false,
+    }
+}
+
 fn rewrite_single_segment(segment: &str) -> Option<String> {
     let trimmed = segment.trim();
     if trimmed.is_empty()
@@ -282,39 +412,85 @@ fn rewrite_single_segment(segment: &str) -> Option<String> {
         return None;
     }
 
-    let words = split_shell_words(trimmed);
+    let cleaned = if trimmed.contains("2>&1") {
+        strip_standalone_stderr_merge(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+    let words = split_shell_words(&cleaned);
     let first_word = words.first()?;
     let bin = crate::cmd_filters::normalize_bin_name(first_word);
 
-    // Skip git interactive/commit mutations even when preceded by `-C <dir>` or `-c <k=v>`
+    // Skip git interactive/commit mutations and zero-saving metadata commands.
     if bin == "git" {
         if let Some((_, sub)) = crate::cmd_filters::resolve_subcommand_for_bin("git", &words[1..]) {
             if matches!(
                 sub.as_str(),
-                "commit" | "rebase" | "merge" | "add" | "checkout" | "switch" | "reset" | "clean"
+                "commit"
+                    | "rebase"
+                    | "merge"
+                    | "add"
+                    | "checkout"
+                    | "switch"
+                    | "reset"
+                    | "clean"
+                    | "rev-parse"
+                    | "branch"
+                    | "remote"
+                    | "push"
+                    | "fetch"
+                    | "tag"
+                    | "config"
+                    | "worktree"
             ) {
                 return None;
             }
         }
     }
 
+    let gh_eligible = bin == "gh" && is_safe_gh_read_command(&words[1..]);
+    let docker_eligible = bin == "docker" && is_safe_docker_read_command(&words[1..]);
+
+    let lower = cleaned.to_ascii_lowercase();
     let eligible = matches!(
         bin.as_str(),
-        "git" | "cargo" | "vitest" | "jest" | "tsc" | "pytest" | "ruff" | "mypy" | "rg" | "grep" | "tree"
-    ) || ((bin == "npx"
-        || bin == "npm"
-        || bin == "pnpm"
-        || bin == "yarn"
-        || bin == "bun")
-        && (trimmed.contains("test")
-            || trimmed.contains("vitest")
-            || trimmed.contains("jest")
-            || trimmed.contains("tsc")
-            || trimmed.contains("lint")
-            || trimmed.contains("typecheck")));
+        "git"
+            | "cargo"
+            | "vitest"
+            | "jest"
+            | "playwright"
+            | "tsc"
+            | "eslint"
+            | "prettier"
+            | "pytest"
+            | "ruff"
+            | "mypy"
+            | "rg"
+            | "grep"
+            | "tree"
+            | "curl"
+    ) || gh_eligible
+        || docker_eligible
+        || ((bin == "npx"
+            || bin == "npm"
+            || bin == "pnpm"
+            || bin == "yarn"
+            || bin == "bun")
+            && (lower.contains("test")
+                || lower.contains("vitest")
+                || lower.contains("jest")
+                || lower.contains("playwright")
+                || lower.contains("tsc")
+                || lower.contains("lint")
+                || lower.contains("eslint")
+                || lower.contains("prettier")
+                || lower.contains("typecheck")
+                || lower.contains("build")
+                || lower.contains("verify")
+                || lower.contains("check")));
 
     if eligible {
-        Some(format!("kite ctx exec -- {trimmed}"))
+        Some(format!("kite ctx exec -- {cleaned}"))
     } else {
         None
     }
@@ -383,7 +559,39 @@ pub fn evaluate_hook_input(
     evaluate_claude_or_codex_hook(&parsed)
 }
 
-fn fail_open_response(agent_hint: Option<AgentTarget>) -> Option<String> {
+/// Wrap a hook command so hosts using `cmd /c` (Windows) or `sh -c` (Unix)
+/// fail open with `fallback_json` and exit 0 whenever `kite` is absent or fails.
+/// On Windows, avoids spawning `where.exe` when `%APPDATA%\Kite Code\bin\kite.exe` exists.
+pub fn format_fail_open_hook_command(raw_cmd: &str, fallback_json: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        if let Some(sub_args) = raw_cmd.strip_prefix("kite ") {
+            return match fallback_json {
+                Some(fb) => format!(
+                    r#"if exist "%APPDATA%\Kite Code\bin\kite.exe" ("%APPDATA%\Kite Code\bin\kite.exe" {sub_args} || echo {fb}) else (where /q kite >nul 2>nul && ({raw_cmd}) || echo {fb})"#
+                ),
+                None => format!(
+                    r#"if exist "%APPDATA%\Kite Code\bin\kite.exe" ("%APPDATA%\Kite Code\bin\kite.exe" {sub_args} || exit /b 0) else (where /q kite >nul 2>nul && ({raw_cmd}) || exit /b 0)"#
+                ),
+            };
+        }
+        match fallback_json {
+            Some(fb) => format!("where /q kite >nul 2>nul && ({raw_cmd}) || echo {fb}"),
+            None => format!("where /q kite >nul 2>nul && ({raw_cmd}) || exit /b 0"),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match fallback_json {
+            Some(fb) => format!(
+                "command -v kite >/dev/null 2>&1 && {raw_cmd} || printf '%s\\n' '{fb}'"
+            ),
+            None => format!("command -v kite >/dev/null 2>&1 && {raw_cmd} || true"),
+        }
+    }
+}
+
+pub fn fail_open_response(agent_hint: Option<AgentTarget>) -> Option<String> {
     match agent_hint {
         Some(AgentTarget::Antigravity) | Some(AgentTarget::Gemini) => {
             Some(r#"{"decision":"allow"}"#.to_string())
@@ -724,37 +932,51 @@ fn skipped(target: &str, path: &Path) -> HookInstallAction {
 }
 
 fn install_claude_hook(settings_path: &Path, check_only: bool) -> Result<HookInstallAction> {
+    let hook_cmd = if cfg!(windows) {
+        "kite ctx hook-rewrite --agent claude".to_string()
+    } else {
+        format_fail_open_hook_command("kite ctx hook-rewrite --agent claude", None)
+    };
     upsert_nested_hook_entry(
         "claude",
         settings_path,
         "PreToolUse",
         "Bash|PowerShell",
-        "kite ctx hook-rewrite --agent claude",
+        &hook_cmd,
         Some(5),
         check_only,
     )
 }
 
 fn install_codex_hook(hooks_path: &Path, check_only: bool) -> Result<HookInstallAction> {
+    let hook_cmd = if cfg!(windows) {
+        "kite ctx hook-rewrite --agent codex".to_string()
+    } else {
+        format_fail_open_hook_command("kite ctx hook-rewrite --agent codex", None)
+    };
     upsert_nested_hook_entry(
         "codex_hook",
         hooks_path,
         "PreToolUse",
         "Bash",
-        "kite ctx hook-rewrite --agent codex",
+        &hook_cmd,
         None,
         check_only,
     )
 }
 
 fn install_gemini_hook(settings_path: &Path, check_only: bool) -> Result<HookInstallAction> {
+    let hook_cmd = format_fail_open_hook_command(
+        "kite ctx hook-rewrite --agent gemini",
+        Some(r#"{"decision":"allow"}"#),
+    );
     upsert_nested_hook_entry(
         "gemini_hook",
         settings_path,
         "BeforeTool",
         "run_shell_command",
-        "kite ctx hook-rewrite --agent gemini",
-        None,
+        &hook_cmd,
+        Some(5),
         check_only,
     )
 }
@@ -837,7 +1059,7 @@ fn upsert_nested_hook_entry(
                     entry
                         .get("command")
                         .and_then(Value::as_str)
-                        .is_some_and(|c| c.starts_with("kite ctx hook-rewrite"))
+                        .is_some_and(|c| c.contains("kite ctx hook-rewrite"))
                 })
             })
             .unwrap_or(false)
@@ -873,14 +1095,14 @@ fn install_cursor_hook(hooks_path: &Path, check_only: bool) -> Result<HookInstal
         json!({ "version": 1, "hooks": {} })
     };
 
-    let hook_cmd = "kite ctx hook-rewrite --agent cursor";
+    let hook_cmd = format_fail_open_hook_command("kite ctx hook-rewrite --agent cursor", Some("{}"));
     let already_present = root
         .get("hooks")
         .and_then(|h| h.get("preToolUse"))
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .any(|entry| entry.get("command").and_then(Value::as_str) == Some(hook_cmd))
+                .any(|entry| entry.get("command").and_then(Value::as_str) == Some(hook_cmd.as_str()))
         })
         .unwrap_or(false);
 
@@ -923,7 +1145,7 @@ fn install_cursor_hook(hooks_path: &Path, check_only: bool) -> Result<HookInstal
         !entry
             .get("command")
             .and_then(Value::as_str)
-            .is_some_and(|c| c.starts_with("kite ctx hook-rewrite"))
+            .is_some_and(|c| c.contains("kite ctx hook-rewrite"))
     });
     pre.push(json!({
         "matcher": "Shell",
@@ -948,15 +1170,20 @@ fn install_antigravity_plugin(plugin_dir: &Path, check_only: bool) -> Result<Hoo
         "version": "0.1.0",
         "description": "Kite Context Engine mandatory command optimization hook and rules for Antigravity"
     }))?;
+    let hook_cmd = format_fail_open_hook_command(
+        "kite ctx hook-rewrite --agent antigravity",
+        Some(r#"{"decision":"allow"}"#),
+    );
     let hooks_json = serde_json::to_string_pretty(&json!({
-        "hooks": {
+        "kite-ctx": {
             "PreToolUse": [
                 {
                     "matcher": "run_command",
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "kite ctx hook-rewrite --agent antigravity"
+                            "timeout": 5,
+                            "command": hook_cmd
                         }
                     ]
                 }
@@ -1033,13 +1260,14 @@ fn install_opencode_plugin(plugin_path: &Path, check_only: bool) -> Result<HookI
 }
 
 fn install_copilot_hook(hook_path: &Path, check_only: bool) -> Result<HookInstallAction> {
+    let hook_cmd = format_fail_open_hook_command("kite ctx hook-rewrite --agent copilot", None);
     let body = serde_json::to_string_pretty(&json!({
         "version": 1,
         "hooks": {
             "PreToolUse": [
                 {
                     "type": "command",
-                    "command": "kite ctx hook-rewrite --agent copilot",
+                    "command": hook_cmd,
                     "cwd": ".",
                     "timeout": 5
                 }
@@ -1155,6 +1383,43 @@ mod tests {
             rewrite_hook_command("git -C C:\\repo diff"),
             Some("kite ctx exec -- git -C C:\\repo diff".to_string())
         );
+        assert_eq!(
+            rewrite_hook_command("cargo test -p kite-ctx 2>&1"),
+            Some("kite ctx exec -- cargo test -p kite-ctx".to_string())
+        );
+        assert_eq!(
+            rewrite_hook_command("npm run verify:gate"),
+            Some("kite ctx exec -- npm run verify:gate".to_string())
+        );
+        assert_eq!(
+            rewrite_hook_command("npx playwright test"),
+            Some("kite ctx exec -- npx playwright test".to_string())
+        );
+        assert_eq!(rewrite_hook_command("git rev-parse --short HEAD"), None);
+        assert_eq!(rewrite_hook_command("git branch --show-current"), None);
+        assert_eq!(rewrite_hook_command("git push origin main"), None);
+        assert_eq!(
+            rewrite_hook_command("rg \"foo\\é\" src 2>&1"),
+            Some("kite ctx exec -- rg \"foo\\é\" src".to_string())
+        );
+        assert_eq!(
+            rewrite_hook_command("gh pr list --limit 10"),
+            Some("kite ctx exec -- gh pr list --limit 10".to_string())
+        );
+        assert_eq!(rewrite_hook_command("gh pr create --title test"), None);
+        assert_eq!(rewrite_hook_command("gh run watch 123"), None);
+        assert_eq!(rewrite_hook_command("gh api repos/x/y -X POST"), None);
+        assert_eq!(
+            rewrite_hook_command("docker ps"),
+            Some("kite ctx exec -- docker ps".to_string())
+        );
+        assert_eq!(
+            rewrite_hook_command("docker compose ps"),
+            Some("kite ctx exec -- docker compose ps".to_string())
+        );
+        assert_eq!(rewrite_hook_command("docker logs -f app"), None);
+        assert_eq!(rewrite_hook_command("docker exec -it app sh"), None);
+        assert_eq!(rewrite_hook_command("docker compose up -d"), None);
 
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1293,5 +1558,85 @@ mod tests {
             .join("hooks")
             .join("kite-ctx.json")
             .is_file());
+
+        // Antigravity hooks.json uses named "kite-ctx" hook with timeout and fail-open PATH guard.
+        let agy_hooks_raw = std::fs::read_to_string(
+            home.join(".gemini")
+                .join("config")
+                .join("plugins")
+                .join("kite-ctx")
+                .join("hooks.json"),
+        )
+        .unwrap();
+        let agy_hooks: Value = serde_json::from_str(&agy_hooks_raw).unwrap();
+        let agy_entry = &agy_hooks["kite-ctx"]["PreToolUse"][0]["hooks"][0];
+        assert_eq!(agy_entry["timeout"], 5);
+        let agy_cmd = agy_entry["command"].as_str().unwrap();
+        assert!(agy_cmd.contains("kite ctx hook-rewrite --agent antigravity"));
+        assert!(agy_cmd.contains("{\"decision\":\"allow\"}"));
+
+        // Gemini, Cursor, and Copilot hooks also include fail-open guards and upgrade legacy bare commands cleanly.
+        let gem_val: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".gemini").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        let gem_cmd = gem_val["hooks"]["BeforeTool"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(gem_cmd.contains("kite ctx hook-rewrite --agent gemini"));
+        assert!(gem_cmd.contains("{\"decision\":\"allow\"}"));
+
+        let cur_val: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".cursor").join("hooks.json")).unwrap(),
+        )
+        .unwrap();
+        let cur_cmd = cur_val["hooks"]["preToolUse"][0]["command"].as_str().unwrap();
+        assert!(cur_cmd.contains("kite ctx hook-rewrite --agent cursor"));
+        assert!(cur_cmd.contains("{}"));
+
+        let cop_val: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                home.join(".copilot").join("hooks").join("kite-ctx.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let cop_cmd = cop_val["hooks"]["PreToolUse"][0]["command"].as_str().unwrap();
+        assert!(cop_cmd.contains("kite ctx hook-rewrite --agent copilot"));
+        assert!(cop_cmd.contains("where /q kite") || cop_cmd.contains("command -v kite"));
+    }
+
+    #[test]
+    fn upgrades_legacy_bare_hook_entries_without_duplicating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::write(
+            home.join(".gemini").join("settings.json"),
+            r#"{"hooks":{"BeforeTool":[{"matcher":"run_shell_command","hooks":[{"type":"command","command":"kite ctx hook-rewrite --agent gemini"}]}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".cursor").join("hooks.json"),
+            r#"{"version":1,"hooks":{"preToolUse":[{"matcher":"Shell","command":"kite ctx hook-rewrite --agent cursor"}]}}"#,
+        )
+        .unwrap();
+
+        let actions = apply_agent_setup(AgentTarget::All, &home, &ws, false).unwrap();
+        assert!(actions.iter().any(|a| a.target == "gemini_hook" && a.status == "installed"));
+        assert!(actions.iter().any(|a| a.target == "cursor_hook" && a.status == "installed"));
+
+        let gem: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".gemini").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gem["hooks"]["BeforeTool"].as_array().unwrap().len(), 1);
+        let cur: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".cursor").join("hooks.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cur["hooks"]["preToolUse"].as_array().unwrap().len(), 1);
     }
 }

@@ -53,7 +53,7 @@ pub fn filter_search_with_ccr(
         let ccr_hash = ccr.and_then(|s| s.put(output, &out, "cmd_filter", "search").ok());
         if let Some(hash) = ccr_hash {
             out.push_str(&format!(
-                "\n... (+{omitted} lines omitted — run `kite ctx retrieve {hash}` for full results) <<ccr:{hash}>>"
+                "\n... (+{omitted} lines omitted — run `kite ctx retrieve {hash} --search <term>` or `--lines N-M`) <<ccr:{hash}>>"
             ));
         } else {
             out.push_str(&format!("\n... (+{omitted} lines omitted)"));

@@ -15,6 +15,36 @@ fn ansi_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap())
 }
 
+fn data_uri_base64_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"data:[a-zA-Z0-9.+/-]+;base64,[A-Za-z0-9+/=]{256,}").unwrap())
+}
+
+fn raw_base64_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"[A-Za-z0-9+/]{512,}={0,2}").unwrap())
+}
+
+fn svg_block_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?is)<svg\b[^>]*>.*?</svg>").unwrap())
+}
+
+fn style_block_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?is)<style\b[^>]*>.*?</style>").unwrap())
+}
+
+fn inline_style_attr_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?is)\sstyle\s*=\s*(?:"[^"]{64,}"|'[^']{64,}')"#).unwrap())
+}
+
+fn svg_path_data_attr_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(?is)\sd\s*=\s*(?:"[^"]{64,}"|'[^']{64,}')"#).unwrap())
+}
+
 fn run_marker_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\.\.\. \(repeated (\d+) times\)$").unwrap())
@@ -57,7 +87,12 @@ fn diff_index_re() -> &'static Regex {
 
 fn path_row_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^(?P<dir>(?:\.{0,2}/)?(?:[^/\s:]+/)+)(?P<base>[^/\s:]+)$").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^(?P<dir>(?:[A-Za-z]:/(?:[^/\s:]+/)*|(?:\.{0,2}/)?(?:[^/\s:]+/)+))(?P<base>[^/\s:]+)$",
+        )
+        .unwrap()
+    })
 }
 
 fn split_keep_trailing(text: &str) -> (Vec<&str>, bool) {
@@ -81,9 +116,90 @@ fn join_keep_trailing(lines: &[String], had_trailing: bool) -> String {
     out
 }
 
-/// Remove non-semantic ANSI CSI/SGR escape sequences.
+/// Remove non-semantic ANSI CSI/SGR escape sequences and collapse `\r`-overwritten
+/// terminal progress bars while preserving CRLF line endings cleanly.
 pub fn strip_ansi(text: &str) -> String {
-    ansi_re().replace_all(text, "").into_owned()
+    let no_ansi = ansi_re().replace_all(text, "");
+    strip_carriage_return_progress(&no_ansi)
+}
+
+/// Resolve `\r`-overwritten terminal progress lines (keeping the final frame per line)
+/// while leaving standard `\r\n` newlines untouched.
+pub fn strip_carriage_return_progress(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
+    let (lines, had_trailing) = split_keep_trailing(text);
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let stripped_crlf = line.strip_suffix('\r').unwrap_or(line);
+        if stripped_crlf.contains('\r') {
+            let final_frame = stripped_crlf
+                .rsplit('\r')
+                .find(|seg| !seg.is_empty())
+                .unwrap_or("");
+            out.push(final_frame.to_string());
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    join_keep_trailing(&out, had_trailing)
+}
+
+/// Replace large inline base64 data URIs (`>= 256` chars) and standalone base64 payloads
+/// (`>= 512` chars with mixed alphanumeric characters) with a compact char-count marker.
+pub fn elide_base64_blobs(text: &str) -> String {
+    let step1 = data_uri_base64_re().replace_all(text, |caps: &regex::Captures| {
+        let len = caps[0].len();
+        format!("[data-uri base64 elided: {len} chars]")
+    });
+    if step1.len() < 512 {
+        return step1.into_owned();
+    }
+    raw_base64_re()
+        .replace_all(&step1, |caps: &regex::Captures| {
+            let m = &caps[0];
+            let has_upper = m.bytes().any(|b| b.is_ascii_uppercase());
+            let has_lower = m.bytes().any(|b| b.is_ascii_lowercase());
+            let has_digit = m.bytes().any(|b| b.is_ascii_digit());
+            if has_upper && has_lower && has_digit {
+                format!("[base64 elided: {} chars]", m.len())
+            } else {
+                m.to_string()
+            }
+        })
+        .into_owned()
+}
+
+/// Strip noisy `<svg>...</svg>`, `<style>...</style>`, and verbose inline `style="..."` /
+/// SVG `d="..."` attributes from DOM/browser captures while preserving structure.
+pub fn elide_svg_and_style_noise(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    let step1 = svg_block_re().replace_all(input, |caps: &regex::Captures| {
+        let len = caps[0].len();
+        if len > 48 {
+            format!("<svg [elided: {len} chars]/>")
+        } else {
+            caps[0].to_string()
+        }
+    });
+    let step2 = style_block_re().replace_all(&step1, |caps: &regex::Captures| {
+        let len = caps[0].len();
+        if len > 48 {
+            format!("<style [elided: {len} chars]/>")
+        } else {
+            caps[0].to_string()
+        }
+    });
+    let step3 = inline_style_attr_re().replace_all(&step2, |caps: &regex::Captures| {
+        format!(" style=\"[elided: {} chars]\"", caps[0].len())
+    });
+    let step4 = svg_path_data_attr_re().replace_all(&step3, |caps: &regex::Captures| {
+        format!(" d=\"[elided: {} chars]\"", caps[0].len())
+    });
+    elide_base64_blobs(&step4)
 }
 
 /// Collapse runs of >=2 identical consecutive lines into `<line>\n... (repeated N times)`.
@@ -298,7 +414,7 @@ pub fn search_dir_heading(text: &str) -> String {
 
         if let Some(caps) = matched {
             let path = &caps["path"];
-            if let Some(cut) = path.rfind('/') {
+            if let Some(cut) = path.rfind(['/', '\\']) {
                 let (dir_part, base) = (&path[..cut + 1], &path[cut + 1..]);
                 if current_dir.as_deref() != Some(dir_part) {
                     out.push(dir_part.to_string());
@@ -351,23 +467,32 @@ pub fn search_dir_unheading(text: &str) -> String {
 /// Group file-path listings (`find` / `rg --files`) by repeated directory headers (`dir/`).
 pub fn path_heading(text: &str) -> String {
     let (lines, had_trailing) = split_keep_trailing(text);
-    let path_count = lines.iter().filter(|l| path_row_re().is_match(l)).count();
+    let parsed: Vec<Option<(usize, usize)>> = lines
+        .iter()
+        .map(|line| {
+            let normalized = line.replace('\\', "/");
+            path_row_re()
+                .captures(&normalized)
+                .and_then(|caps| Some((caps.name("dir")?.end(), caps.name("base")?.start())))
+        })
+        .collect();
+    let path_count = parsed.iter().filter(|m| m.is_some()).count();
     if path_count < 2 {
         return text.to_string();
     }
 
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut current: Option<String> = None;
-    for line in lines {
-        if let Some(caps) = path_row_re().captures(line) {
-            let dir = &caps["dir"];
+    for (line, spans) in lines.iter().zip(parsed.into_iter()) {
+        if let Some((dir_end, base_start)) = spans {
+            let dir = &line[..dir_end];
             if current.as_deref() != Some(dir) {
                 out.push(dir.to_string());
                 current = Some(dir.to_string());
             }
-            out.push(caps["base"].to_string());
+            out.push(line[base_start..].to_string());
         } else {
-            out.push(line.to_string());
+            out.push((*line).to_string());
             current = None;
         }
     }
@@ -386,7 +511,7 @@ pub fn path_unheading(text: &str) -> String {
 
     while i < lines.len() {
         let line = lines[i];
-        let is_base = !line.is_empty() && !line.contains('/');
+        let is_base = !line.is_empty() && !line.contains('/') && !line.contains('\\');
         if let Some(dir) = current {
             if is_base {
                 out.push(format!("{dir}{line}"));
@@ -394,10 +519,11 @@ pub fn path_unheading(text: &str) -> String {
                 continue;
             }
         }
-        if line.ends_with('/')
+        if (line.ends_with('/') || line.ends_with('\\'))
             && i + 1 < lines.len()
             && !lines[i + 1].is_empty()
             && !lines[i + 1].contains('/')
+            && !lines[i + 1].contains('\\')
         {
             current = Some(line);
             i += 1;
@@ -466,7 +592,7 @@ pub fn compact_lossless(content: &str, kind: ContentKind) -> String {
 
     match kind {
         ContentKind::Log => {
-            let baseline = strip_ansi(content);
+            let baseline = elide_base64_blobs(&strip_ansi(content));
             let candidate = collapse_runs(&baseline);
             let best = if expand_runs(&candidate) == baseline && candidate.len() < baseline.len() {
                 candidate
@@ -524,8 +650,32 @@ pub fn compact_lossless(content: &str, kind: ContentKind) -> String {
             }
             Err(_) => content.to_string(),
         },
+        ContentKind::Dom => {
+            let cleaned = minify_blank_lines(&elide_svg_and_style_noise(&strip_ansi(content)));
+            if cleaned.len() < content.len() {
+                cleaned
+            } else {
+                content.to_string()
+            }
+        }
+        ContentKind::AxTree | ContentKind::NetworkWaterfall => {
+            let baseline = elide_base64_blobs(&strip_ansi(content));
+            let runs_folded = collapse_runs(&baseline);
+            let best = if expand_runs(&runs_folded) == baseline && runs_folded.len() < baseline.len()
+            {
+                runs_folded
+            } else {
+                baseline
+            };
+            let minified = minify_blank_lines(&best);
+            if minified.len() < content.len() {
+                minified
+            } else {
+                content.to_string()
+            }
+        }
         ContentKind::Text | ContentKind::Auto => {
-            let baseline = strip_ansi(content);
+            let baseline = elide_base64_blobs(&strip_ansi(content));
             let runs_folded = collapse_runs(&baseline);
             let candidate = if expand_runs(&runs_folded) == baseline {
                 let blocks_folded = fold_repeated_blocks(&runs_folded);
@@ -647,8 +797,53 @@ src/components/telemetry/C.tsx:9:export const C = 3;
     }
 
     #[test]
+    fn folds_windows_backslash_and_drive_paths_reversibly() {
+        let drive_paths = "C:\\repo\\src\\main.rs\nC:\\repo\\src\\lib.rs\nC:\\repo\\src\\ctx_bridge.rs\n";
+        let folded_drive = path_heading(drive_paths);
+        assert!(folded_drive.starts_with("C:\\repo\\src\\\nmain.rs\nlib.rs\nctx_bridge.rs"));
+        assert_eq!(path_unheading(&folded_drive), drive_paths);
+        assert_eq!(compact_lossless(drive_paths, ContentKind::Paths), folded_drive);
+
+        let rel_win_paths = "src\\lib\\operator\\index.ts\nsrc\\lib\\operator\\prompt.ts\nsrc\\lib\\operator\\contract.ts\n";
+        let folded_rel = compact_lossless(rel_win_paths, ContentKind::Paths);
+        assert!(folded_rel.starts_with("src\\lib\\operator\\\nindex.ts\n"));
+        assert_eq!(path_unheading(&folded_rel), rel_win_paths);
+    }
+
+    #[test]
     fn returns_unchanged_when_transform_would_not_shrink() {
         let tiny = "short\n";
         assert_eq!(compact_lossless(tiny, ContentKind::Text), tiny);
+    }
+
+    #[test]
+    fn collapses_carriage_return_progress_and_elides_base64_blobs() {
+        let progress = "Downloading 10%\rDownloading 55%\rDownloading 100% done\n";
+        assert_eq!(strip_ansi(progress), "Downloading 100% done\n");
+
+        let b64 = "AbCdEf0123456789+/".repeat(40);
+        let payload = format!("header\ndata:image/png;base64,{b64}\nfooter\n");
+        let compacted = compact_lossless(&payload, ContentKind::Log);
+        assert!(compacted.contains("base64 elided:"));
+        assert!(compacted.contains("header"));
+        assert!(compacted.contains("footer"));
+        assert!(compacted.len() < 120);
+    }
+
+    #[test]
+    fn elides_svg_and_style_noise_in_dom_captures() {
+        let noisy_svg = format!("<svg viewBox=\"0 0 24 24\"><path d=\"{}\"/></svg>", "M10 10 L20 20 ".repeat(20));
+        let noisy_style = format!("<style>{}</style>", ".cls { color: red; padding: 8px; }\n".repeat(12));
+        let html = format!(
+            "<html>\n<head>{noisy_style}</head>\n<body>\n<button style=\"{}\">Save</button>\n{noisy_svg}\n</body>\n</html>",
+            "background: linear-gradient(90deg, red, blue); border-radius: 8px; padding: 12px; margin: 4px;".repeat(2)
+        );
+        let stripped = elide_svg_and_style_noise(&html);
+        assert!(stripped.contains("<svg [elided:"));
+        assert!(stripped.contains("<style [elided:"));
+        assert!(stripped.contains("style=\"[elided:"));
+        assert!(stripped.contains(">Save</button>"));
+        assert!(stripped.len() < html.len() / 2);
+        assert_eq!(compact_lossless(&html, ContentKind::Dom), minify_blank_lines(&stripped));
     }
 }

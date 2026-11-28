@@ -26,6 +26,9 @@ pub struct CrusherConfig {
     pub core_field_fraction: f64,
     pub lossless_min_savings_ratio: f64,
     pub max_flatten_inner_keys: usize,
+    pub max_tokens: usize,
+    pub head_ratio: f64,
+    pub tail_ratio: f64,
 }
 
 impl Default for CrusherConfig {
@@ -37,6 +40,26 @@ impl Default for CrusherConfig {
             core_field_fraction: 0.80,
             lossless_min_savings_ratio: 0.15,
             max_flatten_inner_keys: 6,
+            max_tokens: 4000,
+            head_ratio: 0.65,
+            tail_ratio: 0.25,
+        }
+    }
+}
+
+impl CrusherConfig {
+    /// Tight voice-assistant configuration keeping dynamic context under ~220 tokens.
+    pub fn voice() -> Self {
+        Self {
+            min_items_to_crush: 3,
+            max_items_after_crush: 6,
+            min_tokens_to_crush: 120,
+            core_field_fraction: 0.80,
+            lossless_min_savings_ratio: 0.15,
+            max_flatten_inner_keys: 6,
+            max_tokens: 220,
+            head_ratio: 0.70,
+            tail_ratio: 0.25,
         }
     }
 }
@@ -68,6 +91,71 @@ impl Default for SmartCrusher {
 impl SmartCrusher {
     pub fn new(config: CrusherConfig) -> Self {
         Self { config }
+    }
+
+    pub fn config(&self) -> &CrusherConfig {
+        &self.config
+    }
+
+    /// Fit an already stage-compacted string within `max_tokens` using `head_ratio` and `tail_ratio`,
+    /// spilling the full `original_for_ccr` into [`CcrStore`] when truncated.
+    pub fn fit_budget(
+        &self,
+        compacted: &str,
+        max_tokens_override: Option<usize>,
+        ccr: Option<&CcrStore>,
+        original_for_ccr: &str,
+    ) -> (String, Option<String>) {
+        let trimmed = compacted.trim();
+        let budget = max_tokens_override.unwrap_or(self.config.max_tokens).max(1);
+        if trimmed.is_empty() || estimate_tokens(trimmed) <= budget {
+            return (trimmed.to_string(), None);
+        }
+
+        let max_chars = budget.saturating_mul(4).max(4);
+        let ccr_hash = if max_chars >= 100 && !CcrStore::is_bare_marker(original_for_ccr) {
+            ccr.and_then(|store| {
+                let preview: String = trimmed.chars().take(240).collect();
+                store
+                    .put(original_for_ccr, &preview, "voice_pack", "voice_context")
+                    .ok()
+            })
+        } else {
+            None
+        };
+
+        let sentinel = match &ccr_hash {
+            Some(hash) => format!("\n... <<ccr:{hash}>> ...\n"),
+            None => "\n...\n".to_string(),
+        };
+        let sentinel_chars = sentinel.chars().count();
+        if max_chars <= sentinel_chars + 8 {
+            let clipped: String = trimmed.chars().take(max_chars).collect();
+            return (clipped, ccr_hash);
+        }
+
+        let usable_chars = max_chars.saturating_sub(sentinel_chars);
+        let ratio_sum = (self.config.head_ratio + self.config.tail_ratio).max(0.01);
+        let head_budget = ((usable_chars as f64) * (self.config.head_ratio / ratio_sum)).floor() as usize;
+        let tail_budget = usable_chars.saturating_sub(head_budget);
+
+        let head: String = trimmed.chars().take(head_budget).collect();
+        let tail: String = trimmed
+            .chars()
+            .rev()
+            .take(tail_budget)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        let packed = format!("{}{}{}", head.trim_end(), sentinel, tail.trim_start());
+        if estimate_tokens(&packed) <= budget {
+            (packed, ccr_hash)
+        } else {
+            let clipped: String = packed.chars().take(max_chars).collect();
+            (clipped, ccr_hash)
+        }
     }
 
     pub fn crush(&self, raw_json: &str, ccr: Option<&CcrStore>) -> Result<CrushResult> {
@@ -669,5 +757,26 @@ mod tests {
         let hash = res.ccr_hash.expect("ccr hash present");
         let recovered = ccr.retrieve(&hash).unwrap();
         assert_eq!(recovered.original_text, raw);
+    }
+
+    #[test]
+    fn voice_config_uses_tight_ratios_and_caps_budget() {
+        let cfg = CrusherConfig::voice();
+        assert_eq!(cfg.max_tokens, 220);
+        assert!((cfg.head_ratio - 0.70).abs() < f64::EPSILON);
+        assert!((cfg.tail_ratio - 0.25).abs() < f64::EPSILON);
+
+        let crusher = SmartCrusher::new(cfg);
+        let long_text = format!(
+            "HEAD_STATUS: 3 files modified\n{}\nTAIL_RESULT: build green",
+            "detail: intermediate status line\n".repeat(120)
+        );
+        let store = ContextStore::open_in_memory().unwrap();
+        let ccr = CcrStore::new(store);
+        let (packed, hash) = crusher.fit_budget(&long_text, None, Some(&ccr), &long_text);
+        assert!(estimate_tokens(&packed) <= 220);
+        assert!(packed.contains("HEAD_STATUS: 3 files modified"));
+        assert!(packed.contains("TAIL_RESULT: build green"));
+        assert!(hash.is_some());
     }
 }

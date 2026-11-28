@@ -175,7 +175,7 @@ fn compact_git_status(output: &str, ccr: Option<&CcrStore>) -> String {
     if total_entries > 80 {
         if let Some(hash) = ccr.and_then(|s| s.put(output, &rendered, "cmd_filter", "git status").ok()) {
             rendered.push_str(&format!(
-                "\n... [full status ({total_entries} files) in CCR — run `kite ctx retrieve {hash}`] <<ccr:{hash}>>"
+                "\n... [full status ({total_entries} files) in CCR — run `kite ctx retrieve {hash} --search <dir>`] <<ccr:{hash}>>"
             ));
         }
     }
@@ -451,7 +451,7 @@ fn compact_git_log(output: &str) -> String {
                  author: &mut String,
                  subject: &mut String| {
         if !sha.is_empty() {
-            let short = if sha.len() > 7 { &sha[..7] } else { sha.as_str() };
+            let short: String = sha.chars().take(7).collect();
             if author.is_empty() {
                 entries.push(format!("{short} {}", subject.trim()));
             } else {

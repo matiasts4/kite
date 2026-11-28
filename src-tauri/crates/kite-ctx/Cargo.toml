@@ -1,6 +1,6 @@
 [package]
 name = "kite-ctx"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Zero-ML modular context optimization and token-reuse engine for Kite Code"
 

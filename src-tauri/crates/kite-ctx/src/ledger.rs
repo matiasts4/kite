@@ -29,6 +29,12 @@ pub struct TotalsSummary {
     pub cache_hits: usize,
     pub cache_hit_rate: f64,
     pub estimated_usd_saved: f64,
+    #[serde(default)]
+    pub gross_tokens_saved: usize,
+    #[serde(default)]
+    pub ccr_retrieved_tokens: usize,
+    #[serde(default)]
+    pub ccr_retrieve_calls: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -99,6 +105,18 @@ pub struct MonitorSnapshot {
     pub ccr_entries: usize,
     pub shared_entries: usize,
     pub read_records: usize,
+    #[serde(default)]
+    pub ccr_retrieve_calls: usize,
+    #[serde(default)]
+    pub ccr_retrieve_tokens: usize,
+    #[serde(default)]
+    pub kv_sessions: usize,
+    #[serde(default)]
+    pub kv_prefix_hits: usize,
+    #[serde(default)]
+    pub tool_cache_entries: usize,
+    #[serde(default)]
+    pub audit: crate::audit::PromptAuditSummary,
     pub quota_preservation: QuotaPreservation,
 }
 
@@ -176,7 +194,8 @@ impl SavingsLedger {
             let features = query_features(conn)?;
 
             let mut spark_stmt = conn.prepare(
-                "SELECT tokens_saved FROM ledger_events ORDER BY id DESC LIMIT 24",
+                "SELECT CASE WHEN category = 'ccr' THEN 0 ELSE tokens_saved END
+                 FROM ledger_events ORDER BY id DESC LIMIT 24",
             )?;
             let mut spark_rows = spark_stmt.query([])?;
             let mut recent_sparkline = Vec::new();
@@ -210,16 +229,47 @@ impl SavingsLedger {
                     r.get::<_, i64>(0)
                 })
                 .unwrap_or(0) as usize;
+            let kv_sessions: usize = conn
+                .query_row("SELECT COUNT(*) FROM kv_sessions", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap_or(0) as usize;
+            let kv_prefix_hits: usize = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(prefix_hits), 0) FROM kv_sessions",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                .max(0) as usize;
+            let tool_cache_entries: usize = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tool_cache WHERE expires_at > ?1",
+                    params![now],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0) as usize;
 
             let window_start = now - (30 * 86_400);
-            let saved_tokens_30d: usize = conn
+            let gross_30d: usize = conn
                 .query_row(
-                    "SELECT COALESCE(SUM(tokens_saved), 0) FROM ledger_events WHERE created_at >= ?1",
+                    "SELECT COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0)
+                     FROM ledger_events WHERE created_at >= ?1",
                     params![window_start],
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0)
                 .max(0) as usize;
+            let ccr_cost_30d: usize = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)
+                     FROM ledger_events WHERE created_at >= ?1",
+                    params![window_start],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                .max(0) as usize;
+            let saved_tokens_30d = gross_30d.saturating_sub(ccr_cost_30d);
 
             // Approximate monthly token quota capacity benchmarks per tier (in tokens).
             let quota_preservation = QuotaPreservation {
@@ -237,6 +287,8 @@ impl SavingsLedger {
                     .db_path()
                     .map(|p| p.to_string_lossy().into_owned()),
                 active_session_id: resolved_session,
+                ccr_retrieve_calls: lifetime.ccr_retrieve_calls,
+                ccr_retrieve_tokens: lifetime.ccr_retrieved_tokens,
                 lifetime,
                 session,
                 agents,
@@ -249,6 +301,10 @@ impl SavingsLedger {
                 ccr_entries,
                 shared_entries,
                 read_records,
+                kv_sessions,
+                kv_prefix_hits,
+                tool_cache_entries,
+                audit: crate::audit::PromptAuditSummary::default(),
                 quota_preservation,
             })
         })
@@ -265,6 +321,9 @@ fn empty_totals() -> TotalsSummary {
         cache_hits: 0,
         cache_hit_rate: 0.0,
         estimated_usd_saved: 0.0,
+        gross_tokens_saved: 0,
+        ccr_retrieved_tokens: 0,
+        ccr_retrieve_calls: 0,
     }
 }
 
@@ -284,45 +343,73 @@ fn estimate_usd_per_token(model: &str) -> f64 {
 fn query_totals(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result<TotalsSummary> {
     let (sql, param_val): (&str, Option<&str>) = match session_id {
         Some(sid) => (
-            "SELECT COUNT(*), COALESCE(SUM(raw_tokens), 0), COALESCE(SUM(compressed_tokens), 0),
-                    COALESCE(SUM(tokens_saved), 0), COALESCE(SUM(cache_hit), 0)
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN raw_tokens ELSE 0 END), 0),
+                COALESCE(SUM(compressed_tokens), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' AND cache_hit != 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)
              FROM ledger_events WHERE session_id = ?1",
             Some(sid),
         ),
         None => (
-            "SELECT COUNT(*), COALESCE(SUM(raw_tokens), 0), COALESCE(SUM(compressed_tokens), 0),
-                    COALESCE(SUM(tokens_saved), 0), COALESCE(SUM(cache_hit), 0)
+            "SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN raw_tokens ELSE 0 END), 0),
+                COALESCE(SUM(compressed_tokens), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' AND cache_hit != 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)
              FROM ledger_events",
             None,
         ),
     };
 
-    let (requests, raw_tokens, compressed_tokens, tokens_saved, cache_hits) = match param_val {
-        Some(sid) => conn.query_row(sql, params![sid], |r| {
-            Ok((
-                r.get::<_, i64>(0)? as usize,
-                r.get::<_, i64>(1)? as usize,
-                r.get::<_, i64>(2)? as usize,
-                r.get::<_, i64>(3)? as usize,
-                r.get::<_, i64>(4)? as usize,
-            ))
-        })?,
-        None => conn.query_row(sql, [], |r| {
-            Ok((
-                r.get::<_, i64>(0)? as usize,
-                r.get::<_, i64>(1)? as usize,
-                r.get::<_, i64>(2)? as usize,
-                r.get::<_, i64>(3)? as usize,
-                r.get::<_, i64>(4)? as usize,
-            ))
-        })?,
+    let row_mapper = |r: &rusqlite::Row| {
+        Ok((
+            r.get::<_, i64>(0)?.max(0) as usize,
+            r.get::<_, i64>(1)?.max(0) as usize,
+            r.get::<_, i64>(2)?.max(0) as usize,
+            r.get::<_, i64>(3)?.max(0) as usize,
+            r.get::<_, i64>(4)?.max(0) as usize,
+            r.get::<_, i64>(5)?.max(0) as usize,
+            r.get::<_, i64>(6)?.max(0) as usize,
+            r.get::<_, i64>(7)?.max(0) as usize,
+        ))
     };
 
-    // Estimate USD per model row accurately.
+    let (
+        requests,
+        requests_non_ccr,
+        raw_tokens,
+        compressed_tokens,
+        gross_tokens_saved,
+        cache_hits,
+        ccr_retrieve_calls,
+        ccr_retrieved_tokens,
+    ) = match param_val {
+        Some(sid) => conn.query_row(sql, params![sid], row_mapper)?,
+        None => conn.query_row(sql, [], row_mapper)?,
+    };
+
+    let tokens_saved = gross_tokens_saved.saturating_sub(ccr_retrieved_tokens);
+
+    // Estimate net USD per model cleanly (gross savings minus CCR retrieval cost).
     let model_sql = if session_id.is_some() {
-        "SELECT model, COALESCE(SUM(tokens_saved), 0) FROM ledger_events WHERE session_id = ?1 GROUP BY model"
+        "SELECT model,
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)
+         FROM ledger_events WHERE session_id = ?1 GROUP BY model"
     } else {
-        "SELECT model, COALESCE(SUM(tokens_saved), 0) FROM ledger_events GROUP BY model"
+        "SELECT model,
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)
+         FROM ledger_events GROUP BY model"
     };
     let mut stmt = conn.prepare(model_sql)?;
     let mut usd = 0.0;
@@ -332,8 +419,10 @@ fn query_totals(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result
     };
     while let Some(r) = rows.next()? {
         let model: String = r.get(0)?;
-        let saved: i64 = r.get(1)?;
-        usd += (saved.max(0) as f64) * estimate_usd_per_token(&model);
+        let gross: i64 = r.get(1)?;
+        let ccr_cost: i64 = r.get(2)?;
+        let net = (gross - ccr_cost).max(0) as f64;
+        usd += net * estimate_usd_per_token(&model);
     }
 
     let savings_percent = if raw_tokens > 0 {
@@ -341,8 +430,8 @@ fn query_totals(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result
     } else {
         0.0
     };
-    let cache_hit_rate = if requests > 0 {
-        (cache_hits as f64 / requests as f64) * 100.0
+    let cache_hit_rate = if requests_non_ccr > 0 {
+        (cache_hits as f64 / requests_non_ccr as f64) * 100.0
     } else {
         0.0
     };
@@ -356,6 +445,9 @@ fn query_totals(conn: &rusqlite::Connection, session_id: Option<&str>) -> Result
         cache_hits,
         cache_hit_rate,
         estimated_usd_saved: usd,
+        gross_tokens_saved,
+        ccr_retrieved_tokens,
+        ccr_retrieve_calls,
     })
 }
 
@@ -364,11 +456,21 @@ fn query_agents(
     session_id: Option<&str>,
 ) -> Result<Vec<AgentBreakdown>> {
     let sql = if session_id.is_some() {
-        "SELECT agent, COUNT(*), COALESCE(SUM(raw_tokens), 0), COALESCE(SUM(tokens_saved), 0), COALESCE(SUM(cache_hit), 0)
-         FROM ledger_events WHERE session_id = ?1 GROUP BY agent ORDER BY SUM(tokens_saved) DESC"
+        "SELECT agent, COUNT(*),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN raw_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' AND cache_hit != 0 THEN 1 ELSE 0 END), 0)
+         FROM ledger_events WHERE session_id = ?1 GROUP BY agent
+         ORDER BY (COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0) - COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)) DESC"
     } else {
-        "SELECT agent, COUNT(*), COALESCE(SUM(raw_tokens), 0), COALESCE(SUM(tokens_saved), 0), COALESCE(SUM(cache_hit), 0)
-         FROM ledger_events GROUP BY agent ORDER BY SUM(tokens_saved) DESC"
+        "SELECT agent, COUNT(*),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN raw_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' AND cache_hit != 0 THEN 1 ELSE 0 END), 0)
+         FROM ledger_events GROUP BY agent
+         ORDER BY (COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0) - COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)) DESC"
     };
     let mut stmt = conn.prepare(sql)?;
     let mut rows = match session_id {
@@ -378,10 +480,12 @@ fn query_agents(
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         let agent: String = r.get(0)?;
-        let requests = r.get::<_, i64>(1)? as usize;
-        let raw = r.get::<_, i64>(2)? as usize;
-        let saved = r.get::<_, i64>(3)? as usize;
-        let cache_hits = r.get::<_, i64>(4)? as usize;
+        let requests = r.get::<_, i64>(1)?.max(0) as usize;
+        let raw = r.get::<_, i64>(2)?.max(0) as usize;
+        let gross = r.get::<_, i64>(3)?.max(0) as usize;
+        let ccr_cost = r.get::<_, i64>(4)?.max(0) as usize;
+        let saved = gross.saturating_sub(ccr_cost);
+        let cache_hits = r.get::<_, i64>(5)?.max(0) as usize;
         let savings_percent = if raw > 0 {
             (saved as f64 / raw as f64) * 100.0
         } else {
@@ -400,16 +504,22 @@ fn query_agents(
 
 fn query_models(conn: &rusqlite::Connection) -> Result<Vec<ModelBreakdown>> {
     let mut stmt = conn.prepare(
-        "SELECT model, COUNT(*), COALESCE(SUM(raw_tokens), 0), COALESCE(SUM(tokens_saved), 0)
-         FROM ledger_events GROUP BY model ORDER BY SUM(tokens_saved) DESC",
+        "SELECT model, COUNT(*),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN raw_tokens ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)
+         FROM ledger_events GROUP BY model
+         ORDER BY (COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0) - COALESCE(SUM(CASE WHEN category = 'ccr' THEN compressed_tokens ELSE 0 END), 0)) DESC",
     )?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         let model: String = r.get(0)?;
-        let requests = r.get::<_, i64>(1)? as usize;
-        let raw = r.get::<_, i64>(2)? as usize;
-        let saved = r.get::<_, i64>(3)? as usize;
+        let requests = r.get::<_, i64>(1)?.max(0) as usize;
+        let raw = r.get::<_, i64>(2)?.max(0) as usize;
+        let gross = r.get::<_, i64>(3)?.max(0) as usize;
+        let ccr_cost = r.get::<_, i64>(4)?.max(0) as usize;
+        let saved = gross.saturating_sub(ccr_cost);
         let savings_usd = (saved as f64) * estimate_usd_per_token(&model);
         let savings_percent = if raw > 0 {
             (saved as f64 / raw as f64) * 100.0
@@ -429,16 +539,19 @@ fn query_models(conn: &rusqlite::Connection) -> Result<Vec<ModelBreakdown>> {
 
 fn query_categories(conn: &rusqlite::Connection) -> Result<Vec<CategoryBreakdown>> {
     let mut stmt = conn.prepare(
-        "SELECT category, COUNT(*), COALESCE(SUM(raw_tokens), 0), COALESCE(SUM(tokens_saved), 0)
-         FROM ledger_events GROUP BY category ORDER BY SUM(tokens_saved) DESC",
+        "SELECT category, COUNT(*),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN raw_tokens ELSE compressed_tokens END), 0),
+                COALESCE(SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END), 0)
+         FROM ledger_events GROUP BY category
+         ORDER BY SUM(CASE WHEN category != 'ccr' THEN tokens_saved ELSE 0 END) DESC",
     )?;
     let mut rows = stmt.query([])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         let category: String = r.get(0)?;
-        let requests = r.get::<_, i64>(1)? as usize;
-        let raw = r.get::<_, i64>(2)? as usize;
-        let saved = r.get::<_, i64>(3)? as usize;
+        let requests = r.get::<_, i64>(1)?.max(0) as usize;
+        let raw = r.get::<_, i64>(2)?.max(0) as usize;
+        let saved = r.get::<_, i64>(3)?.max(0) as usize;
         let savings_percent = if raw > 0 {
             (saved as f64 / raw as f64) * 100.0
         } else {
@@ -517,8 +630,19 @@ pub fn normalize_feature_name(category: &str, command_or_tool: &str) -> String {
                 format!("runtime:{tool}")
             }
         }
-        other => {
+        "browser" => {
             if tool.is_empty() {
+                "browser:snapshot".to_string()
+            } else if tool.starts_with("browser:") {
+                tool.to_string()
+            } else {
+                format!("browser:{tool}")
+            }
+        }
+        other => {
+            if tool.starts_with("browser:") {
+                tool.to_string()
+            } else if tool.is_empty() {
                 other.to_string()
             } else {
                 format!("{other}:{tool}")
@@ -555,16 +679,21 @@ fn query_features(conn: &rusqlite::Connection) -> Result<Vec<FeatureBreakdown>> 
         let cache_hit = r.get::<_, i64>(5)? > 0;
         let overhead_ms = r.get::<_, i64>(6)?.max(0) as u64;
 
+        let is_ccr = category == "ccr";
+        let effective_raw = if is_ccr { compressed } else { raw };
+        let effective_saved = if is_ccr { 0 } else { saved };
+        let effective_hit = !is_ccr && cache_hit;
+
         let feature = normalize_feature_name(&category, &command_or_tool);
         let entry = grouped.entry(feature).or_default();
         if entry.category.is_empty() {
             entry.category = category;
         }
         entry.requests += 1;
-        entry.raw_tokens += raw;
+        entry.raw_tokens += effective_raw;
         entry.compressed_tokens += compressed;
-        entry.tokens_saved += saved;
-        if cache_hit {
+        entry.tokens_saved += effective_saved;
+        if effective_hit {
             entry.cache_hits += 1;
         }
         entry.overhead_sum_ms += overhead_ms;
@@ -661,5 +790,117 @@ mod tests {
             "expected feature breakdown for cargo test: {:?}",
             snap.features
         );
+    }
+
+    #[test]
+    fn computes_honest_net_savings_and_excludes_ccr_from_cache_hits() {
+        let store = ContextStore::open_in_memory().unwrap();
+        let ledger = SavingsLedger::new(store);
+
+        // Exec saves 9,000 tokens (10,000 -> 1,000)
+        ledger
+            .record(&LedgerEventInput {
+                session_id: "s-net".to_string(),
+                agent: "Orion".to_string(),
+                provider: "google".to_string(),
+                model: "gemini-4".to_string(),
+                category: "exec".to_string(),
+                command_or_tool: "git grep".to_string(),
+                raw_tokens: 10_000,
+                compressed_tokens: 1_000,
+                cache_hit: false,
+                overhead_ms: 2,
+            })
+            .unwrap();
+
+        // Subsequent CCR retrieval spends 500 tokens (even with legacy cache_hit=true)
+        ledger
+            .record(&LedgerEventInput {
+                session_id: "s-net".to_string(),
+                agent: "Orion".to_string(),
+                provider: "google".to_string(),
+                model: "gemini-4".to_string(),
+                category: "ccr".to_string(),
+                command_or_tool: "ccr:retrieve".to_string(),
+                raw_tokens: 10_000,
+                compressed_tokens: 500,
+                cache_hit: true,
+                overhead_ms: 1,
+            })
+            .unwrap();
+
+        // Genuine read cache hit saves 2,000 -> 20 = 1,980 tokens
+        ledger
+            .record(&LedgerEventInput {
+                session_id: "s-net".to_string(),
+                agent: "Orion".to_string(),
+                provider: "google".to_string(),
+                model: "gemini-4".to_string(),
+                category: "read".to_string(),
+                command_or_tool: "read:stub".to_string(),
+                raw_tokens: 2_000,
+                compressed_tokens: 20,
+                cache_hit: true,
+                overhead_ms: 1,
+            })
+            .unwrap();
+
+        let snap = ledger.snapshot(Some("s-net")).unwrap();
+        assert_eq!(snap.lifetime.gross_tokens_saved, 10_980);
+        assert_eq!(snap.lifetime.ccr_retrieve_calls, 1);
+        assert_eq!(snap.lifetime.ccr_retrieved_tokens, 500);
+        assert_eq!(snap.lifetime.tokens_saved, 10_480);
+        // Only the read:stub counts as a true cache hit (1 out of 2 non-ccr ops = 50%).
+        assert_eq!(snap.lifetime.cache_hits, 1);
+        assert!((snap.lifetime.cache_hit_rate - 50.0).abs() < 0.01);
+        assert_eq!(snap.recent_sparkline, vec![9_000, 0, 1_980]);
+        let ccr_feat = snap.features.iter().find(|f| f.feature == "ccr:retrieve").unwrap();
+        assert_eq!(ccr_feat.tokens_saved, 0);
+        assert_eq!(ccr_feat.cache_hits, 0);
+    }
+
+    #[test]
+    fn normalizes_browser_features_without_collapsing_to_ccr() {
+        let browser_features = [
+            "browser:snapshot_stub",
+            "browser:ax_diff",
+            "browser:chrome_strip",
+            "browser:network_crush",
+            "browser:screenshot_dedup",
+            "browser:recipe_replay",
+        ];
+        for feat in browser_features {
+            assert_eq!(normalize_feature_name("browser", feat), feat);
+            let bare = feat.strip_prefix("browser:").unwrap();
+            assert_eq!(normalize_feature_name("browser", bare), feat);
+        }
+
+        let store = ContextStore::open_in_memory().unwrap();
+        let ledger = SavingsLedger::new(store);
+        for (idx, feat) in browser_features.iter().enumerate() {
+            ledger
+                .record(&LedgerEventInput {
+                    session_id: "s-browser".to_string(),
+                    agent: "Browser".to_string(),
+                    provider: "google".to_string(),
+                    model: "gemini-4".to_string(),
+                    category: "browser".to_string(),
+                    command_or_tool: (*feat).to_string(),
+                    raw_tokens: 1_000,
+                    compressed_tokens: 100 + idx * 10,
+                    cache_hit: *feat == "browser:snapshot_stub" || *feat == "browser:screenshot_dedup",
+                    overhead_ms: 2,
+                })
+                .unwrap();
+        }
+        let snap = ledger.snapshot(Some("s-browser")).unwrap();
+        for feat in browser_features {
+            assert!(
+                snap.features.iter().any(|f| f.feature == feat && f.category == "browser"),
+                "missing normalized browser feature {feat} in {:?}",
+                snap.features
+            );
+        }
+        assert_eq!(snap.lifetime.ccr_retrieve_calls, 0);
     }
 }

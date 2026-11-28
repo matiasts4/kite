@@ -12,6 +12,9 @@ pub enum ContentKind {
     Grep,
     Paths,
     Log,
+    AxTree,
+    Dom,
+    NetworkWaterfall,
     Text,
 }
 
@@ -47,6 +50,9 @@ pub fn detect_content_kind(text: &str) -> ContentKind {
     let mut diff_markers = 0usize;
     let mut grep_lines = 0usize;
     let mut path_lines = 0usize;
+    let mut ax_lines = 0usize;
+    let mut dom_signals = 0usize;
+    let mut net_lines = 0usize;
     let mut non_empty = 0usize;
 
     for line in trimmed.lines().take(60) {
@@ -68,10 +74,32 @@ pub fn detect_content_kind(text: &str) -> ContentKind {
         } else if is_path_like_line(l) {
             path_lines += 1;
         }
+        if is_ax_tree_line(l) {
+            ax_lines += 1;
+        }
+        if is_dom_line(l) {
+            dom_signals += 1;
+        }
+        if is_network_waterfall_line(l) {
+            net_lines += 1;
+        }
     }
 
     if diff_markers >= 2 {
         return ContentKind::Diff;
+    }
+    if non_empty >= 2 && net_lines * 10 >= non_empty * 6 {
+        return ContentKind::NetworkWaterfall;
+    }
+    if non_empty >= 2 && ax_lines * 10 >= non_empty * 5 {
+        return ContentKind::AxTree;
+    }
+    if dom_signals >= 2
+        || trimmed.starts_with("<!DOCTYPE html")
+        || trimmed.starts_with("<html")
+        || trimmed.starts_with("<svg")
+    {
+        return ContentKind::Dom;
     }
     if non_empty >= 3 && grep_lines * 10 >= non_empty * 6 {
         return ContentKind::Grep;
@@ -83,6 +111,67 @@ pub fn detect_content_kind(text: &str) -> ContentKind {
         return ContentKind::Log;
     }
     ContentKind::Text
+}
+
+fn is_ax_tree_line(line: &str) -> bool {
+    let t = line.trim_start().trim_start_matches("- ").trim_start();
+    if t.is_empty() {
+        return false;
+    }
+    if t.contains("[@e") || t.contains("[ref=e") || t.starts_with("@e") {
+        return true;
+    }
+    let role = t.split([' ', '"', '[']).next().unwrap_or("");
+    matches!(
+        role,
+        "RootWebArea"
+            | "WebArea"
+            | "banner"
+            | "navigation"
+            | "main"
+            | "contentinfo"
+            | "complementary"
+            | "button"
+            | "link"
+            | "textbox"
+            | "searchbox"
+            | "heading"
+            | "checkbox"
+            | "radio"
+            | "combobox"
+            | "menuitem"
+            | "tab"
+            | "switch"
+    ) && (t.contains('"') || t.contains('[') || t == role)
+}
+
+fn is_dom_line(line: &str) -> bool {
+    let t = line.trim();
+    (t.starts_with('<') && t.contains('>'))
+        && (t.contains("</")
+            || t.starts_with("<div")
+            || t.starts_with("<span")
+            || t.starts_with("<svg")
+            || t.starts_with("<style")
+            || t.starts_with("<html")
+            || t.starts_with("<body")
+            || t.starts_with("<button")
+            || t.starts_with("<input")
+            || t.starts_with("<path"))
+}
+
+fn is_network_waterfall_line(line: &str) -> bool {
+    let t = line.trim();
+    let has_method = [
+        "GET ", "POST ", "PUT ", "PATCH ", "DELETE ", "HEAD ", "OPTIONS ",
+    ]
+    .iter()
+    .any(|m| t.contains(m));
+    let has_url_or_path = t.contains("http://") || t.contains("https://") || t.contains(" /");
+    let has_status = t
+        .split_whitespace()
+        .any(|tok| tok.len() == 3 && tok.bytes().all(|b| b.is_ascii_digit()));
+    has_method && (has_url_or_path || has_status)
 }
 
 fn is_grep_line(line: &str) -> bool {

@@ -394,6 +394,65 @@ impl SharedContextStore {
             Ok(row)
         })
     }
+
+    /// Persist a pre-filtered command output in `tool_cache` with exact raw vs compressed token counts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_tool_cache_prebuilt(
+        &self,
+        workspace_root: &str,
+        tree_hash: &str,
+        tool_name: &str,
+        canonical_args: &str,
+        compressed_output: &str,
+        raw_tokens: usize,
+    ) -> Result<ToolCacheEntry> {
+        let args_hash = sha256_hex(canonical_args);
+        let cache_key = sha256_hex(&format!(
+            "{workspace_root}|{tree_hash}|{tool_name}|{args_hash}"
+        ));
+        let compressed_tokens = estimate_tokens(compressed_output);
+        let now = now_unix_secs();
+        let expires_at = now + self.ttl_secs;
+
+        self.store.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO tool_cache (
+                    cache_key, workspace_root, tree_hash, tool_name, args_hash,
+                    compressed_output, ccr_hash, raw_tokens, compressed_tokens, created_at, expires_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    compressed_output = excluded.compressed_output,
+                    raw_tokens = excluded.raw_tokens,
+                    compressed_tokens = excluded.compressed_tokens,
+                    created_at = excluded.created_at,
+                    expires_at = excluded.expires_at",
+                params![
+                    cache_key,
+                    workspace_root,
+                    tree_hash,
+                    tool_name,
+                    args_hash,
+                    compressed_output,
+                    raw_tokens as i64,
+                    compressed_tokens as i64,
+                    now,
+                    expires_at
+                ],
+            )?;
+            Ok(())
+        })?;
+
+        Ok(ToolCacheEntry {
+            cache_key,
+            workspace_root: workspace_root.to_string(),
+            tree_hash: tree_hash.to_string(),
+            tool_name: tool_name.to_string(),
+            compressed_output: compressed_output.to_string(),
+            ccr_hash: None,
+            raw_tokens,
+            compressed_tokens,
+        })
+    }
 }
 
 #[cfg(test)]

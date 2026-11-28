@@ -1,16 +1,19 @@
 pub mod fs;
 pub mod git;
 pub mod js;
+pub mod ops;
 pub mod python;
 pub mod rust;
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
 use crate::ccr_store::CcrStore;
+use crate::crusher::SmartCrusher;
 use crate::lossless::{compact_lossless, strip_ansi};
-use crate::pipeline::ContentKind;
+use crate::pipeline::{detect_content_kind, ContentKind};
 
 pub(crate) const GIT_VALUE_FLAGS: &[&str] = &[
     "-C",
@@ -109,6 +112,11 @@ pub fn load_custom_filter_rules(
         append_rules_from_file(&candidate, &mut rules);
     }
     rules
+}
+
+fn default_custom_filter_rules() -> &'static [CustomFilterRule] {
+    static CACHE: OnceLock<Vec<CustomFilterRule>> = OnceLock::new();
+    CACHE.get_or_init(|| load_custom_filter_rules(None, None))
 }
 
 fn append_rules_from_file(path: &Path, out: &mut Vec<CustomFilterRule>) {
@@ -362,10 +370,10 @@ pub fn filter_command_output_with_ccr(
     let bin = normalize_bin_name(first);
     let rest = &command[1..];
 
-    let custom_rules = load_custom_filter_rules(None, None);
+    let custom_rules = default_custom_filter_rules();
     if !custom_rules.is_empty() {
         if let Some(filtered) =
-            apply_custom_filter_rules(&custom_rules, &bin, rest, &combined, exit_code)
+            apply_custom_filter_rules(custom_rules, &bin, rest, &combined, exit_code)
         {
             if filtered.len() < combined.len() {
                 return FilterOutput {
@@ -380,10 +388,15 @@ pub fn filter_command_output_with_ccr(
     let routed: Option<(&'static str, String)> = match bin.as_str() {
         "git" => git::filter_git_with_ccr(rest, &combined, exit_code, ccr),
         "cargo" => rust::filter_cargo_with_ccr(rest, &combined, exit_code, ccr),
-        "vitest" | "jest" => js::filter_js_test(&combined, exit_code),
+        "vitest" | "jest" => js::filter_js_test_with_ccr(&combined, exit_code, ccr),
+        "playwright" => js::filter_playwright_with_ccr(&combined, exit_code, ccr),
         "tsc" => js::filter_tsc(&combined),
-        "npm" | "pnpm" | "yarn" | "bun" => js::filter_pkg_runner(rest, &combined, exit_code),
-        "npx" => js::filter_npx(rest, &combined, exit_code),
+        "eslint" | "prettier" => js::filter_eslint_prettier(&combined, exit_code),
+        "npm" | "pnpm" | "yarn" | "bun" => js::filter_pkg_runner_with_ccr(rest, &combined, exit_code, ccr),
+        "npx" => js::filter_npx_with_ccr(rest, &combined, exit_code, ccr),
+        "gh" => ops::filter_gh_with_ccr(rest, &combined, ccr),
+        "docker" => ops::filter_docker_with_ccr(rest, &combined, exit_code, ccr),
+        "curl" => ops::filter_curl_with_ccr(&combined, ccr),
         "pytest" => python::filter_pytest(&combined, exit_code),
         "ruff" | "mypy" => python::filter_python_lint(&combined),
         "grep" | "rg" => fs::filter_search_with_ccr(&combined, ccr),
@@ -404,7 +417,18 @@ pub fn filter_command_output_with_ccr(
         };
     }
 
-    let kind = crate::pipeline::detect_content_kind(&combined);
+    let kind = detect_content_kind(&combined);
+    if kind == ContentKind::Json {
+        if let Ok(crushed) = SmartCrusher::default().crush(&combined, ccr) {
+            if crushed.output.len() < combined.len() {
+                return FilterOutput {
+                    text: crushed.output,
+                    filter_name: "json_crusher",
+                    compressed: true,
+                };
+            }
+        }
+    }
     let folded = compact_lossless(&combined, kind);
     let compressed = folded.len() < combined.len();
     FilterOutput {
@@ -412,6 +436,83 @@ pub fn filter_command_output_with_ccr(
         filter_name: "generic",
         compressed,
     }
+}
+
+/// Build a bounded CCR-backed preview that preserves head lines, deduplicated error/failure lines,
+/// and trailing tail lines so end-of-log diagnostics are never truncated away.
+pub(crate) fn spill_tail_preserving_ccr_preview(
+    raw_source: &str,
+    body: &str,
+    max_body_chars: usize,
+    label: &str,
+    search_hint: &str,
+    ccr: Option<&CcrStore>,
+) -> String {
+    let head_budget = (max_body_chars * 45) / 100;
+    let tail_budget = (max_body_chars * 45) / 100;
+    let total_chars = body.chars().count();
+    if total_chars <= max_body_chars {
+        return body.to_string();
+    }
+
+    let head: String = body.chars().take(head_budget).collect();
+    let tail: String = body
+        .chars()
+        .rev()
+        .take(tail_budget)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let mut errors = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mid = body
+        .char_indices()
+        .nth(head.chars().count())
+        .map(|(idx, _)| &body[idx..])
+        .unwrap_or("");
+    for line in mid.lines() {
+        let t = line.trim();
+        let lower = t.to_ascii_lowercase();
+        if !t.is_empty()
+            && (lower.contains("error")
+                || lower.contains("fail")
+                || lower.contains("panic")
+                || lower.contains("assertion"))
+            && !tail.contains(t)
+            && seen.insert(t.to_string())
+        {
+            errors.push(t.chars().take(240).collect::<String>());
+            if errors.len() >= 12 {
+                break;
+            }
+        }
+    }
+
+    let mut out = head.trim_end().to_string();
+    if !errors.is_empty() {
+        out.push_str("\n... [key error/failure signals] ...\n");
+        out.push_str(&errors.join("\n"));
+    }
+    let preview_for_ccr = if tail.trim().is_empty() {
+        out.clone()
+    } else {
+        format!("{out}\n...\n{}", tail.trim_start())
+    };
+    if let Some(hash) = ccr.and_then(|s| s.put(raw_source, &preview_for_ccr, "cmd_filter", label).ok())
+    {
+        out.push_str(&format!(
+            "\n... [full {label} output in CCR — `kite ctx retrieve {hash} --search {search_hint}`] <<ccr:{hash}>>"
+        ));
+    } else {
+        out.push_str("\n... [middle output omitted]");
+    }
+    if !tail.trim().is_empty() {
+        out.push('\n');
+        out.push_str(tail.trim_start());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -509,5 +610,24 @@ mod tests {
         let cargo_res = filter_command_output(&cargo_cmd, cargo_raw, "", 0);
         assert_eq!(cargo_res.filter_name, "cargo_test");
         assert!(!cargo_res.text.contains("Compiling app"));
+    }
+
+    #[test]
+    fn routes_cli_json_through_smart_crusher() {
+        let rows: Vec<_> = (0..25)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "status": "completed",
+                    "component": "kite-ctx-pipeline"
+                })
+            })
+            .collect();
+        let raw_json = serde_json::to_string_pretty(&rows).unwrap();
+        let cmd = vec!["my-api-cli".into(), "list".into()];
+        let res = filter_command_output(&cmd, &raw_json, "", 0);
+        assert_eq!(res.filter_name, "json_crusher");
+        assert!(res.compressed);
+        assert!(res.text.len() < raw_json.len() / 2);
     }
 }

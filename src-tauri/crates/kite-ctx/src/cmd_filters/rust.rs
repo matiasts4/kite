@@ -226,7 +226,7 @@ fn compact_cargo_build(output: &str, exit_code: i32, ccr: Option<&CcrStore>) -> 
                 ccr.and_then(|s| s.put(output, &preview_so_far, "cmd_filter", "cargo check").ok())
             {
                 out.push(format!(
-                    "... (+{omitted} unique warnings omitted — run `kite ctx retrieve {hash}` for full diagnostics) <<ccr:{hash}>>"
+                    "... (+{omitted} unique warnings omitted — run `kite ctx retrieve {hash} --search <crate|file>` for details) <<ccr:{hash}>>"
                 ));
             } else {
                 out.push(format!("... (+{omitted} unique warnings omitted)"));

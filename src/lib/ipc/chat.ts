@@ -4,7 +4,7 @@ import type {
 } from '../../components/views/chat/types';
 import type { ChatThreadSummary } from '../../components/sidebar/types';
 import type { RoutineCollection, NotificationsSnapshot } from '../../types';
-import { invokeCommand } from './core';
+import { invokeCommand, invokeFlatCommand } from './core';
 
 export async function loadChatThread(threadId: string): Promise<ExtendedChatThread> {
   return invokeCommand<ExtendedChatThread>('load_chat_thread', { supportedSchemaVersion: 1, threadId });
@@ -124,8 +124,14 @@ export async function respondChatApproval(
   return invokeCommand<ExtendedChatThread>('respond_chat_approval', { threadId, decision, requestId });
 }
 
-export async function cancelChatTurn(threadId: string): Promise<void> {
-  return invokeCommand<void>('cancel_chat_turn', { threadId });
+export async function cancelChatTurn(
+  threadId: string,
+  options?: { preserveChildren?: boolean }
+): Promise<void> {
+  return invokeCommand<void>(
+    'cancel_chat_turn',
+    options?.preserveChildren ? { threadId, preserveChildren: true } : { threadId }
+  );
 }
 
 export interface ChatTurnUpdatesResponse {
@@ -261,11 +267,15 @@ export interface GlobalSubagentRunsSnapshot {
   totalCount: number;
   activeCount: number;
   waitingCount: number;
+  historyCount?: number;
+  sessionStartedAtMs?: number;
 }
 
 export async function listAllSubagentRuns(params?: {
   workspaceId?: string | null;
   limit?: number;
+  includeHistory?: boolean;
+  activeThreadIds?: string[];
 }): Promise<GlobalSubagentRunsSnapshot> {
   try {
     const res = await invokeCommand<{
@@ -274,9 +284,13 @@ export async function listAllSubagentRuns(params?: {
       totalCount?: number;
       activeCount?: number;
       waitingCount?: number;
+      historyCount?: number;
+      sessionStartedAtMs?: number;
     }>('list_all_subagent_runs', {
       workspaceId: params?.workspaceId ?? null,
       limit: params?.limit ?? 120,
+      includeHistory: Boolean(params?.includeHistory),
+      ...(params?.activeThreadIds?.length ? { activeThreadIds: params.activeThreadIds } : {}),
     });
     const runs = Array.isArray(res?.runs) ? res.runs : [];
     return {
@@ -284,9 +298,13 @@ export async function listAllSubagentRuns(params?: {
       totalCount: typeof res?.totalCount === 'number' ? res.totalCount : runs.length,
       activeCount: typeof res?.activeCount === 'number' ? res.activeCount : 0,
       waitingCount: typeof res?.waitingCount === 'number' ? res.waitingCount : 0,
+      historyCount: typeof res?.historyCount === 'number' ? res.historyCount : 0,
+      ...(typeof res?.sessionStartedAtMs === 'number'
+        ? { sessionStartedAtMs: res.sessionStartedAtMs }
+        : {}),
     };
   } catch {
-    return { runs: [], totalCount: 0, activeCount: 0, waitingCount: 0 };
+    return { runs: [], totalCount: 0, activeCount: 0, waitingCount: 0, historyCount: 0 };
   }
 }
 
@@ -475,6 +493,7 @@ export interface ChatProviderModelOption {
   id: string;
   name?: string;
   label?: string;
+  supportsEffort?: boolean;
   defaultEffort?: string | null;
   effortLevels?: string[];
 }
@@ -606,4 +625,78 @@ export async function deleteSubagentRole(
   });
   const unwrapped = unwrapSubagentCommandResult(res, 'Failed to delete subagent role');
   return Array.isArray(unwrapped.roles) ? unwrapped.roles : [];
+}
+
+export interface RuntimeResourceSettings {
+  fastLaneEnabled: boolean;
+  mcpHttpHubEnabled: boolean;
+  maxHeavyProcesses: number;
+}
+
+export interface RuntimeTransportMetrics {
+  activeMuxDaemons: number;
+  agyAcp: { daemons: number; sessions: number };
+  opencode: { servers: number; leases: number };
+  grok: { daemons: number; sessions: number };
+  mcpHub: {
+    httpRunning: boolean;
+    port: number | null;
+    requestCount: number;
+    pooledStdioServers: number;
+  };
+  activeFastLaneSessions: number;
+  governor: {
+    heavyActive: number;
+    heavyLimit: number;
+    multiplexedActive: number;
+    multiplexedLimit: number;
+    heavyQueued: number;
+  };
+  settings: RuntimeResourceSettings;
+}
+
+export const DEFAULT_RUNTIME_RESOURCE_SETTINGS: RuntimeResourceSettings = {
+  fastLaneEnabled: false,
+  mcpHttpHubEnabled: true,
+  maxHeavyProcesses: 4,
+};
+
+function isValidRuntimeTransportMetrics(value: unknown): value is RuntimeTransportMetrics {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<RuntimeTransportMetrics>;
+  return (
+    typeof candidate.activeMuxDaemons === 'number' &&
+    Boolean(candidate.mcpHub && typeof candidate.mcpHub === 'object') &&
+    Boolean(candidate.governor && typeof candidate.governor === 'object') &&
+    Boolean(candidate.settings && typeof candidate.settings === 'object')
+  );
+}
+
+export async function getRuntimeTransportMetrics(): Promise<RuntimeTransportMetrics | null> {
+  try {
+    const res = await invokeCommand<RuntimeTransportMetrics | null>('get_runtime_transport_metrics');
+    return isValidRuntimeTransportMetrics(res) ? res : null;
+  } catch (err) {
+    console.warn('[IPC] Failed to load runtime transport metrics:', err);
+    return null;
+  }
+}
+
+export async function saveRuntimeResourceSettings(
+  settings: RuntimeResourceSettings
+): Promise<RuntimeResourceSettings> {
+  const res = await invokeFlatCommand<RuntimeResourceSettings | undefined>(
+    'save_runtime_resource_settings',
+    { settings }
+  );
+  if (
+    res &&
+    typeof res === 'object' &&
+    typeof res.fastLaneEnabled === 'boolean' &&
+    typeof res.mcpHttpHubEnabled === 'boolean' &&
+    typeof res.maxHeavyProcesses === 'number'
+  ) {
+    return res;
+  }
+  return settings;
 }

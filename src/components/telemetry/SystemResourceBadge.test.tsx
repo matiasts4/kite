@@ -3,6 +3,15 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SystemResourceBadge } from './SystemResourceBadge';
 
+const { mockCoreInvoke } = vi.hoisted(() => ({
+  mockCoreInvoke: vi.fn(),
+}));
+
+vi.mock('../../lib/ipc/core', () => ({
+  invokeCommand: mockCoreInvoke,
+  isTauriEnvironment: vi.fn().mockReturnValue(true),
+}));
+
 vi.mock('../../lib/ipc', () => ({
   getSystemMetrics: vi.fn().mockResolvedValue({
     timestampMs: Date.now(),
@@ -94,6 +103,8 @@ vi.mock('../../lib/ipc', () => ({
 describe('SystemResourceBadge & SystemResourcePopover', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCoreInvoke.mockReset();
+    mockCoreInvoke.mockResolvedValue(undefined);
     localStorage.clear();
   });
 
@@ -117,7 +128,11 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     await user.click(badgeBtn);
 
     expect(
-      await screen.findByRole('dialog', { name: /monitor de recursos del sistema y de la aplicación/i })
+      await screen.findByRole(
+        'dialog',
+        { name: /monitor de recursos del sistema y de la aplicación/i },
+        { timeout: 5000 }
+      )
     ).toBeInTheDocument();
 
     // Verifies process tree breakdown & system cards are shown
@@ -159,7 +174,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     await user.click(badgeBtn);
 
     // Switch to RAM tab
-    await user.click(await screen.findByRole('tab', { name: 'RAM' }));
+    await user.click(await screen.findByRole('tab', { name: 'RAM' }, { timeout: 5000 }));
 
     // Verifies explanatory note is displayed
     expect(screen.getByText(/¿Por qué varía el consumo\?/i)).toBeInTheDocument();
@@ -294,7 +309,7 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     });
 
     await user.click(screen.getByTestId('system-resource-badge'));
-    await user.click(await screen.findByRole('tab', { name: 'RAM' }));
+    await user.click(await screen.findByRole('tab', { name: 'RAM' }, { timeout: 5000 }));
 
     // Verifies workspace grouping is shown by default when workspaces exist
     expect(screen.getByText('kite-core')).toBeInTheDocument();
@@ -309,6 +324,13 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     // Switch to "Lista Completa" flat view
     await user.click(screen.getByRole('button', { name: /Lista Completa/i }));
     expect(screen.getByText('PID 6200')).toBeInTheDocument();
+
+    // Native SVG iconography only — zero emojis across RAM tab views
+    const dialog = screen.getByRole('dialog', {
+      name: /monitor de recursos del sistema y de la aplicación/i,
+    });
+    expect(dialog.textContent).not.toMatch(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/u);
+    expect(dialog.querySelector('.tm-alloc-bar')).not.toBeNull();
   });
 
   it('isolates popover scroll container on its own compositor layer without stacked backdrop-filter or nested scroll traps', async () => {
@@ -321,9 +343,13 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
 
     await user.click(screen.getByTestId('system-resource-badge'));
 
-    const dialog = await screen.findByRole('dialog', {
-      name: /monitor de recursos del sistema y de la aplicación/i,
-    });
+    const dialog = await screen.findByRole(
+      'dialog',
+      {
+        name: /monitor de recursos del sistema y de la aplicación/i,
+      },
+      { timeout: 5000 }
+    );
     expect(dialog.style.backdropFilter).toBe('none');
 
     const scrollViewport = dialog.querySelector('.system-resource-popover__scroll') as HTMLElement | null;
@@ -353,5 +379,92 @@ describe('SystemResourceBadge & SystemResourcePopover', () => {
     expect(popoverRule).toContain('var(--menu-plate');
     expect(popoverRule).not.toContain('var(--glass-modal-bg');
     expect(popoverRule).not.toContain('var(--glass-overlay-bg');
+  });
+
+  it('displays live runtime transport telemetry breakdown in the Overview tab', async () => {
+    mockCoreInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_runtime_transport_metrics') {
+        return {
+          activeMuxDaemons: 3,
+          agyAcp: { daemons: 1, sessions: 4 },
+          opencode: { servers: 1, leases: 2 },
+          grok: { daemons: 1, sessions: 1 },
+          mcpHub: {
+            httpRunning: true,
+            port: 43120,
+            requestCount: 19,
+            pooledStdioServers: 2,
+          },
+          activeFastLaneSessions: 5,
+          governor: {
+            heavyActive: 2,
+            heavyLimit: 4,
+            multiplexedActive: 7,
+            multiplexedLimit: 16,
+            heavyQueued: 1,
+          },
+          settings: {
+            fastLaneEnabled: true,
+            mcpHttpHubEnabled: true,
+            maxHeavyProcesses: 4,
+          },
+        };
+      }
+      return undefined;
+    });
+
+    const user = userEvent.setup();
+    render(<SystemResourceBadge />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('system-resource-ram-value')).toHaveTextContent('480 MB');
+    });
+
+    await user.click(screen.getByTestId('system-resource-badge'));
+    await screen.findByRole(
+      'dialog',
+      { name: /monitor de recursos del sistema y de la aplicación/i },
+      { timeout: 5000 }
+    );
+
+    await waitFor(() => {
+      expect(mockCoreInvoke).toHaveBeenCalledWith('get_runtime_transport_metrics');
+    });
+
+    expect(await screen.findByText('Daemons multiplexados')).toBeInTheDocument();
+    expect(screen.getByText('3')).toBeInTheDocument();
+    expect(screen.getByText('7 sesiones mux')).toBeInTheDocument();
+    expect(screen.getByText('Pool MCP')).toBeInTheDocument();
+    expect(screen.getByText('2 servidores · HTTP activo')).toBeInTheDocument();
+    expect(screen.getByText('Fast Lane')).toBeInTheDocument();
+    expect(screen.getByText('5 sesiones')).toBeInTheDocument();
+    expect(screen.getByText('Concurrencia pesada')).toBeInTheDocument();
+    expect(screen.getByText('2/4')).toBeInTheDocument();
+  });
+
+  it('falls back cleanly to zeroed runtime transport metrics when IPC rejects or returns undefined', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockCoreInvoke.mockRejectedValue(new Error('backend unavailable'));
+
+    const user = userEvent.setup();
+    render(<SystemResourceBadge />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('system-resource-ram-value')).toHaveTextContent('480 MB');
+    });
+
+    await user.click(screen.getByTestId('system-resource-badge'));
+    await screen.findByRole(
+      'dialog',
+      { name: /monitor de recursos del sistema y de la aplicación/i },
+      { timeout: 5000 }
+    );
+
+    expect(await screen.findByText('Daemons multiplexados')).toBeInTheDocument();
+    expect(screen.getByText('0 sesiones mux')).toBeInTheDocument();
+    expect(screen.getByText('0 servidores · HTTP inactivo')).toBeInTheDocument();
+    expect(screen.getByText('0 sesiones')).toBeInTheDocument();
+    expect(screen.getByText('0/0')).toBeInTheDocument();
+    warnSpy.mockRestore();
   });
 });

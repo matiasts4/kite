@@ -4,6 +4,16 @@ import {
   formatBytes,
 } from '../../../lib/systemMetrics';
 import { invokeCommand } from '../../../lib/ipc';
+import {
+  AlertTriangleIcon,
+  BotSparkIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  FolderIcon,
+  MonitorIcon,
+  SearchIcon,
+  TerminalIcon,
+} from '../../titlebar/TopbarPopoverIcons';
 
 export interface MemoryProcessTabProps {
   snapshot: SystemMetricsSnapshot;
@@ -31,12 +41,30 @@ function resolveWorkspaceName(workspaceId?: string | null): string {
         if (found?.displayName) return found.displayName;
       }
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[MemoryProcessTab] Failed to resolve cached workspace name:', err);
+  }
   if (workspaceId.includes('\\') || workspaceId.includes('/')) {
     const parts = workspaceId.split(/[\/\\]/).filter(Boolean);
     if (parts.length > 0) return parts[parts.length - 1];
   }
   return workspaceId;
+}
+
+function getProcessTone(proc: { role?: string; category?: string }): string {
+  if (proc.role === 'mcp' || proc.category === 'mcp') return 'mcp';
+  if (proc.role === 'build') return 'build';
+  if (proc.role === 'agent' || proc.category === 'agent') return 'agent';
+  if (proc.category === 'terminals') return 'terminals';
+  if (proc.category === 'webview') return 'webview';
+  return 'core';
+}
+
+function getProcessBarColor(tone: string): string {
+  if (tone === 'mcp' || tone === 'build') return 'var(--tm-violet)';
+  if (tone === 'terminals') return 'var(--tm-amber)';
+  if (tone === 'webview') return 'var(--status-running)';
+  return 'var(--accent)';
 }
 
 export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
@@ -73,68 +101,27 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
 
   // 1. Orphan Alert Banner
   const orphanBanner = orphans.length > 0 && (
-    <div
-      style={{
-        padding: '8px 10px',
-        borderRadius: 'var(--control-radius, 8px)',
-        backgroundColor: 'rgba(245, 158, 11, 0.1)',
-        border: '1px solid rgba(245, 158, 11, 0.28)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        fontSize: '11px',
-        color: 'var(--warning-text, #f59e0b)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-        <span>⚠️</span>
+    <div className="tm-orphan-banner" role="status">
+      <div className="tm-orphan-banner__left">
+        <AlertTriangleIcon size={13} />
         <span>
           <strong>{orphans.length}</strong> subprocesos huérfanos ({formatBytes(orphanBytes)})
         </span>
       </div>
-      <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
-        Inactivos sin terminal viva
-      </span>
+      <span className="tm-orphan-banner__sub">Inactivos sin terminal viva</span>
     </div>
   );
 
   return (
-    <div
-      style={{
-        backgroundColor: 'var(--block-fill)',
-        border: '1px solid var(--block-stroke)',
-        borderRadius: 'var(--card-radius, 12px)',
-        padding: '12px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '10px',
-      }}
-    >
+    <div className="tm-proc-card">
       {/* Header: Title and View Switcher */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px' }}>
-        <div
-          style={{
-            fontSize: '11px',
-            fontWeight: 600,
-            textTransform: 'uppercase',
-            letterSpacing: '0.04em',
-            color: 'var(--text-primary)',
-          }}
-        >
+      <div className="tm-proc-head">
+        <div className="tm-proc-title">
           Subprocesos Activos ({snapshot.runtime.processes?.length || snapshot.runtime.processCount})
         </div>
 
         {/* View mode segmented switcher */}
-        <div
-          style={{
-            display: 'flex',
-            backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.03))',
-            padding: '2px',
-            borderRadius: 'var(--control-radius, 8px)',
-            border: '1px solid var(--block-stroke)',
-            gap: '2px',
-          }}
-        >
+        <div className="tp-segmented tp-segmented--inline">
           {(
             [
               { id: 'projects', label: `Por Proyecto (${snapshot.runtime.workspaces?.length || 0})` },
@@ -147,19 +134,8 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
               <button
                 key={mode.id}
                 type="button"
+                className={`tp-segmented__item${isSel ? ' tp-segmented__item--active' : ''}`}
                 onClick={() => setProcViewMode(mode.id)}
-                style={{
-                  padding: '3px 8px',
-                  height: '24px',
-                  borderRadius: 'var(--vl-radius-sm, 6px)',
-                  fontSize: '10px',
-                  fontWeight: isSel ? 600 : 500,
-                  border: 'none',
-                  backgroundColor: isSel ? 'var(--accent, #5c8fff)' : 'transparent',
-                  color: isSel ? '#ffffff' : 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  transition: 'all 120ms ease',
-                }}
               >
                 {mode.label}
               </button>
@@ -172,14 +148,7 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
       {procViewMode === 'projects' && workspaces.length > 0 && (
         <>
           {orphanBanner}
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '6px',
-              contain: 'content',
-            }}
-          >
+          <div className="tm-proc-group-list">
             {workspaces.map((ws) => {
               const wsName = resolveWorkspaceName(ws.workspaceId);
               const isExpanded = expandedSections[ws.workspaceId] ?? true;
@@ -191,87 +160,61 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
                   : 0;
 
               return (
-                <div
-                  key={ws.workspaceId}
-                  style={{
-                    borderRadius: 'var(--control-radius, 8px)',
-                    border: '1px solid var(--block-stroke)',
-                    backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.02))',
-                    overflow: 'hidden',
-                  }}
-                >
+                <div key={ws.workspaceId} className="tm-proc-group">
                   {/* Workspace Row Header */}
                   <button
                     type="button"
+                    className="tm-proc-group__trigger"
                     onClick={() => toggleSection(ws.workspaceId)}
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      background: 'transparent',
-                      border: 'none',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                    }}
+                    aria-expanded={isExpanded}
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
-                      <span style={{ fontSize: '12px' }}>📁</span>
-                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                        <span style={{ fontWeight: 600, fontSize: '11px', color: 'var(--text-primary)' }}>
-                          {wsName}
-                        </span>
-                        <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+                    <div className="tm-proc-group__left">
+                      <span className="tm-proc-pedestal" aria-hidden="true">
+                        <FolderIcon size={13} />
+                      </span>
+                      <div className="tm-proc-group__meta">
+                        <span className="tm-proc-group__name">{wsName}</span>
+                        <span className="tm-proc-group__sub">
                           {wsTerminals.length > 0 ? wsTerminals.length : ws.terminalCount} terminal(es) · {ws.processCount} proceso(s)
                         </span>
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--accent, #5c8fff)' }}>
-                          {formatBytes(ws.memoryBytes)}
-                        </div>
-                        <div style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>
+                    <div className="tm-proc-group__right">
+                      <div className="tm-proc-group__mem">
+                        <div className="tm-proc-group__mem-val">{formatBytes(ws.memoryBytes)}</div>
+                        <div className="tm-proc-group__mem-sub">
                           {pctOfApp}% app
                           {ws.privateBytes != null && ` · ${formatBytes(ws.privateBytes)} priv`}
                         </div>
                       </div>
-                      <span style={{ fontSize: '10px', color: 'var(--text-secondary)', transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}>
-                        ▶
-                      </span>
+                      <ChevronRightIcon
+                        size={12}
+                        className={`tm-proc-chevron${isExpanded ? ' tm-proc-chevron--open' : ''}`}
+                      />
                     </div>
                   </button>
 
                   {/* Workspace Subprocesses */}
                   {isExpanded && wsProcs.length > 0 && (
-                    <div style={{ padding: '4px 10px 8px 24px', borderTop: '1px solid var(--block-stroke)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div className="tm-proc-children">
                       {wsProcs.map((p) => (
-                        <div key={p.pid} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', padding: '3px 0' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 }}>
-                            <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>PID {p.pid}</span>
-                            <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{p.name}</span>
-                            {p.label && <span style={{ color: 'var(--text-secondary)' }}>· {p.label}</span>}
+                        <div key={p.pid} className="tm-proc-child">
+                          <div className="tm-proc-child__left">
+                            <span className="tm-pid-chip">PID {p.pid}</span>
+                            <span className="tm-breakdown-label">{p.name}</span>
+                            {p.label && <span className="tm-breakdown-count">· {p.label}</span>}
                             {p.role === 'mcp' && (
-                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(192, 132, 252, 0.15)', color: '#c084fc', fontWeight: 600 }}>
-                                MCP
-                              </span>
+                              <span className="tm-role-chip tm-role-chip--mcp">MCP</span>
                             )}
                             {p.role === 'agent' && (
-                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(92, 143, 255, 0.15)', color: 'var(--accent, #5c8fff)', fontWeight: 600 }}>
-                                Agente
-                              </span>
+                              <span className="tm-role-chip tm-role-chip--agent">Agente</span>
                             )}
                             {p.role === 'build' && (
-                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(168, 85, 247, 0.15)', color: '#a855f7' }}>
-                                Build
-                              </span>
+                              <span className="tm-role-chip tm-role-chip--build">Build</span>
                             )}
                           </div>
-                          <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
-                            {formatBytes(p.memoryBytes)}
-                          </span>
+                          <span className="tm-breakdown-value">{formatBytes(p.memoryBytes)}</span>
                         </div>
                       ))}
                     </div>
@@ -281,31 +224,22 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
             })}
 
             {/* System and UI Infrastructure Card */}
-            <div
-              style={{
-                borderRadius: 'var(--control-radius, 8px)',
-                border: '1px solid var(--block-stroke)',
-                backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.015))',
-                padding: '8px 10px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                fontSize: '11px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '12px' }}>🖥️</span>
-                <div>
-                  <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Motor UI (WebView2) & Host</div>
-                  <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>Renderizado React, GPU, Núcleo Rust</div>
+            <div className="tm-proc-group">
+              <div className="tm-proc-group__row">
+                <div className="tm-proc-group__left">
+                  <span className="tm-proc-pedestal" aria-hidden="true">
+                    <MonitorIcon size={13} />
+                  </span>
+                  <div className="tm-proc-group__meta">
+                    <div className="tm-proc-group__name">Motor UI (WebView2) & Host</div>
+                    <div className="tm-proc-group__sub">Renderizado React, GPU, Núcleo Rust</div>
+                  </div>
                 </div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {formatBytes(snapshot.memory.appCoreBytes)}
-                </div>
-                <div style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>
-                  Memoria base UI
+                <div className="tm-proc-group__mem">
+                  <div className="tm-proc-group__mem-val tm-proc-group__mem-val--neutral">
+                    {formatBytes(snapshot.memory.appCoreBytes)}
+                  </div>
+                  <div className="tm-proc-group__mem-sub">Memoria base UI</div>
                 </div>
               </div>
             </div>
@@ -317,126 +251,87 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
       {procViewMode === 'terminals' && terminals.length > 0 && (
         <>
           {orphanBanner}
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: '6px',
-              contain: 'content',
-            }}
-          >
+          <div className="tm-proc-group-list">
             {terminals.map((term) => {
               const isExpanded = expandedSections[term.sessionId] ?? true;
               const termProcs = allProcs.filter((p) => p.sessionId === term.sessionId);
               const wsLabel = resolveWorkspaceName(term.workspaceId);
 
               return (
-                <div
-                  key={term.sessionId}
-                  style={{
-                    borderRadius: 'var(--control-radius, 8px)',
-                    border: '1px solid var(--block-stroke)',
-                    backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.02))',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                    }}
-                  >
+                <div key={term.sessionId} className="tm-proc-group">
+                  <div className="tm-proc-group__row">
                     <div
                       onClick={() => toggleSection(term.sessionId)}
-                      style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, cursor: 'pointer', flex: 1 }}
+                      className="tm-proc-group__left tm-proc-group__left--clickable"
                     >
-                      <span style={{ fontSize: '12px' }}>{term.isAgent ? '🤖' : '💻'}</span>
-                      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <span style={{ fontWeight: 600, fontSize: '11px', color: 'var(--text-primary)' }}>
-                            {term.title}
-                          </span>
+                      <span
+                        className={`tm-proc-pedestal${term.isAgent ? ' tm-proc-pedestal--agent' : ''}`}
+                        aria-hidden="true"
+                      >
+                        {term.isAgent ? <BotSparkIcon size={13} /> : <TerminalIcon size={13} />}
+                      </span>
+                      <div className="tm-proc-group__meta">
+                        <div className="tm-proc-child__left">
+                          <span className="tm-proc-group__name">{term.title}</span>
                           {term.isAgent && (
-                            <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '4px', backgroundColor: 'rgba(92, 143, 255, 0.15)', color: 'var(--accent, #5c8fff)' }}>
-                              Agente AI
-                            </span>
+                            <span className="tm-role-chip tm-role-chip--agent">Agente AI</span>
                           )}
                         </div>
-                        <span style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+                        <span className="tm-proc-group__sub">
                           {wsLabel} · {term.processCount} proceso(s)
                         </span>
                       </div>
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--accent, #5c8fff)' }}>
-                          {formatBytes(term.memoryBytes)}
-                        </div>
-                        <div style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>
+                    <div className="tm-proc-group__right">
+                      <div className="tm-proc-group__mem">
+                        <div className="tm-proc-group__mem-val">{formatBytes(term.memoryBytes)}</div>
+                        <div className="tm-proc-group__mem-sub">
                           {term.agentBytes != null && term.agentBytes > 0 && (
                             <span>Agente: {formatBytes(term.agentBytes)}</span>
                           )}
                           {term.mcpBytes != null && term.mcpBytes > 0 && (
-                            <span style={{ color: '#c084fc', marginLeft: term.agentBytes ? '4px' : '0' }}>
-                              {term.agentBytes ? '· ' : ''}MCPs: {formatBytes(term.mcpBytes)}
+                            <span className="tm-hero-sub--violet">
+                              {term.agentBytes ? ' · ' : ''}MCPs: {formatBytes(term.mcpBytes)}
                             </span>
                           )}
-                          {(!term.agentBytes && !term.mcpBytes && term.privateBytes != null) && (
+                          {!term.agentBytes && !term.mcpBytes && term.privateBytes != null && (
                             <span>{formatBytes(term.privateBytes)} priv</span>
                           )}
                         </div>
                       </div>
                       <button
                         type="button"
+                        className="tp-icon-btn"
                         title="Finalizar sesión de terminal"
+                        aria-label={`Finalizar sesión ${term.title}`}
                         onClick={() => handleTerminateSession(term.sessionId)}
-                        style={{
-                          border: 'none',
-                          background: 'transparent',
-                          color: 'var(--text-secondary)',
-                          cursor: 'pointer',
-                          padding: '2px 6px',
-                          borderRadius: '4px',
-                          fontSize: '11px',
-                        }}
                       >
-                        ✕
+                        <CloseIcon size={12} />
                       </button>
                     </div>
                   </div>
 
                   {/* Subprocesses under terminal */}
                   {isExpanded && termProcs.length > 0 && (
-                    <div style={{ padding: '4px 10px 8px 24px', borderTop: '1px solid var(--block-stroke)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <div className="tm-proc-children">
                       {termProcs.map((p) => (
-                        <div key={p.pid} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '10px', padding: '2px 0' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 }}>
-                            <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>PID {p.pid}</span>
-                            <span style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{p.name}</span>
-                            {p.label && <span style={{ color: 'var(--text-secondary)' }}>· {p.label}</span>}
+                        <div key={p.pid} className="tm-proc-child">
+                          <div className="tm-proc-child__left">
+                            <span className="tm-pid-chip">PID {p.pid}</span>
+                            <span className="tm-breakdown-label">{p.name}</span>
+                            {p.label && <span className="tm-breakdown-count">· {p.label}</span>}
                             {p.role === 'mcp' && (
-                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(192, 132, 252, 0.15)', color: '#c084fc', fontWeight: 600 }}>
-                                MCP
-                              </span>
+                              <span className="tm-role-chip tm-role-chip--mcp">MCP</span>
                             )}
                             {p.role === 'agent' && (
-                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(92, 143, 255, 0.15)', color: 'var(--accent, #5c8fff)', fontWeight: 600 }}>
-                                Agente
-                              </span>
+                              <span className="tm-role-chip tm-role-chip--agent">Agente</span>
                             )}
                             {p.role === 'build' && (
-                              <span style={{ fontSize: '8px', padding: '1px 4px', borderRadius: 'var(--vl-radius-xs, 4px)', backgroundColor: 'rgba(168, 85, 247, 0.15)', color: '#a855f7', fontWeight: 600 }}>
-                                Build
-                              </span>
+                              <span className="tm-role-chip tm-role-chip--build">Build</span>
                             )}
                           </div>
-                          <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: 'var(--text-secondary)' }}>
-                            {formatBytes(p.memoryBytes)}
-                          </span>
+                          <span className="tm-breakdown-value">{formatBytes(p.memoryBytes)}</span>
                         </div>
                       ))}
                     </div>
@@ -490,9 +385,7 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
         if (mcpCount > 0) {
           filterButtons.push({ id: 'mcp', label: `MCPs & Tools (${mcpCount})` });
         }
-        filterButtons.push(
-          { id: 'terminals', label: `Shells PTY (${termCount})` }
-        );
+        filterButtons.push({ id: 'terminals', label: `Shells PTY (${termCount})` });
         if (buildCount > 0) {
           filterButtons.push({ id: 'build', label: `Build / Tests (${buildCount})` });
         }
@@ -504,30 +397,15 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
         return (
           <>
             {orphanBanner}
-            <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+            <div className="tm-filter-bar">
               {filterButtons.map((filter) => {
                 const isSel = procCategoryFilter === filter.id;
                 return (
                   <button
                     key={filter.id}
                     type="button"
+                    className={`tm-filter-chip${isSel ? ' tm-filter-chip--active' : ''}`}
                     onClick={() => setProcCategoryFilter(filter.id)}
-                    style={{
-                      padding: '3px 8px',
-                      height: '24px',
-                      borderRadius: 'var(--vl-radius-sm, 6px)',
-                      fontSize: '10px',
-                      fontWeight: isSel ? 600 : 500,
-                      border: isSel
-                        ? '1px solid var(--accent-tint-strong, rgba(92, 143, 255, 0.35))'
-                        : '1px solid var(--block-stroke)',
-                      backgroundColor: isSel
-                        ? 'var(--accent-tint, rgba(92, 143, 255, 0.14))'
-                        : 'transparent',
-                      color: isSel ? 'var(--accent, #5c8fff)' : 'var(--text-secondary)',
-                      cursor: 'pointer',
-                      transition: 'all 120ms ease',
-                    }}
                   >
                     {filter.label}
                   </button>
@@ -536,43 +414,22 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
             </div>
 
             {allProcs.length > 3 && (
-              <input
-                type="text"
-                placeholder="Filtrar por PID, nombre o proyecto..."
-                value={procSearchQuery}
-                onChange={(e) => setProcSearchQuery(e.target.value)}
-                style={{
-                  width: '100%',
-                  height: '26px',
-                  borderRadius: 'var(--control-radius, 8px)',
-                  border: '1px solid var(--block-stroke)',
-                  backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.03))',
-                  color: 'var(--text-primary)',
-                  fontSize: '11px',
-                  padding: '0 8px',
-                  outline: 'none',
-                }}
-              />
+              <div className="tp-field">
+                <SearchIcon size={12} />
+                <input
+                  type="text"
+                  className="tp-field__input"
+                  placeholder="Filtrar por PID, nombre o proyecto..."
+                  value={procSearchQuery}
+                  onChange={(e) => setProcSearchQuery(e.target.value)}
+                />
+              </div>
             )}
 
             {/* Process list */}
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '5px',
-                contain: 'content',
-              }}
-            >
+            <div className="tm-proc-group-list">
               {filtered.length === 0 ? (
-                <div
-                  style={{
-                    padding: '16px',
-                    textAlign: 'center',
-                    color: 'var(--text-secondary)',
-                    fontSize: '11px',
-                  }}
-                >
+                <div className="tm-proc-empty">
                   No se encontraron subprocesos activos para este filtro.
                 </div>
               ) : (
@@ -581,176 +438,64 @@ export const MemoryProcessTab: React.FC<MemoryProcessTabProps> = React.memo(({
                     snapshot.memory.appTotalBytes > 0
                       ? Math.round((proc.memoryBytes / snapshot.memory.appTotalBytes) * 100)
                       : 0;
-                  const catColor =
-                    proc.role === 'mcp' || proc.category === 'mcp'
-                      ? '#c084fc'
-                      : proc.role === 'build'
-                      ? '#a855f7'
-                      : proc.role === 'agent' || proc.category === 'agent'
-                      ? 'var(--accent, #5c8fff)'
-                      : proc.category === 'terminals'
-                      ? '#f59e0b'
-                      : proc.category === 'webview'
-                      ? 'var(--status-running, #34c759)'
-                      : 'var(--accent, #5c8fff)';
-
+                  const tone = getProcessTone(proc);
+                  const barColor = getProcessBarColor(tone);
                   const catBadge =
-                    proc.role === 'mcp' || proc.category === 'mcp'
+                    tone === 'mcp'
                       ? 'Servidor MCP'
-                      : proc.role === 'build'
-                      ? 'Build / Test'
-                      : proc.role === 'agent' || proc.category === 'agent'
-                      ? 'Agente AI'
-                      : proc.category === 'terminals'
-                      ? 'Terminal PTY'
-                      : proc.category === 'webview'
-                      ? 'WebView2'
-                      : 'Host';
+                      : tone === 'build'
+                        ? 'Build / Test'
+                        : tone === 'agent'
+                          ? 'Agente AI'
+                          : tone === 'terminals'
+                            ? 'Terminal PTY'
+                            : tone === 'webview'
+                              ? 'WebView2'
+                              : 'Host';
 
                   const wsTag = proc.workspaceId ? resolveWorkspaceName(proc.workspaceId) : null;
 
                   return (
                     <div
                       key={proc.pid}
-                      style={{
-                        padding: '6px 8px',
-                        borderRadius: 'var(--control-radius, 8px)',
-                        backgroundColor: 'var(--chip-fill, rgba(255,255,255,0.025))',
-                        border: proc.isOrphan ? '1px solid rgba(245, 158, 11, 0.4)' : '1px solid var(--block-stroke)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '4px',
-                      }}
+                      className={`tm-flat-row${proc.isOrphan ? ' tm-flat-row--orphan' : ''}`}
                     >
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          fontSize: '11px',
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
-                          <span
-                            style={{
-                              fontSize: '9px',
-                              fontWeight: 700,
-                              fontVariantNumeric: 'tabular-nums',
-                              padding: '1px 5px',
-                              borderRadius: 'var(--vl-radius-xs, 4px)',
-                              backgroundColor: 'var(--block-stroke)',
-                              color: 'var(--text-secondary)',
-                            }}
-                          >
-                            PID {proc.pid}
-                          </span>
-                          <span
-                            style={{
-                              fontWeight: 600,
-                              color: 'var(--text-primary)',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                            }}
-                            title={proc.name}
-                          >
+                      <div className="tm-flat-row__top">
+                        <div className="tm-proc-child__left">
+                          <span className="tm-pid-chip">PID {proc.pid}</span>
+                          <span className="tm-proc-group__name" title={proc.name}>
                             {proc.name}
                           </span>
                           {proc.label && (
-                            <span
-                              style={{
-                                fontSize: '10px',
-                                color: 'var(--text-secondary)',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              · {proc.label}
-                            </span>
+                            <span className="tm-breakdown-count">· {proc.label}</span>
                           )}
                         </div>
 
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-                          {wsTag && (
-                            <span
-                              style={{
-                                fontSize: '9px',
-                                padding: '1px 5px',
-                                borderRadius: 'var(--vl-radius-xs, 4px)',
-                                backgroundColor: 'var(--block-stroke)',
-                                color: 'var(--text-secondary)',
-                                maxWidth: '90px',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              {wsTag}
-                            </span>
-                          )}
-                          <span
-                            style={{
-                              fontSize: '9px',
-                              fontWeight: 600,
-                              padding: '1px 5px',
-                              borderRadius: 'var(--vl-radius-xs, 4px)',
-                              color: catColor,
-                              backgroundColor: 'color-mix(in srgb, currentColor 12%, transparent)',
-                            }}
-                          >
-                            {catBadge}
-                          </span>
-                          <span
-                            style={{
-                              fontWeight: 700,
-                              fontVariantNumeric: 'tabular-nums',
-                              color: 'var(--text-primary)',
-                            }}
-                          >
-                            {formatBytes(proc.memoryBytes)}
-                          </span>
+                        <div className="tm-proc-group__right">
+                          {wsTag && <span className="tm-ws-chip">{wsTag}</span>}
+                          <span className={`tm-role-chip tm-role-chip--${tone}`}>{catBadge}</span>
+                          <span className="tm-breakdown-value">{formatBytes(proc.memoryBytes)}</span>
                         </div>
                       </div>
 
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          fontSize: '10px',
-                          color: 'var(--text-secondary)',
-                        }}
-                      >
+                      <div className="tm-flat-row__meta">
                         <span>
                           {pctOfApp}% de la app
                           {proc.privateBytes != null && (
-                            <span style={{ marginLeft: '4px' }}>
-                              · {formatBytes(proc.privateBytes)} privada
-                            </span>
+                            <span> · {formatBytes(proc.privateBytes)} privada</span>
                           )}
                           {proc.isOrphan && (
-                            <span style={{ marginLeft: '6px', color: 'var(--warning-text, #f59e0b)', fontWeight: 600 }}>
-                              · Huérfano
-                            </span>
+                            <span className="tm-orphan-banner__left"> · Huérfano</span>
                           )}
                         </span>
                       </div>
 
-                      <div
-                        style={{
-                          height: '3px',
-                          borderRadius: '999px',
-                          backgroundColor: 'color-mix(in srgb, var(--text-secondary) 14%, transparent)',
-                          overflow: 'hidden',
-                        }}
-                      >
+                      <div className="tp-meter">
                         <div
+                          className="tp-meter__fill"
                           style={{
-                            height: '100%',
                             width: `${Math.max(2, Math.min(100, pctOfApp))}%`,
-                            backgroundColor: catColor,
-                            borderRadius: '999px',
+                            backgroundColor: barColor,
                           }}
                         />
                       </div>

@@ -3,8 +3,14 @@ import {
   type SystemMetricsSnapshot,
   formatBytes,
 } from '../../../lib/systemMetrics';
+import { type RuntimeTransportMetrics } from '../../../lib/ipc/chat';
 import { formatPercent, formatTokenCount } from '../../../lib/contextMonitor';
 import { Sparkline } from '../TelemetryGauges';
+import {
+  ActivityPulseIcon,
+  ArrowRightIcon,
+  HardDriveIcon,
+} from '../../titlebar/TopbarPopoverIcons';
 
 export interface OverviewTabProps {
   snapshot: SystemMetricsSnapshot;
@@ -16,7 +22,9 @@ export interface OverviewTabProps {
     tokensSaved: number;
     savingsPercent: number;
     requests: number;
+    wastedTurn0Tokens?: number;
   } | null;
+  transportMetrics?: RuntimeTransportMetrics | null;
   onSelectTab: (tab: 'cpu' | 'disk' | 'context') => void;
 }
 
@@ -27,94 +35,57 @@ export const OverviewTab: React.FC<OverviewTabProps> = React.memo(({
   diskColor,
   uiFps,
   contextSummary,
+  transportMetrics,
   onSelectTab,
 }) => {
+  const activeMuxDaemons = transportMetrics?.activeMuxDaemons ?? 0;
+  const muxSessionsTotal =
+    (transportMetrics?.agyAcp?.sessions ?? 0) +
+    (transportMetrics?.opencode?.leases ?? 0) +
+    (transportMetrics?.grok?.sessions ?? 0);
+  const pooledStdioServers = transportMetrics?.mcpHub?.pooledStdioServers ?? 0;
+  const mcpHttpRunning = Boolean(transportMetrics?.mcpHub?.httpRunning);
+  const mcpPort = transportMetrics?.mcpHub?.port ?? null;
+  const mcpRequestCount = transportMetrics?.mcpHub?.requestCount ?? 0;
+  const fastLaneSessions = transportMetrics?.activeFastLaneSessions ?? 0;
+  const fastLaneEnabled = Boolean(transportMetrics?.settings?.fastLaneEnabled);
+  const heavyActive = transportMetrics?.governor?.heavyActive ?? 0;
+  const heavyLimit = transportMetrics?.governor?.heavyLimit ?? 0;
+  const heavyQueued = transportMetrics?.governor?.heavyQueued ?? 0;
+
   return (
     <>
-      {/* OVERVIEW GRID: CPU, Disk, & Runtime Health Cards */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(2, 1fr)',
-          gap: '8px',
-        }}
-      >
+      {/* OVERVIEW GRID: CPU & Disk Instrument Cards */}
+      <div className="tm-bento-grid">
         {/* CPU Card */}
         <button
           type="button"
+          className="tm-bento-card"
           onClick={() => onSelectTab('cpu')}
-          style={{
-            textAlign: 'left',
-            backgroundColor: 'var(--block-fill)',
-            border: '1px solid var(--block-stroke)',
-            borderRadius: '9px',
-            padding: '10px',
-            cursor: 'pointer',
-            color: 'inherit',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-            transition: 'border-color 120ms ease',
-          }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span
-              style={{
-                fontSize: '10px',
-                fontWeight: 600,
-                textTransform: 'uppercase',
-                letterSpacing: '0.04em',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              Procesador (CPU)
+          <div className="tm-bento-card__head">
+            <span className="tm-hero-kicker">Procesador (CPU)</span>
+            <span style={{ color: cpuColor }}>
+              <ActivityPulseIcon size={13} />
             </span>
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke={cpuColor}
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-            </svg>
           </div>
-          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
+          <div className="tm-bento-card__body">
             <div>
-              <div
-                style={{
-                  fontSize: '16px',
-                  fontWeight: 700,
-                  fontVariantNumeric: 'tabular-nums',
-                  color: 'var(--text-primary)',
-                }}
-              >
+              <div className="tm-bento-card__val">
                 {snapshot.cpu.appUsagePercent.toFixed(1)}%
               </div>
-              <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+              <div className="tm-bento-card__sub">
                 App · Sistema {snapshot.cpu.systemUsagePercent.toFixed(1)}%
               </div>
             </div>
-            <Sparkline values={appCpuHistory} maxVal={100} color={cpuColor} width={68} height={24} />
+            <Sparkline values={appCpuHistory} maxVal={100} color={cpuColor} width={66} height={24} />
           </div>
-          <div
-            style={{
-              height: '4px',
-              borderRadius: '999px',
-              backgroundColor: 'color-mix(in srgb, var(--text-secondary) 16%, transparent)',
-              overflow: 'hidden',
-            }}
-          >
+          <div className="tp-meter">
             <div
+              className="tp-meter__fill"
               style={{
-                height: '100%',
                 width: `${Math.max(3, Math.min(100, snapshot.cpu.systemUsagePercent))}%`,
                 backgroundColor: cpuColor,
-                borderRadius: '999px',
-                transition: 'width 300ms ease',
               }}
             />
           </div>
@@ -123,189 +94,119 @@ export const OverviewTab: React.FC<OverviewTabProps> = React.memo(({
         {/* Disk Card */}
         <button
           type="button"
+          className="tm-bento-card"
           onClick={() => onSelectTab('disk')}
-          style={{
-            textAlign: 'left',
-            backgroundColor: 'var(--block-fill)',
-            border: '1px solid var(--block-stroke)',
-            borderRadius: '9px',
-            padding: '10px',
-            cursor: 'pointer',
-            color: 'inherit',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '6px',
-            transition: 'border-color 120ms ease',
-          }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span
-              style={{
-                fontSize: '10px',
-                fontWeight: 600,
-                textTransform: 'uppercase',
-                letterSpacing: '0.04em',
-                color: 'var(--text-secondary)',
-              }}
-            >
-              Disco ({snapshot.disk.mountPoint})
+          <div className="tm-bento-card__head">
+            <span className="tm-hero-kicker">Disco ({snapshot.disk.mountPoint})</span>
+            <span style={{ color: diskColor }}>
+              <HardDriveIcon size={13} />
             </span>
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke={diskColor}
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <ellipse cx="12" cy="5" rx="9" ry="3" />
-              <path d="M3 5V19A9 3 0 0 0 21 19V5" />
-              <path d="M3 12A9 3 0 0 0 21 12" />
-            </svg>
           </div>
           <div>
-            <div
-              style={{
-                fontSize: '16px',
-                fontWeight: 700,
-                fontVariantNumeric: 'tabular-nums',
-                color: 'var(--text-primary)',
-              }}
-            >
+            <div className="tm-bento-card__val">
               {formatBytes(snapshot.disk.availableBytes, 0)} libres
             </div>
-            <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+            <div className="tm-bento-card__sub">
               {snapshot.disk.usagePercent}% usado de {formatBytes(snapshot.disk.totalBytes, 0)}
             </div>
           </div>
-          <div
-            style={{
-              height: '4px',
-              borderRadius: '999px',
-              backgroundColor: 'color-mix(in srgb, var(--text-secondary) 16%, transparent)',
-              overflow: 'hidden',
-            }}
-          >
+          <div className="tp-meter">
             <div
+              className="tp-meter__fill"
               style={{
-                height: '100%',
                 width: `${Math.max(3, Math.min(100, snapshot.disk.usagePercent))}%`,
                 backgroundColor: diskColor,
-                borderRadius: '999px',
-                transition: 'width 300ms ease',
               }}
             />
           </div>
         </button>
       </div>
 
-      {/* RUNTIME & UI DIAGNOSTICS BAR */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: '6px',
-          backgroundColor: 'var(--block-fill)',
-          border: '1px solid var(--block-stroke)',
-          borderRadius: 'var(--control-radius, 8px)',
-          padding: '8px 10px',
-        }}
-      >
-        <div>
-          <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-            Terminales PTY
-          </div>
-          <div
-            style={{
-              fontSize: '13px',
-              fontWeight: 700,
-              fontVariantNumeric: 'tabular-nums',
-              marginTop: '1px',
-            }}
-          >
-            {snapshot.runtime.activeTerminals} activas
-          </div>
+      {/* RUNTIME & UI DIAGNOSTICS STRIP */}
+      <div className="tm-diag-strip">
+        <div className="tm-diag-cell">
+          <div className="tm-diag-cell__label">Terminales PTY</div>
+          <div className="tm-diag-cell__val">{snapshot.runtime.activeTerminals} activas</div>
         </div>
-        <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
-          <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-            Agentes AI
-          </div>
-          <div
-            style={{
-              fontSize: '13px',
-              fontWeight: 700,
-              fontVariantNumeric: 'tabular-nums',
-              color: 'var(--accent, #5c8fff)',
-              marginTop: '1px',
-            }}
-          >
+        <div className="tm-diag-cell">
+          <div className="tm-diag-cell__label">Agentes AI</div>
+          <div className="tm-diag-cell__val tm-diag-cell__val--accent">
             {formatBytes(snapshot.memory.appAgentsBytes ?? snapshot.memory.appTerminalsBytes)}
           </div>
         </div>
-        <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
-          <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-            Servidores MCP
-          </div>
-          <div
-            style={{
-              fontSize: '13px',
-              fontWeight: 700,
-              fontVariantNumeric: 'tabular-nums',
-              color: '#c084fc',
-              marginTop: '1px',
-            }}
-          >
+        <div className="tm-diag-cell">
+          <div className="tm-diag-cell__label">Servidores MCP</div>
+          <div className="tm-diag-cell__val tm-diag-cell__val--violet">
             {snapshot.memory.appMcpsBytes ? formatBytes(snapshot.memory.appMcpsBytes) : '0 B'}
           </div>
         </div>
-        <div style={{ borderLeft: '1px solid var(--block-stroke)', paddingLeft: '8px' }}>
-          <div style={{ fontSize: '9px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>
-            Fluidez UI
-          </div>
-          <div
-            style={{
-              fontSize: '13px',
-              fontWeight: 700,
-              fontVariantNumeric: 'tabular-nums',
-              color: 'var(--status-running, #34c759)',
-              marginTop: '1px',
-            }}
-          >
-            {uiFps} FPS
-          </div>
+        <div className="tm-diag-cell">
+          <div className="tm-diag-cell__label">Fluidez UI</div>
+          <div className="tm-diag-cell__val tm-diag-cell__val--success">{uiFps} FPS</div>
         </div>
       </div>
+
+      {/* RUNTIME TRANSPORT & GOVERNOR SUMMARY */}
+      <section aria-label="Arquitectura de transporte" className="ctx-card">
+        <div className="tp-eyebrow">Arquitectura de transporte</div>
+        <div className="ctx-health-grid">
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">Daemons multiplexados</span>
+            <span className="ctx-health-tile-value">{activeMuxDaemons}</span>
+            <span className="ctx-health-tile-sub">{muxSessionsTotal} sesiones mux</span>
+          </div>
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">Pool MCP</span>
+            <span className="ctx-health-tile-value">
+              {pooledStdioServers} servidores · HTTP {mcpHttpRunning ? 'activo' : 'inactivo'}
+            </span>
+            <span className="ctx-health-tile-sub">
+              {mcpPort != null ? `Puerto ${mcpPort} · ${mcpRequestCount} req` : `${mcpRequestCount} req`}
+            </span>
+          </div>
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">Fast Lane</span>
+            <span className="ctx-health-tile-value">{fastLaneSessions} sesiones</span>
+            <span className="ctx-health-tile-sub">
+              {fastLaneEnabled ? 'Habilitado (API / Go)' : 'En espera / inactivo'}
+            </span>
+          </div>
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">Concurrencia pesada</span>
+            <span className="ctx-health-tile-value">
+              {heavyActive}/{heavyLimit}
+            </span>
+            <span className="ctx-health-tile-sub">
+              {heavyQueued > 0 ? `${heavyQueued} en cola` : 'Sin procesos en cola'}
+            </span>
+          </div>
+        </div>
+      </section>
 
       {/* CONTEXT ENGINE SUMMARY SHORTCUT */}
       <button
         type="button"
+        className="tm-nav-row"
         onClick={() => onSelectTab('context')}
-        style={{
-          padding: '8px 10px',
-          borderRadius: 'var(--control-radius, 8px)',
-          border: '1px solid var(--block-stroke)',
-          backgroundColor: 'var(--block-fill)',
-          color: 'var(--text-primary)',
-          fontSize: '11px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '8px',
-          cursor: 'pointer',
-        }}
       >
-        <span style={{ color: 'var(--text-secondary)' }}>
+        <span className="tm-spec-label">
           Motor de contexto:{' '}
-          <strong style={{ color: 'var(--accent, #5c8fff)', fontVariantNumeric: 'tabular-nums' }}>
+          <strong className="tm-hero-sub--accent">
             {contextSummary && contextSummary.requests > 0
               ? `${formatTokenCount(contextSummary.tokensSaved)} tokens ahorrados (${formatPercent(contextSummary.savingsPercent)})`
               : 'Sin actividad aún'}
           </strong>
+          {(contextSummary?.wastedTurn0Tokens ?? 0) > 0 ? (
+            <span className="ctx-overview-turn0">
+              {' '}
+              · Turn-0: ~{formatTokenCount(contextSummary?.wastedTurn0Tokens ?? 0)} redundantes
+            </span>
+          ) : null}
         </span>
-        <span style={{ color: 'var(--accent, #5c8fff)', fontWeight: 500, whiteSpace: 'nowrap' }}>
-          Por funcionalidad →
+        <span className="tm-nav-row__cta">
+          <span>Por funcionalidad</span>
+          <ArrowRightIcon size={12} />
         </span>
       </button>
     </>

@@ -1,7 +1,19 @@
-use crate::persist::{app_state_get, app_state_set_checked, body, notifications, persist, revision_counter};
+use crate::persist::{
+    agents, app_state_get, app_state_set_checked, body, notifications, persist, revision_counter,
+    routines, threads,
+};
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
+
+pub const KITE_APP_USER_MODEL_ID: &str = "dev.kite.code";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedNotificationMeta {
+    pub actor_name: Option<String>,
+    pub thread_title: Option<String>,
+    pub workspace_id: Option<String>,
+}
 
 struct NotificationCenter {
     authorization: String,
@@ -9,10 +21,18 @@ struct NotificationCenter {
     persistence_error: Option<String>,
 }
 
+fn default_authorization() -> &'static str {
+    if cfg!(windows) {
+        "authorized"
+    } else {
+        "notDetermined"
+    }
+}
+
 fn default_preferences() -> Value {
     json!({
-        "schemaVersion": 1,
-        "osNotificationsEnabled": false,
+        "schemaVersion": 2,
+        "osNotificationsEnabled": cfg!(windows),
         "finishSoundEnabled": true,
         "inputRequestsEnabled": true
     })
@@ -26,19 +46,34 @@ fn valid_authorization(value: &str) -> bool {
 }
 
 fn center_from_stored(value: &Value) -> NotificationCenter {
-    let authorization = value
+    let stored_auth = value
         .get("authorization")
         .and_then(|v| v.as_str())
         .filter(|v| valid_authorization(v))
-        .unwrap_or("notDetermined")
-        .to_string();
+        .unwrap_or("notDetermined");
     let stored = value.get("preferences");
+    let stored_schema = stored
+        .and_then(|p| p.get("schemaVersion"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let stored_os_enabled = stored
+        .and_then(|p| p.get("osNotificationsEnabled"))
+        .and_then(|v| v.as_bool());
+
+    let upgrade_legacy_windows = cfg!(windows)
+        && stored_schema < 2
+        && matches!(stored_auth, "notDetermined" | "denied")
+        && stored_os_enabled != Some(true);
+
+    let (authorization, os_notifications_enabled) = if upgrade_legacy_windows {
+        ("authorized".to_string(), true)
+    } else {
+        (stored_auth.to_string(), stored_os_enabled.unwrap_or(false))
+    };
+
     let preferences = json!({
-        "schemaVersion": 1,
-        "osNotificationsEnabled": stored
-            .and_then(|p| p.get("osNotificationsEnabled"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        "schemaVersion": 2,
+        "osNotificationsEnabled": os_notifications_enabled,
         "finishSoundEnabled": stored
             .and_then(|p| p.get("finishSoundEnabled"))
             .and_then(|v| v.as_bool())
@@ -60,12 +95,12 @@ fn load_center() -> NotificationCenter {
         Some(raw) => serde_json::from_str::<Value>(&raw)
             .map(|value| center_from_stored(&value))
             .unwrap_or_else(|_| NotificationCenter {
-                authorization: "notDetermined".into(),
+                authorization: default_authorization().into(),
                 preferences: default_preferences(),
                 persistence_error: None,
             }),
         None => NotificationCenter {
-            authorization: "notDetermined".into(),
+            authorization: default_authorization().into(),
             preferences: default_preferences(),
             persistence_error: None,
         },
@@ -165,6 +200,380 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Emits `"kite://notifications-updated"` to the Tauri frontend.
+/// NEVER call while holding `notifications()`, `center()`, `revision_counter()`,
+/// `threads()`, `agents()`, or `routines()`.
+pub fn emit_notifications_updated() {
+    if let Some(app) = crate::get_app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit("kite://notifications-updated", json!({ "ts": now_ms() }));
+    }
+}
+
+fn non_empty_trimmed(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn is_generic_thread_title(title: &str) -> bool {
+    let lower = title.trim().to_ascii_lowercase();
+    lower.is_empty() || matches!(lower.as_str(), "new thread" | "new chat" | "untitled")
+}
+
+/// Resolves characteristic actor name, thread title, and workspace id from
+/// persisted stores. Acquires and drops `threads()`, `routines()`, and `agents()`
+/// in strictly separate short scopes, never nesting locks and never acquiring
+/// `notifications()`, `revision_counter()`, or `center()`.
+pub fn resolve_notification_context(
+    thread_id: Option<&str>,
+    profile_id: Option<&str>,
+    routine_id: Option<&str>,
+) -> ResolvedNotificationMeta {
+    let tid = non_empty_trimmed(thread_id);
+    let pid = non_empty_trimmed(profile_id);
+    let rid = non_empty_trimmed(routine_id);
+
+    let (thread_title, thread_profile_id, thread_workspace_id) = if let Some(tid) = tid.as_deref() {
+        if let Ok(items) = threads().lock() {
+            if let Some(thread) = items
+                .iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))
+            {
+                let title = thread
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !is_generic_thread_title(s))
+                    .map(str::to_string);
+                let prof = non_empty_trimmed(thread.get("profileId").and_then(Value::as_str));
+                let ws = non_empty_trimmed(thread.get("workspaceId").and_then(Value::as_str));
+                (title, prof, ws)
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let (routine_name, routine_agent_id, routine_workspace_id) = if let Some(rid) = rid.as_deref() {
+        if let Ok(items) = routines().lock() {
+            if let Some(routine) = items
+                .iter()
+                .find(|r| r.get("id").and_then(Value::as_str) == Some(rid))
+            {
+                let name = non_empty_trimmed(routine.get("name").and_then(Value::as_str));
+                let aid = non_empty_trimmed(routine.get("agentId").and_then(Value::as_str));
+                let ws = non_empty_trimmed(routine.get("workspaceId").and_then(Value::as_str));
+                (name, aid, ws)
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        }
+    } else {
+        (None, None, None)
+    };
+
+    let effective_profile_id = pid.or(thread_profile_id).or(routine_agent_id);
+    let workspace_id = thread_workspace_id.or(routine_workspace_id);
+
+    let agent_name = if let Some(aid) = effective_profile_id.as_deref() {
+        agents().lock().ok().and_then(|list| {
+            list.iter()
+                .find(|a| a.id == aid)
+                .and_then(|a| non_empty_trimmed(Some(a.name.as_str())))
+        })
+    } else {
+        None
+    };
+
+    let actor_name = agent_name.or_else(|| routine_name.clone());
+    let resolved_thread_title = if rid.is_some() {
+        routine_name.or(thread_title)
+    } else {
+        thread_title
+    };
+
+    ResolvedNotificationMeta {
+        actor_name,
+        thread_title: resolved_thread_title,
+        workspace_id,
+    }
+}
+
+fn sanitize_and_escape_xml(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if ch.is_ascii_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            continue;
+        }
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+pub(crate) fn build_windows_toast_xml(title: &str, body: &str, silent: bool) -> String {
+    let clean_title = sanitize_and_escape_xml(title.trim());
+    let clean_body = sanitize_and_escape_xml(body.trim());
+    let body_node = if clean_body.is_empty() {
+        String::new()
+    } else {
+        format!("<text>{clean_body}</text>")
+    };
+    let audio_node = if silent {
+        "<audio silent=\"true\"/>"
+    } else {
+        ""
+    };
+    format!(
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{clean_title}</text>{body_node}</binding></visual>{audio_node}</toast>"
+    )
+}
+
+pub(crate) fn windows_toast_tag_hash(raw: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in raw.trim().as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+#[cfg(all(windows, not(test)))]
+fn utf16_reg_sz_bytes(value: &str) -> Vec<u8> {
+    value
+        .encode_utf16()
+        .chain(std::iter::once(0u16))
+        .flat_map(u16::to_le_bytes)
+        .collect()
+}
+
+#[cfg(all(windows, not(test)))]
+fn resolve_windows_toast_icon_uri() -> Option<String> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("icons").join("icon.ico"));
+            candidates.push(dir.join("icon.ico"));
+            candidates.push(dir.join("resources").join("icons").join("icon.ico"));
+            if let Some(parent) = dir.parent() {
+                candidates.push(parent.join("icons").join("icon.ico"));
+                if let Some(grandparent) = parent.parent() {
+                    candidates.push(grandparent.join("icons").join("icon.ico"));
+                }
+            }
+        }
+    }
+    candidates.push(std::path::PathBuf::from("icons/icon.ico"));
+    candidates.push(std::path::PathBuf::from("src-tauri/icons/icon.ico"));
+    for candidate in candidates {
+        if candidate.is_file() {
+            let resolved = candidate.canonicalize().unwrap_or(candidate);
+            let text = resolved.to_string_lossy();
+            return Some(text.strip_prefix(r"\\?\").unwrap_or(text.as_ref()).to_string());
+        }
+    }
+    None
+}
+
+pub fn init_os_notifications() {
+    static OS_NOTIF_INIT: OnceLock<()> = OnceLock::new();
+    OS_NOTIF_INIT.get_or_init(|| {
+        #[cfg(all(windows, not(test)))]
+        {
+            use windows::core::{HSTRING, PCWSTR};
+            use windows::Win32::Foundation::ERROR_SUCCESS;
+            use windows::Win32::System::Registry::{
+                RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
+                REG_OPTION_NON_VOLATILE, REG_SZ,
+            };
+            use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+
+            let subkey = HSTRING::from(format!(
+                "Software\\Classes\\AppUserModelId\\{KITE_APP_USER_MODEL_ID}"
+            ));
+            let mut hkey = HKEY::default();
+            let reg_status = unsafe {
+                RegCreateKeyExW(
+                    HKEY_CURRENT_USER,
+                    &subkey,
+                    None,
+                    PCWSTR::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_WRITE,
+                    None,
+                    &mut hkey,
+                    None,
+                )
+            };
+            if reg_status == ERROR_SUCCESS {
+                let display_name = HSTRING::from("DisplayName");
+                let display_bytes = utf16_reg_sz_bytes("Kite Code");
+                let set_display = unsafe {
+                    RegSetValueExW(hkey, &display_name, None, REG_SZ, Some(&display_bytes))
+                };
+                if set_display != ERROR_SUCCESS {
+                    crate::logger::log_trace(&format!(
+                        "init_os_notifications: failed to write DisplayName registry value: {:?}",
+                        set_display
+                    ));
+                }
+                if let Some(icon_uri) = resolve_windows_toast_icon_uri() {
+                    let icon_name = HSTRING::from("IconUri");
+                    let icon_bytes = utf16_reg_sz_bytes(&icon_uri);
+                    let set_icon = unsafe {
+                        RegSetValueExW(hkey, &icon_name, None, REG_SZ, Some(&icon_bytes))
+                    };
+                    if set_icon != ERROR_SUCCESS {
+                        crate::logger::log_trace(&format!(
+                            "init_os_notifications: failed to write IconUri registry value: {:?}",
+                            set_icon
+                        ));
+                    }
+                }
+                unsafe {
+                    let _ = RegCloseKey(hkey);
+                }
+            } else {
+                crate::logger::log_trace(&format!(
+                    "init_os_notifications: RegCreateKeyExW failed: {:?}",
+                    reg_status
+                ));
+            }
+
+            if let Err(err) = unsafe {
+                SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(KITE_APP_USER_MODEL_ID))
+            } {
+                crate::logger::log_trace(&format!(
+                    "init_os_notifications: SetCurrentProcessExplicitAppUserModelID failed: {err}"
+                ));
+            }
+        }
+    });
+}
+
+pub fn send_os_notification(
+    title: &str,
+    body: &str,
+    tag: Option<&str>,
+    silent: bool,
+) -> Result<(), String> {
+    if title.trim().is_empty() && body.trim().is_empty() {
+        return Err("Notification title and body cannot both be empty.".to_string());
+    }
+
+    #[cfg(all(windows, not(test)))]
+    {
+        use windows::core::HSTRING;
+        use windows::Data::Xml::Dom::XmlDocument;
+        use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
+        use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, S_FALSE, S_OK};
+        use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+
+        init_os_notifications();
+
+        struct ComGuard(bool);
+        impl Drop for ComGuard {
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe {
+                        CoUninitialize();
+                    }
+                }
+            }
+        }
+
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr != S_OK && hr != S_FALSE && hr != RPC_E_CHANGED_MODE {
+            return Err(format!("CoInitializeEx failed: {hr:?}"));
+        }
+        let _com_guard = ComGuard(hr == S_OK || hr == S_FALSE);
+
+        let xml = build_windows_toast_xml(title, body, silent);
+        let doc = XmlDocument::new().map_err(|e| format!("XmlDocument::new failed: {e}"))?;
+        doc.LoadXml(&HSTRING::from(xml))
+            .map_err(|e| format!("XmlDocument::LoadXml failed: {e}"))?;
+        let toast = ToastNotification::CreateToastNotification(&doc)
+            .map_err(|e| format!("CreateToastNotification failed: {e}"))?;
+
+        if let Some(raw_tag) = tag.map(str::trim).filter(|s| !s.is_empty()) {
+            let toast_tag = windows_toast_tag_hash(raw_tag);
+            let _ = toast.SetTag(&HSTRING::from(toast_tag));
+            let _ = toast.SetGroup(&HSTRING::from("kite"));
+        }
+
+        let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
+            KITE_APP_USER_MODEL_ID,
+        ))
+        .map_err(|e| format!("CreateToastNotifierWithId failed: {e}"))?;
+        notifier
+            .Show(&toast)
+            .map_err(|e| format!("ToastNotificationManager Show failed: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(any(not(windows), test))]
+    {
+        let _ = (tag, silent);
+        Ok(())
+    }
+}
+
+pub fn notifications_send_os_direct(request: Option<Value>) -> Value {
+    let req = body(&request);
+    let title = req.and_then(|r| r.get("title")).and_then(Value::as_str).unwrap_or("");
+    let body_text = req.and_then(|r| r.get("body")).and_then(Value::as_str).unwrap_or("");
+    let tag = req.and_then(|r| r.get("tag")).and_then(Value::as_str);
+    let silent = req.and_then(|r| r.get("silent")).and_then(Value::as_bool).unwrap_or(false);
+    let force_test = req
+        .and_then(|r| r.get("forceTest"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let os_enabled = {
+        let current = center().lock().unwrap();
+        current
+            .preferences
+            .get("osNotificationsEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+
+    if !force_test && !os_enabled {
+        return json!({
+            "ok": false,
+            "skipped": true,
+            "reason": "os_notifications_disabled"
+        });
+    }
+
+    match send_os_notification(title, body_text, tag, silent) {
+        Ok(()) => json!({ "ok": true }),
+        Err(err) => json!({ "ok": false, "error": err }),
+    }
+}
+
+#[tauri::command]
+pub async fn notifications_send_os(request: Option<Value>) -> Value {
+    tauri::async_runtime::spawn_blocking(move || notifications_send_os_direct(request))
+        .await
+        .unwrap_or_else(|err| json!({ "ok": false, "error": err.to_string() }))
+}
+
 /// Normalizes the `payload` object carried by `notifications_report_attention`.
 /// Returns `None` when the caller supplied nothing actionable so the command stays
 /// backward-compatible with plain snapshot polling.
@@ -215,19 +624,77 @@ pub fn notifications_report_attention_direct(request: Option<Value>) -> Value {
         .unwrap_or("")
         .trim()
         .to_string();
-    let workspace_id = payload
-        .get("workspaceId")
-        .and_then(|v| v.as_str())
-        .map(|value| value.to_string());
+    let explicit_workspace_id = non_empty_trimmed(payload.get("workspaceId").and_then(|v| v.as_str()));
 
     if title.is_empty() && detail.is_empty() {
         return make_notifications_snapshot();
     }
 
-    let target_id = if session_id.is_empty() {
-        workspace_id.unwrap_or_else(|| "terminal".to_string())
+    let source = payload
+        .get("source")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| matches!(*s, "terminal" | "agentChat" | "codeThread" | "codeTerminal"))
+        .unwrap_or("terminal")
+        .to_string();
+    let profile_id = non_empty_trimmed(payload.get("profileId").and_then(Value::as_str))
+        .or_else(|| non_empty_trimmed(payload.get("agentId").and_then(Value::as_str)));
+    let thread_id = non_empty_trimmed(payload.get("threadId").and_then(Value::as_str));
+    let explicit_actor_name = non_empty_trimmed(payload.get("actorName").and_then(Value::as_str));
+    let explicit_thread_title = non_empty_trimmed(payload.get("threadTitle").and_then(Value::as_str));
+    let explicit_module = payload
+        .get("module")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| matches!(*s, "agent" | "code" | "chat"))
+        .map(str::to_string);
+
+    let resolved = if (profile_id.is_some() || thread_id.is_some())
+        && (explicit_actor_name.is_none()
+            || explicit_thread_title.is_none()
+            || explicit_workspace_id.is_none())
+    {
+        resolve_notification_context(thread_id.as_deref(), profile_id.as_deref(), None)
     } else {
+        ResolvedNotificationMeta::default()
+    };
+
+    let actor_name = explicit_actor_name.or(resolved.actor_name);
+    let thread_title = explicit_thread_title.or(resolved.thread_title);
+    let workspace_id = explicit_workspace_id.or(resolved.workspace_id);
+
+    let module = explicit_module.unwrap_or_else(|| match source.as_str() {
+        "agentChat" => "agent".to_string(),
+        "codeThread" => {
+            if profile_id.is_some() {
+                "agent".to_string()
+            } else {
+                "chat".to_string()
+            }
+        }
+        "terminal" | "codeTerminal" => "code".to_string(),
+        _ => {
+            if profile_id.is_some() {
+                "agent".to_string()
+            } else {
+                "code".to_string()
+            }
+        }
+    });
+
+    let target_id = if matches!(source.as_str(), "agentChat" | "codeThread") {
+        thread_id
+            .clone()
+            .or_else(|| (!session_id.is_empty()).then(|| session_id.clone()))
+            .or_else(|| workspace_id.clone())
+            .unwrap_or_else(|| "terminal".to_string())
+    } else if !session_id.is_empty() {
         session_id
+    } else {
+        thread_id
+            .clone()
+            .or_else(|| workspace_id.clone())
+            .unwrap_or_else(|| "terminal".to_string())
     };
 
     let (record_kind, waiting_for_input) = match kind {
@@ -242,9 +709,13 @@ pub fn notifications_report_attention_direct(request: Option<Value>) -> Value {
     let notice = json!({
         "id": Uuid::new_v4().to_string(),
         "runId": Value::Null,
-        "target": { "source": "terminal", "id": target_id },
-        "profileId": Value::Null,
+        "target": { "source": source, "id": target_id },
+        "profileId": profile_id,
         "routineId": Value::Null,
+        "actorName": actor_name,
+        "threadTitle": thread_title,
+        "workspaceId": workspace_id,
+        "module": module,
         "kind": record_kind,
         "title": title,
         "body": detail,
@@ -264,6 +735,7 @@ pub fn notifications_report_attention_direct(request: Option<Value>) -> Value {
 
     let snapshot = make_notifications_snapshot();
     persist();
+    emit_notifications_updated();
     snapshot
 }
 
@@ -408,6 +880,7 @@ pub(crate) fn upsert_auto_switch_confirmation_notification(
 
     let snapshot = make_notifications_snapshot();
     persist();
+    emit_notifications_updated();
     snapshot
 }
 
@@ -445,6 +918,7 @@ pub(crate) fn resolve_auto_switch_notifications_for_ids(
 
     if changed > 0 {
         persist();
+        emit_notifications_updated();
     }
     changed
 }
@@ -516,6 +990,7 @@ pub fn upsert_model_quota_exhausted_notification(
 
     let snapshot = make_notifications_snapshot();
     persist();
+    emit_notifications_updated();
     Some(snapshot)
 }
 
@@ -531,6 +1006,7 @@ pub fn notifications_mark_read_direct(request: Option<Value>) -> Value {
     };
     let snap = make_notifications_snapshot_inner(&snapshot_items);
     persist();
+    emit_notifications_updated();
     snap
 }
 
@@ -551,6 +1027,7 @@ pub fn notifications_mark_all_read_direct(_request: Option<Value>) -> Value {
     };
     let snap = make_notifications_snapshot_inner(&snapshot_items);
     persist();
+    emit_notifications_updated();
     snap
 }
 
@@ -580,6 +1057,7 @@ pub fn notifications_mark_reviewed_direct(request: Option<Value>) -> Value {
     }
     drop(items);
     persist();
+    emit_notifications_updated();
     make_notifications_snapshot()
 }
 
@@ -592,10 +1070,16 @@ pub async fn notifications_mark_reviewed(request: Option<Value>) -> Value {
 
 pub fn notifications_request_authorization_direct(_request: Option<Value>) -> Value {
     let mut current = center().lock().unwrap();
-    // Studio has no OS notification channel, so a local request cannot grant banners.
-    current.authorization = "denied".into();
+    if cfg!(windows) {
+        current.authorization = "authorized".into();
+        current.preferences["schemaVersion"] = json!(2);
+        current.preferences["osNotificationsEnabled"] = json!(true);
+    } else {
+        current.authorization = "denied".into();
+    }
     current.persistence_error = save_center(&current);
     drop(current);
+    emit_notifications_updated();
     make_notifications_snapshot()
 }
 
@@ -629,13 +1113,14 @@ pub fn notifications_set_preferences_direct(request: Option<Value>) -> Value {
             .unwrap_or(fallback)
     };
     current.preferences = json!({
-        "schemaVersion": 1,
-        "osNotificationsEnabled": bool_field("osNotificationsEnabled", false),
+        "schemaVersion": 2,
+        "osNotificationsEnabled": bool_field("osNotificationsEnabled", cfg!(windows)),
         "finishSoundEnabled": bool_field("finishSoundEnabled", true),
         "inputRequestsEnabled": bool_field("inputRequestsEnabled", true)
     });
     current.persistence_error = save_center(&current);
     drop(current);
+    emit_notifications_updated();
     make_notifications_snapshot()
 }
 
@@ -876,5 +1361,366 @@ mod tests {
             .filter(|r| r["id"] == expected_id)
             .count();
         assert_eq!(count, 1);
+    }
+
+    fn center_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn test_build_windows_toast_xml_escapes_and_handles_silent_and_empty_body() {
+        let xml = build_windows_toast_xml(
+            "  Chip\x00 Worker & <Co>\t\"'  ",
+            "Build\x07 finished\nLine 2\x1b",
+            true,
+        );
+        assert_eq!(
+            xml,
+            "<toast><visual><binding template=\"ToastGeneric\"><text>Chip Worker &amp; &lt;Co&gt;\t&quot;&apos;</text><text>Build finished\nLine 2</text></binding></visual><audio silent=\"true\"/></toast>"
+        );
+
+        let xml_no_body = build_windows_toast_xml("Title only", "   \x00\x01  ", false);
+        assert_eq!(
+            xml_no_body,
+            "<toast><visual><binding template=\"ToastGeneric\"><text>Title only</text></binding></visual></toast>"
+        );
+
+        let tag_a = windows_toast_tag_hash("thread:11111111-2222-3333-4444-555555555555");
+        let tag_b = windows_toast_tag_hash("thread:11111111-2222-3333-4444-555555555555");
+        assert_eq!(tag_a, tag_b);
+        assert!(tag_a.len() <= 16);
+        assert!(tag_a.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn test_resolve_context_and_settle_turn_notification_carries_actor_and_thread_title() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let agent_id = Uuid::new_v4().to_string();
+        let thread_id = Uuid::new_v4().to_string();
+        let generic_thread_id = Uuid::new_v4().to_string();
+        let routine_id = Uuid::new_v4().to_string();
+        let workspace_id = format!("ws-{suffix}");
+        let run_id = Uuid::new_v4().to_string();
+        let routine_run_id = Uuid::new_v4().to_string();
+
+        struct Cleanup {
+            agent_id: String,
+            thread_ids: Vec<String>,
+            routine_id: String,
+            run_ids: Vec<String>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Ok(mut list) = agents().lock() {
+                    list.retain(|a| a.id != self.agent_id);
+                }
+                if let Ok(mut list) = threads().lock() {
+                    list.retain(|t| {
+                        t.get("id")
+                            .and_then(Value::as_str)
+                            .is_none_or(|id| !self.thread_ids.iter().any(|x| x == id))
+                    });
+                }
+                if let Ok(mut list) = routines().lock() {
+                    list.retain(|r| {
+                        r.get("id").and_then(Value::as_str) != Some(self.routine_id.as_str())
+                    });
+                }
+                if let Ok(mut list) = notifications().lock() {
+                    list.retain(|n| {
+                        let rid = n.get("runId").and_then(Value::as_str);
+                        let rtid = n.get("routineId").and_then(Value::as_str);
+                        !rid.is_some_and(|id| self.run_ids.iter().any(|x| x == id))
+                            && rtid != Some(self.routine_id.as_str())
+                    });
+                }
+            }
+        }
+        let _cleanup = Cleanup {
+            agent_id: agent_id.clone(),
+            thread_ids: vec![thread_id.clone(), generic_thread_id.clone()],
+            routine_id: routine_id.clone(),
+            run_ids: vec![run_id.clone(), routine_run_id.clone()],
+        };
+
+        {
+            let mut list = agents().lock().unwrap();
+            list.push(crate::persist::AgentProfile {
+                id: agent_id.clone(),
+                name: "Chip Worker".to_string(),
+                engine: "claude".to_string(),
+                purpose: "Test".to_string(),
+                brief: "Test".to_string(),
+                avatar: None,
+                created_at_unix_ms: 1,
+                pinned: false,
+                order: 99,
+                memory_budget: None,
+                reflection_mode: None,
+                allow_agent_scheduling: None,
+                allow_agent_messaging: None,
+                default_mode: None,
+                default_plan: None,
+                default_model: None,
+                default_provider_options: vec![],
+                place_display_names: vec![],
+                disabled_plugin_ids: vec![],
+            });
+        }
+        {
+            let mut list = threads().lock().unwrap();
+            list.push(json!({
+                "id": thread_id,
+                "title": "Build FPGA Controller",
+                "profileId": agent_id,
+                "workspaceId": workspace_id,
+                "items": []
+            }));
+            list.push(json!({
+                "id": generic_thread_id,
+                "title": "New thread",
+                "profileId": agent_id,
+                "workspaceId": workspace_id,
+                "items": []
+            }));
+        }
+        {
+            let mut list = routines().lock().unwrap();
+            list.push(json!({
+                "id": routine_id,
+                "agentId": agent_id,
+                "name": "Nightly Firmware Audit",
+                "workspaceId": workspace_id,
+            }));
+        }
+
+        let meta = resolve_notification_context(Some(&thread_id), None, None);
+        assert_eq!(meta.actor_name.as_deref(), Some("Chip Worker"));
+        assert_eq!(meta.thread_title.as_deref(), Some("Build FPGA Controller"));
+        assert_eq!(meta.workspace_id.as_deref(), Some(workspace_id.as_str()));
+
+        let generic_meta = resolve_notification_context(Some(&generic_thread_id), None, None);
+        assert_eq!(generic_meta.actor_name.as_deref(), Some("Chip Worker"));
+        assert_eq!(generic_meta.thread_title, None);
+
+        let routine_meta = resolve_notification_context(Some(&generic_thread_id), None, Some(&routine_id));
+        assert_eq!(routine_meta.actor_name.as_deref(), Some("Chip Worker"));
+        assert_eq!(
+            routine_meta.thread_title.as_deref(),
+            Some("Nightly Firmware Audit")
+        );
+
+        crate::chat::runtime::settle_turn_notification(
+            &run_id,
+            &thread_id,
+            Some(&agent_id),
+            true,
+            false,
+        );
+        let snap = make_notifications_snapshot();
+        let rec = snap["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["runId"] == run_id)
+            .expect("settled turn record");
+        assert_eq!(rec["actorName"], "Chip Worker");
+        assert_eq!(rec["threadTitle"], "Build FPGA Controller");
+        assert_eq!(rec["workspaceId"], workspace_id);
+        assert_eq!(rec["module"], "agent");
+        assert_eq!(rec["target"]["source"], "agentChat");
+
+        crate::chat::runtime::settle_routine(
+            &routine_run_id,
+            &thread_id,
+            &routine_id,
+            Some(&agent_id),
+            true,
+            false,
+        );
+        crate::routines::dispatch_output_actions(
+            &agent_id,
+            &routine_id,
+            &json!({
+                "id": routine_id,
+                "name": "Nightly Firmware Audit",
+                "workspaceId": workspace_id,
+                "outputActions": ["notify_desktop"],
+            }),
+            Some(&thread_id),
+            "All checks passed.",
+            false,
+            0,
+        );
+        let snap_after = make_notifications_snapshot();
+        let routine_records: Vec<&Value> = snap_after["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["routineId"] == routine_id && r["target"]["id"] == thread_id)
+            .collect();
+        assert_eq!(
+            routine_records.len(),
+            1,
+            "notify_desktop must deduplicate against settle_routine for the same routineId + target.id"
+        );
+        assert_eq!(routine_records[0]["actorName"], "Chip Worker");
+        assert_eq!(routine_records[0]["threadTitle"], "Nightly Firmware Audit");
+        assert_eq!(routine_records[0]["module"], "agent");
+    }
+
+    #[test]
+    fn test_report_attention_direct_stores_terminal_actor_and_module() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let session_id = format!("term-sess-{suffix}");
+        let ws_id = format!("ws-term-{suffix}");
+
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Ok(mut list) = notifications().lock() {
+                    list.retain(|n| n.pointer("/target/id").and_then(Value::as_str) != Some(&self.0));
+                }
+            }
+        }
+        let _cleanup = Cleanup(session_id.clone());
+
+        let snap = notifications_report_attention_direct(Some(json!({
+            "payload": {
+                "source": "terminal",
+                "kind": "settled",
+                "title": "Orion · Codex finished",
+                "body": "Cargo tests passed.",
+                "actorName": "Orion · Codex",
+                "sessionId": session_id,
+                "workspaceId": ws_id,
+            }
+        })));
+        let rec = snap["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["target"]["id"] == session_id)
+            .expect("terminal attention notification");
+        assert_eq!(rec["target"]["source"], "terminal");
+        assert_eq!(rec["actorName"], "Orion · Codex");
+        assert_eq!(rec["module"], "code");
+        assert_eq!(rec["workspaceId"], ws_id);
+        assert_eq!(rec["kind"]["kind"], "settled");
+        assert_eq!(rec["kind"]["outcome"], "completed");
+    }
+
+    #[test]
+    fn test_windows_v1_to_v2_migration_and_explicit_opt_out_preservation() {
+        let legacy_denied = center_from_stored(&json!({
+            "authorization": "denied",
+            "preferences": {
+                "schemaVersion": 1,
+                "osNotificationsEnabled": false,
+                "finishSoundEnabled": false,
+                "inputRequestsEnabled": true
+            }
+        }));
+        if cfg!(windows) {
+            assert_eq!(legacy_denied.authorization, "authorized");
+            assert_eq!(legacy_denied.preferences["osNotificationsEnabled"], true);
+        } else {
+            assert_eq!(legacy_denied.authorization, "denied");
+            assert_eq!(legacy_denied.preferences["osNotificationsEnabled"], false);
+        }
+        assert_eq!(legacy_denied.preferences["schemaVersion"], 2);
+        assert_eq!(legacy_denied.preferences["finishSoundEnabled"], false);
+        assert_eq!(legacy_denied.preferences["inputRequestsEnabled"], true);
+
+        let legacy_missing_prefs = center_from_stored(&json!({
+            "authorization": "notDetermined"
+        }));
+        if cfg!(windows) {
+            assert_eq!(legacy_missing_prefs.authorization, "authorized");
+            assert_eq!(
+                legacy_missing_prefs.preferences["osNotificationsEnabled"],
+                true
+            );
+        } else {
+            assert_eq!(legacy_missing_prefs.authorization, "notDetermined");
+        }
+        assert_eq!(legacy_missing_prefs.preferences["schemaVersion"], 2);
+
+        let explicit_v2_opt_out = center_from_stored(&json!({
+            "authorization": "authorized",
+            "preferences": {
+                "schemaVersion": 2,
+                "osNotificationsEnabled": false,
+                "finishSoundEnabled": false,
+                "inputRequestsEnabled": false
+            }
+        }));
+        assert_eq!(explicit_v2_opt_out.authorization, "authorized");
+        assert_eq!(explicit_v2_opt_out.preferences["schemaVersion"], 2);
+        assert_eq!(
+            explicit_v2_opt_out.preferences["osNotificationsEnabled"],
+            false
+        );
+        assert_eq!(explicit_v2_opt_out.preferences["finishSoundEnabled"], false);
+        assert_eq!(
+            explicit_v2_opt_out.preferences["inputRequestsEnabled"],
+            false
+        );
+    }
+
+    #[test]
+    fn test_notifications_send_os_direct_respects_enabled_flag_and_force_test() {
+        let _guard = center_test_lock().lock().unwrap();
+        let (prev_auth, prev_prefs) = {
+            let current = center().lock().unwrap();
+            (current.authorization.clone(), current.preferences.clone())
+        };
+        struct RestoreCenter(String, Value);
+        impl Drop for RestoreCenter {
+            fn drop(&mut self) {
+                let mut current = center().lock().unwrap();
+                current.authorization = self.0.clone();
+                current.preferences = self.1.clone();
+                let _ = save_center(&current);
+            }
+        }
+        let _restore = RestoreCenter(prev_auth, prev_prefs);
+
+        notifications_set_preferences_direct(Some(json!({
+            "osNotificationsEnabled": false
+        })));
+        let skipped = notifications_send_os_direct(Some(json!({
+            "title": "Chip Worker",
+            "body": "Finished turn"
+        })));
+        assert_eq!(skipped["ok"], false);
+        assert_eq!(skipped["skipped"], true);
+        assert_eq!(skipped["reason"], "os_notifications_disabled");
+
+        let forced = notifications_send_os_direct(Some(json!({
+            "title": "Chip Worker",
+            "body": "Preview toast",
+            "forceTest": true,
+            "silent": true
+        })));
+        assert_eq!(forced["ok"], true);
+
+        notifications_set_preferences_direct(Some(json!({
+            "osNotificationsEnabled": true
+        })));
+        let invalid = notifications_send_os_direct(Some(json!({
+            "title": "   ",
+            "body": ""
+        })));
+        assert_eq!(invalid["ok"], false);
+        assert!(invalid["error"].as_str().is_some_and(|s| !s.is_empty()));
+
+        let ok = notifications_send_os_direct(Some(json!({
+            "title": "Chip Worker",
+            "body": "Done",
+            "tag": "thread:123"
+        })));
+        assert_eq!(ok["ok"], true);
     }
 }

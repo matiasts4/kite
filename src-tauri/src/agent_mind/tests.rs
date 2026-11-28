@@ -648,3 +648,442 @@ use std::time::{SystemTime, UNIX_EPOCH};
         assert!(meta.values().next().unwrap().pinned);
     }
 
+    #[test]
+    fn parses_skill_frontmatter_controls_and_requirements() {
+        use crate::agent_mind::skills::parse_skill_frontmatter;
+
+        let inline_req_src = "---\nname: \"Pre-Push Gate\"\ndescription: Guard repository pushes\ndisable-model-invocation: true\ncontext: fork\nrequires: { bins: [\"git\", \"node\"], env: [\"GH_TOKEN\"] }\n---\nStep 1: run audit.\n\n---\n\nStep 2: ask user.\n";
+        let (fm1, body1) = parse_skill_frontmatter(inline_req_src);
+        assert_eq!(fm1.name.as_deref(), Some("Pre-Push Gate"));
+        assert_eq!(fm1.description.as_deref(), Some("Guard repository pushes"));
+        assert!(fm1.manual_only);
+        assert_eq!(fm1.context_mode, "fork");
+        assert_eq!(fm1.requires_bins, vec!["git", "node"]);
+        assert_eq!(fm1.requires_env, vec!["GH_TOKEN"]);
+        assert!(body1.contains("Step 1: run audit."));
+        assert!(body1.contains("Step 2: ask user."));
+
+        let block_req_src = "---\nname: Block Skill\nmanual-only: true\nrequires:\n  bins:\n    - cargo\n    - rustc\n  env:\n    - KITE_API_KEY\n    - KITE_ORG\n---\nRun cargo check.\n";
+        let (fm2, body2) = parse_skill_frontmatter(block_req_src);
+        assert_eq!(fm2.name.as_deref(), Some("Block Skill"));
+        assert!(fm2.manual_only);
+        assert_eq!(fm2.context_mode, "inline");
+        assert_eq!(fm2.requires_bins, vec!["cargo", "rustc"]);
+        assert_eq!(fm2.requires_env, vec!["KITE_API_KEY", "KITE_ORG"]);
+        assert_eq!(body2, "Run cargo check.");
+    }
+
+    #[test]
+    fn checks_skill_eligibility_for_path_bins_and_env_vars() {
+        use crate::agent_mind::skills::check_skill_eligibility;
+        use crate::agent_mind::types::SkillFrontmatter;
+
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let env_name = format!("KITE_TEST_ELIG_ENV_{unique}");
+        let missing_bin = format!("kite-nonexistent-bin-{unique}");
+
+        let fm_missing = SkillFrontmatter {
+            requires_bins: vec![missing_bin.clone()],
+            requires_env: vec![env_name.clone()],
+            ..SkillFrontmatter::default()
+        };
+        let (ok, missing) = check_skill_eligibility(&fm_missing);
+        assert!(!ok);
+        assert_eq!(
+            missing,
+            vec![format!("bin:{missing_bin}"), format!("env:{env_name}")]
+        );
+
+        let bin_dir = TempRoot::new();
+        let bin_stem = format!("kite_test_cmd_{unique}");
+        #[cfg(windows)]
+        let bin_file = bin_dir.0.join(format!("{bin_stem}.cmd"));
+        #[cfg(not(windows))]
+        let bin_file = bin_dir.0.join(&bin_stem);
+        fs::write(&bin_file, "@echo off\r\nexit /b 0\r\n").unwrap();
+
+        let prev_path = std::env::var_os("PATH");
+        let joined_path = match prev_path.as_ref() {
+            Some(p) => {
+                let mut dirs: Vec<PathBuf> = std::env::split_paths(p).collect();
+                dirs.insert(0, bin_dir.0.clone());
+                std::env::join_paths(dirs).unwrap()
+            }
+            None => std::env::join_paths([bin_dir.0.clone()]).unwrap(),
+        };
+        struct EnvGuard {
+            prev_path: Option<std::ffi::OsString>,
+            env_name: String,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                std::env::remove_var(&self.env_name);
+                match &self.prev_path {
+                    Some(p) => std::env::set_var("PATH", p),
+                    None => std::env::remove_var("PATH"),
+                }
+            }
+        }
+        let _guard = EnvGuard {
+            prev_path,
+            env_name: env_name.clone(),
+        };
+        std::env::set_var("PATH", &joined_path);
+        std::env::set_var(&env_name, "present");
+
+        let fm_ok = SkillFrontmatter {
+            requires_bins: vec![bin_stem],
+            requires_env: vec![env_name],
+            ..SkillFrontmatter::default()
+        };
+        let (ok_after, missing_after) = check_skill_eligibility(&fm_ok);
+        assert!(ok_after, "expected eligible, got missing: {missing_after:?}");
+        assert!(missing_after.is_empty());
+    }
+
+    #[test]
+    fn discovers_skills_with_workspace_precedence_and_reads_linked_refs_safely() {
+        use crate::agent_mind::skills::{
+            discover_available_skills_at, read_linked_skill_content,
+        };
+
+        let ws = TempRoot::new();
+        let home = TempRoot::new();
+        let outside = TempRoot::new();
+
+        // Workspace .agents/skills + .claude/skills
+        let ws_shared = ws.0.join(".agents").join("skills").join("shared-skill");
+        fs::create_dir_all(&ws_shared).unwrap();
+        fs::write(
+            ws_shared.join("SKILL.md"),
+            "---\nname: Workspace Shared\ndescription: From workspace\ncontext: fork\n---\nWorkspace body.\n",
+        )
+        .unwrap();
+
+        let ws_claude_only = ws.0.join(".claude").join("skills").join("claude-only");
+        fs::create_dir_all(&ws_claude_only).unwrap();
+        fs::write(
+            ws_claude_only.join("SKILL.md"),
+            "---\nname: Claude Only\ndescription: From .claude\n---\nClaude body.\n",
+        )
+        .unwrap();
+
+        // Global roots: same slug `shared-skill` (should be overridden by workspace), plus `global-only` and `kite-dispatch` (excluded)
+        let gl_shared = home.0.join(".claude").join("skills").join("shared-skill");
+        fs::create_dir_all(&gl_shared).unwrap();
+        fs::write(
+            gl_shared.join("SKILL.md"),
+            "---\nname: Global Shared\ndescription: Should lose\n---\nGlobal body.\n",
+        )
+        .unwrap();
+
+        let gl_only = home.0.join(".agents").join("skills").join("global-only");
+        fs::create_dir_all(&gl_only).unwrap();
+        fs::write(
+            gl_only.join("SKILL.md"),
+            "---\nname: Global Only\ndescription: Global desc\ndisable-model-invocation: true\n---\nManual global body.\n",
+        )
+        .unwrap();
+
+        let gl_internal = home.0.join(".claude").join("skills").join("kite-dispatch");
+        fs::create_dir_all(&gl_internal).unwrap();
+        fs::write(
+            gl_internal.join("SKILL.md"),
+            "---\nname: Internal Dispatch\n---\nInternal.\n",
+        )
+        .unwrap();
+
+        let outside_file = outside.0.join("secret.md");
+        fs::write(&outside_file, "---\nname: Secret\n---\nSecret.\n").unwrap();
+
+        let discovered = discover_available_skills_at(Some(&ws.0), &home.0);
+        let ids: Vec<&str> = discovered.iter().filter_map(|s| s["id"].as_str()).collect();
+        assert!(!ids.contains(&"kite-dispatch"), "internal kite-dispatch must be excluded");
+        assert!(ids.contains(&"shared-skill"));
+        assert!(ids.contains(&"claude-only"));
+        assert!(ids.contains(&"global-only"));
+
+        let shared = discovered
+            .iter()
+            .find(|s| s["id"].as_str() == Some("shared-skill"))
+            .unwrap();
+        assert_eq!(shared["scope"].as_str(), Some("workspace"));
+        assert_eq!(shared["refKey"].as_str(), Some("workspace:shared-skill"));
+        assert_eq!(shared["name"].as_str(), Some("Workspace Shared"));
+        assert_eq!(shared["contextMode"].as_str(), Some("fork"));
+        assert_eq!(shared["eligible"].as_bool(), Some(true));
+
+        let global_only = discovered
+            .iter()
+            .find(|s| s["id"].as_str() == Some("global-only"))
+            .unwrap();
+        assert_eq!(global_only["scope"].as_str(), Some("global"));
+        assert_eq!(global_only["refKey"].as_str(), Some("global:global-only"));
+        assert_eq!(global_only["manualOnly"].as_bool(), Some(true));
+
+        let loaded_ws = read_linked_skill_content("workspace:shared-skill", Some(&ws.0), &home.0).unwrap();
+        assert_eq!(loaded_ws.body, "Workspace body.");
+        let loaded_gl = read_linked_skill_content("global:global-only", Some(&ws.0), &home.0).unwrap();
+        assert!(loaded_gl.frontmatter.manual_only);
+
+        // Traversal and outside path checks must fail safely
+        assert!(read_linked_skill_content("workspace:../secret", Some(&ws.0), &home.0).is_err());
+        assert!(read_linked_skill_content("global:../../secret", Some(&ws.0), &home.0).is_err());
+        assert!(read_linked_skill_content(
+            &format!("path:{}/../secret.md", ws.0.display()),
+            Some(&ws.0),
+            &home.0
+        )
+        .is_err());
+        assert!(read_linked_skill_content(
+            &format!("path:{}", outside_file.display()),
+            Some(&ws.0),
+            &home.0
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn compiled_instructions_gate_ineligible_skills_and_separate_manual_only_skills() {
+        use crate::agent_mind::memory::compile_snapshot_instructions_with_context_at;
+
+        let root = TempRoot::new();
+        let ws = TempRoot::new();
+        let home = TempRoot::new();
+        let agent_id = uuid::Uuid::new_v4().to_string();
+
+        let skills_dir = root.0.join(&agent_id).join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        fs::write(
+            skills_dir.join("local-auto.md"),
+            "---\nname: Local Auto\ndescription: Auto local\n---\nLocal auto procedure.\n",
+        )
+        .unwrap();
+        fs::write(
+            skills_dir.join("local-ineligible.md"),
+            "---\nname: Local Ineligible\ndescription: Missing tool\nrequires: { bins: [\"kite-missing-tool-xyz-999\"] }\n---\nSECRET_INELIGIBLE_BODY_MUST_NOT_APPEAR\n",
+        )
+        .unwrap();
+
+        let ws_manual = ws.0.join(".agents").join("skills").join("pre-push-gate");
+        fs::create_dir_all(&ws_manual).unwrap();
+        fs::write(
+            ws_manual.join("SKILL.md"),
+            "---\nname: Pre-Push Gate\ndescription: Run clean-room audit before pushing\ndisable-model-invocation: true\ncontext: fork\n---\nMANUAL_SECRET_BODY_MUST_NOT_AUTO_INJECT\n",
+        )
+        .unwrap();
+
+        let gl_auto = home.0.join(".agents").join("skills").join("global-helper");
+        fs::create_dir_all(&gl_auto).unwrap();
+        fs::write(
+            gl_auto.join("SKILL.md"),
+            "---\nname: Global Helper\ndescription: Helpful global skill\n---\nGlobal helper body.\n",
+        )
+        .unwrap();
+
+        let gl_ineligible = home.0.join(".agents").join("skills").join("env-gated");
+        fs::create_dir_all(&gl_ineligible).unwrap();
+        fs::write(
+            gl_ineligible.join("SKILL.md"),
+            "---\nname: Env Gated\nrequires:\n  env:\n    - KITE_UNSET_ENV_VAR_XYZ_999\n---\nINELIGIBLE_LINKED_BODY\n",
+        )
+        .unwrap();
+
+        let compiled = compile_snapshot_instructions_with_context_at(
+            &root.0,
+            &agent_id,
+            "Specialist role",
+            "",
+            "",
+            &["local-auto".to_string(), "local-ineligible".to_string()],
+            &[
+                "workspace:pre-push-gate".to_string(),
+                "global:global-helper".to_string(),
+                "global:env-gated".to_string(),
+            ],
+            &[ws.0.clone()],
+            &home.0,
+        );
+
+        assert!(compiled.contains("Local auto procedure."));
+        assert!(compiled.contains("Global helper body."));
+        assert!(!compiled.contains("Local Ineligible"));
+        assert!(!compiled.contains("SECRET_INELIGIBLE_BODY_MUST_NOT_APPEAR"));
+        assert!(!compiled.contains("Env Gated"));
+        assert!(!compiled.contains("INELIGIBLE_LINKED_BODY"));
+
+        assert!(compiled.contains("## Manual-Trigger Skills (Explicit User Request Only)"));
+        assert!(compiled.contains("Pre-Push Gate"));
+        assert!(compiled.contains("workspace:pre-push-gate"));
+        assert!(compiled.contains("[context: fork]"));
+        assert!(!compiled.contains("MANUAL_SECRET_BODY_MUST_NOT_AUTO_INJECT"));
+    }
+
+    #[test]
+    fn sqlite_persists_linked_skill_refs_and_service_commands_roundtrip_and_capture_from_chat() {
+        use crate::agent_mind::service::{
+            capture_agent_skill_from_chat, list_discoverable_skills, load_agent_mind,
+            set_agent_linked_skills,
+        };
+        use crate::agent_mind::skills::capture_skill_from_chat_at;
+
+        let root = TempRoot::new();
+        let agent_id = uuid::Uuid::new_v4().to_string();
+        let ws = TempRoot::new();
+        let ws_id = format!("ws-linked-{}", uuid::Uuid::new_v4().simple());
+
+        let ws_skill = ws.0.join(".agents").join("skills").join("ship-check");
+        fs::create_dir_all(&ws_skill).unwrap();
+        fs::write(
+            ws_skill.join("SKILL.md"),
+            "---\nname: Ship Check\ndescription: Verify diffs before ship\n---\nShip check steps.\n",
+        )
+        .unwrap();
+
+        {
+            let mut wss = crate::persist::workspaces().lock().unwrap();
+            wss.push(crate::persist::Workspace {
+                id: ws_id.clone(),
+                display_name: "SkillRepo".into(),
+                created_at_unix_ms: 1_700_000_000_000,
+                last_opened_at_unix_ms: 1_700_000_000_000,
+                pinned: false,
+                available: true,
+            });
+        }
+        {
+            crate::persist::paths()
+                .lock()
+                .unwrap()
+                .insert(ws_id.clone(), ws.0.to_string_lossy().to_string());
+        }
+        {
+            let mut agents = crate::persist::agents().lock().unwrap();
+            agents.push(crate::persist::AgentProfile {
+                id: agent_id.clone(),
+                name: "Linked Skill Agent".into(),
+                engine: "antigravity".into(),
+                purpose: "Test".into(),
+                brief: "Test".into(),
+                avatar: None,
+                created_at_unix_ms: 1_700_000_000_000,
+                pinned: false,
+                order: 99,
+                memory_budget: None,
+                reflection_mode: None,
+                allow_agent_scheduling: None,
+                allow_agent_messaging: None,
+                default_mode: None,
+                default_plan: None,
+                default_model: None,
+                default_provider_options: Vec::new(),
+                place_display_names: vec!["SkillRepo".into()],
+                disabled_plugin_ids: Vec::new(),
+            });
+        }
+        crate::persist::persist();
+
+        struct Cleanup(String, String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Ok(mut agents) = crate::persist::agents().lock() {
+                    agents.retain(|a| a.id != self.0);
+                }
+                if let Ok(mut wss) = crate::persist::workspaces().lock() {
+                    wss.retain(|w| w.id != self.1);
+                }
+                if let Ok(mut paths) = crate::persist::paths().lock() {
+                    paths.remove(&self.1);
+                }
+                crate::persist::persist();
+                let _ = fs::remove_dir_all(crate::agent_mind::get_agent_home_dir(&self.0));
+            }
+        }
+        let _cleanup = Cleanup(agent_id.clone(), ws_id.clone());
+
+        let discovered = list_discoverable_skills(Some(json!({
+            "request": { "workspaceId": ws_id, "agentId": agent_id }
+        })))
+        .unwrap();
+        let disc_list = discovered["skills"].as_array().unwrap();
+        assert!(disc_list
+            .iter()
+            .any(|s| s["refKey"].as_str() == Some("workspace:ship-check")));
+
+        let updated_mind = set_agent_linked_skills(json!({
+            "request": {
+                "agentId": agent_id,
+                "linkedSkillRefs": ["workspace:ship-check", "workspace:ship-check"]
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            updated_mind["linkedSkillRefs"],
+            json!(["workspace:ship-check"])
+        );
+
+        // Verify persist() does NOT clobber linked_skill_refs in SQLite
+        crate::persist::persist();
+        assert_eq!(
+            crate::persist::get_agent_linked_skill_refs(&agent_id),
+            vec!["workspace:ship-check".to_string()]
+        );
+
+        let reloaded = load_agent_mind(json!({ "request": { "agentId": agent_id } })).unwrap();
+        assert_eq!(reloaded["linkedSkillRefs"], json!(["workspace:ship-check"]));
+
+        // Reject path traversal in set_agent_linked_skills
+        assert!(set_agent_linked_skills(json!({
+            "request": {
+                "agentId": agent_id,
+                "linkedSkillRefs": ["workspace:../bad"]
+            }
+        }))
+        .is_err());
+
+        // Capture from chat (both direct helper and service command)
+        let captured_mind = capture_skill_from_chat_at(
+            &root.0,
+            &agent_id,
+            "Release Hygiene",
+            "Verify clean tree and run tests",
+            &[
+                json!({ "role": "user", "text": "Always run git status and cargo test before pushing." }),
+                json!({ "role": "assistant", "text": "1. Run sanitizer\n2. Run cargo test\n3. Ask before push." }),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            captured_mind["capturedSkillId"].as_str(),
+            Some("release-hygiene")
+        );
+        let captured_skill = captured_mind["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"].as_str() == Some("release-hygiene"))
+            .unwrap();
+        assert_eq!(captured_skill["manualOnly"].as_bool(), Some(true));
+
+        let agents_doc = fs::read_to_string(root.0.join(&agent_id).join("AGENTS.md")).unwrap();
+        assert!(agents_doc.contains("## Manual-Trigger Skills (Explicit User Request Only)"));
+        assert!(agents_doc.contains("Release Hygiene"));
+
+        let svc_captured = capture_agent_skill_from_chat(json!({
+            "request": {
+                "agentId": agent_id,
+                "name": "Quick Check",
+                "description": "Quick status check",
+                "messages": [{ "role": "user", "text": "Check git status" }],
+                "manualOnly": false
+            }
+        }))
+        .unwrap();
+        assert!(svc_captured["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"].as_str() == Some("quick-check") && s["manualOnly"].as_bool() == Some(false)));
+    }
+

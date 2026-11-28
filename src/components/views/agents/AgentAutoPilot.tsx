@@ -172,6 +172,13 @@ const MODES: AutoModeDef[] = [
   { id: 'task', label: 'Custom task', detail: 'Type the goal; Auto drives to it.', chip: 'Auto', glyph: TextCursorInputIcon },
 ];
 
+export function formatMmSs(totalSecs: number): string {
+  const safe = Math.max(0, Math.floor(totalSecs));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export function formatThreadTranscript(items?: AutoPilotThreadItem[]): string {
   if (!Array.isArray(items) || items.length === 0) return '';
   const lines = items
@@ -207,6 +214,9 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   const [selectedGates, setSelectedGates] = useState<string[]>([]);
   const [customGate, setCustomGate] = useState<string>('');
   const [announceViaArgos, setAnnounceViaArgos] = useState<boolean>(false);
+  const [turnsCompleted, setTurnsCompleted] = useState<number>(0);
+  const [elapsedSecs, setElapsedSecs] = useState<number>(0);
+  const [lastGateResults, setLastGateResults] = useState<AutoPilotVerificationResult[]>([]);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -220,6 +230,8 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   const transcriptBufferRef = useRef('');
   const threadItemsRef = useRef<AutoPilotThreadItem[]>(threadItems);
   threadItemsRef.current = threadItems;
+  const threadRunningRef = useRef<boolean>(threadRunning);
+  threadRunningRef.current = threadRunning;
   const sawThreadRunningRef = useRef(false);
   const activeWatchRef = useRef<{ loopId: number; mode: AutoPilotMode; taskText: string } | null>(null);
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -283,6 +295,18 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   const currentModeDef = MODES.find((m) => m.id === mode) ?? MODES[0];
   const Glyph = currentModeDef.glyph;
 
+  useEffect(() => {
+    if (!isEngaged) return;
+    const tick = () => {
+      if (startedAtUnixMsRef.current !== null) {
+        setElapsedSecs(Math.max(0, Math.floor((Date.now() - startedAtUnixMsRef.current) / 1000)));
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [isEngaged]);
+
   // Auto focus textarea when custom task opens
   useEffect(() => {
     if (customTaskOpen) {
@@ -342,10 +366,36 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
       activeWatchRef.current = null;
       sawThreadRunningRef.current = false;
       clearAutoTimers();
-      void invokeCommand('cancel_autopilot', { request: { agentId: profile.id } }).catch(() => {});
+      void invokeCommand('cancel_autopilot', { agentId: profile.id }).catch((err) => {
+        console.warn('[AutoPilot] cancel_autopilot failed:', err);
+      });
       dispatch({ type: 'transition', phase: 'off', detail: reason });
     },
     [clearAutoTimers, profile.id, surface]
+  );
+
+  const scheduleMaxWatchTimer = useCallback(
+    (loopId: number, selectedMode: AutoPilotMode, taskText: string) => {
+      if (maxWatchTimerRef.current !== null) {
+        clearTimeout(maxWatchTimerRef.current);
+      }
+      maxWatchTimerRef.current = setTimeout(() => {
+        maxWatchTimerRef.current = null;
+        if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+        if (surface === 'thread' && threadRunningRef.current) {
+          // Never re-trigger mid-turn while the active thread turn is still running.
+          scheduleMaxWatchTimer(loopId, selectedMode, taskText);
+          return;
+        }
+        activeWatchRef.current = null;
+        clearAutoTimers();
+        void captureTranscript().then((nextTranscript) => {
+          if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
+        });
+      }, MAX_WATCH_MS);
+    },
+    [surface, clearAutoTimers, captureTranscript]
   );
 
   // Drive Auto turn loop
@@ -442,6 +492,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
             }));
           }
           if (!mountedRef.current || activeLoopRef.current !== loopId) return;
+          setLastGateResults(results);
           const nextTranscript = await captureTranscript();
           if (!mountedRef.current || activeLoopRef.current !== loopId) return;
           void driveTurnRef.current?.(selectedMode, taskText, nextTranscript, results);
@@ -502,6 +553,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
         if ((decision.action === 'prompt' || decision.action === 'advance') && decision.prompt) {
           transcriptBufferRef.current = '';
           turnsCompletedRef.current += 1;
+          setTurnsCompleted(turnsCompletedRef.current);
           previousPromptsRef.current = [...previousPromptsRef.current, decision.prompt].slice(-5);
           activeWatchRef.current = { loopId, mode: selectedMode, taskText };
           dispatch({
@@ -537,16 +589,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
           }
 
           if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-          maxWatchTimerRef.current = setTimeout(() => {
-            maxWatchTimerRef.current = null;
-            if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-            activeWatchRef.current = null;
-            clearAutoTimers();
-            void captureTranscript().then((nextTranscript) => {
-              if (!mountedRef.current || activeLoopRef.current !== loopId) return;
-              void driveTurnRef.current?.(selectedMode, taskText, nextTranscript);
-            });
-          }, MAX_WATCH_MS);
+          scheduleMaxWatchTimer(loopId, selectedMode, taskText);
         } else if (decision.action === 'advance') {
           waitTimerRef.current = setTimeout(() => {
             waitTimerRef.current = null;
@@ -583,6 +626,7 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
       customGate,
       announceViaArgos,
       clearAutoTimers,
+      scheduleMaxWatchTimer,
       captureTranscript,
       onSubmitThreadPrompt,
       emitArgosAnnouncement,
@@ -705,6 +749,9 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
 
   const resetLoopCounters = () => {
     turnsCompletedRef.current = 0;
+    setTurnsCompleted(0);
+    setElapsedSecs(0);
+    setLastGateResults([]);
     startedAtUnixMsRef.current = Date.now();
     previousPromptsRef.current = [];
     objectiveRef.current = null;
@@ -796,6 +843,27 @@ export const AgentAutoPilot: React.FC<AgentAutoPilotProps> = ({
   return (
     <div className="agent-auto" data-state={phase} data-surface={surface}>
       {triggerElement}
+
+      {isEngaged ? (
+        <span className="agent-auto__telemetry" aria-label="AutoPilot live telemetry">
+          Turn {turnsCompleted}/{maxTurns} · {formatMmSs(elapsedSecs)}
+        </span>
+      ) : null}
+
+      {lastGateResults.length > 0 ? (
+        <span className="agent-auto__gate-chips" aria-label="Verification gate results">
+          {lastGateResults.map((gate, idx) => (
+            <span
+              key={`${gate.command}-${idx}`}
+              className="agent-auto__gate-chip"
+              data-passed={gate.passed ? 'true' : 'false'}
+              title={gate.output || gate.command}
+            >
+              {gate.passed ? '✓' : '✗'} {gate.command}
+            </span>
+          ))}
+        </span>
+      ) : null}
 
       {menuOpen ? (
         <div className="agent-auto__popover" ref={popoverRef} role="dialog" aria-label="Auto">

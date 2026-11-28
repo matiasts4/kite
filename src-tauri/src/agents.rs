@@ -15,6 +15,7 @@ pub const CANONICAL_TOOL_FAMILIES: &[&str] = &[
     "tasks",
     "ctx",
     "diff",
+    "browser",
     "filesystem_write",
     "shell",
 ];
@@ -22,8 +23,10 @@ pub const CANONICAL_TOOL_FAMILIES: &[&str] = &[
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgePackConfig {
+    #[serde(default)]
     pub id: String,
     pub name: String,
+    #[serde(default, alias = "root")]
     pub root_path: String,
     #[serde(default)]
     pub globs: Vec<String>,
@@ -125,6 +128,20 @@ pub fn save_agent_autonomy_config(agent_id: &str, cfg: &AgentAutonomyConfig) -> 
     save_agent_autonomy_config_to_conn(&conn, agent_id, cfg)
 }
 
+pub fn set_agent_tool_policy_allow(agent_id: &str, family: &str) -> Result<(), String> {
+    let aid = agent_id.trim();
+    if aid.is_empty() {
+        return Err("agent_id is required".to_string());
+    }
+    let fam = family.trim().to_ascii_lowercase();
+    if !CANONICAL_TOOL_FAMILIES.contains(&fam.as_str()) {
+        return Err(format!("Unsupported tool family '{family}'."));
+    }
+    let mut cfg = load_agent_autonomy_config(aid);
+    cfg.tool_policies.insert(fam, "allow".to_string());
+    save_agent_autonomy_config(aid, &cfg)
+}
+
 fn sanitize_autonomy_config_patch(req: &Value, cfg: &mut AgentAutonomyConfig) {
     if let Some(policies_obj) = req.get("toolPolicies").and_then(Value::as_object) {
         let mut next = BTreeMap::new();
@@ -158,8 +175,17 @@ fn sanitize_autonomy_config_patch(req: &Value, cfg: &mut AgentAutonomyConfig) {
     }
     if let Some(packs) = req.get("knowledgePacks").and_then(Value::as_array) {
         let mut parsed_packs = Vec::new();
-        for item in packs {
-            if let Ok(p) = serde_json::from_value::<KnowledgePackConfig>(item.clone()) {
+        for (idx, item) in packs.iter().enumerate() {
+            if let Ok(mut p) = serde_json::from_value::<KnowledgePackConfig>(item.clone()) {
+                if p.id.trim().is_empty() {
+                    let slug: String = p
+                        .name
+                        .to_ascii_lowercase()
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                        .collect();
+                    p.id = format!("kp-{}-{}", slug.trim_matches('-'), idx + 1);
+                }
                 parsed_packs.push(p);
             }
         }
@@ -167,14 +193,77 @@ fn sanitize_autonomy_config_patch(req: &Value, cfg: &mut AgentAutonomyConfig) {
     }
 }
 
+fn sync_autonomy_knowledge_packs_to_mind(
+    mind_root: &Path,
+    agent_id: &str,
+    cfg: &AgentAutonomyConfig,
+    fallback_workspace: Option<&Path>,
+) {
+    let mut index = crate::agent_mind::knowledge::load_knowledge_index_at(mind_root, agent_id);
+    let created_map: BTreeMap<String, i64> = index
+        .packs
+        .iter()
+        .map(|p| (p.id.clone(), p.created_at_unix_ms))
+        .collect();
+    let now = now_unix_ms();
+    index.packs = cfg
+        .knowledge_packs
+        .iter()
+        .map(|p| crate::agent_mind::knowledge::KnowledgePackDef {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            root: p.root_path.clone(),
+            globs: p.globs.clone(),
+            enabled: p.enabled,
+            created_at_unix_ms: created_map.get(&p.id).copied().unwrap_or(now),
+        })
+        .collect();
+    let _ = crate::agent_mind::knowledge::save_knowledge_index_at(mind_root, agent_id, &index);
+    let roots = resolve_agent_authorized_roots(Some(agent_id), fallback_workspace);
+    let can_reindex = index.packs.iter().all(|p| {
+        !p.enabled
+            || (!p.root.trim().is_empty()
+                && validate_path_within_authorized_roots(Path::new(&p.root), &roots).is_ok()
+                && Path::new(&p.root).exists())
+    });
+    if can_reindex && !index.packs.is_empty() {
+        let _ = crate::agent_mind::knowledge::reindex_knowledge_packs_at(
+            mind_root,
+            agent_id,
+            &roots,
+        );
+    }
+}
+
 fn merge_autonomy_into_json(mut val: Value, agent_id: &str) -> Value {
-    let cfg = load_agent_autonomy_config(agent_id);
+    let mut cfg = load_agent_autonomy_config(agent_id);
+    if cfg.knowledge_packs.is_empty() {
+        let idx = crate::agent_mind::knowledge::load_knowledge_index_at(
+            &crate::agent_mind::agents_root(),
+            agent_id,
+        );
+        if !idx.packs.is_empty() {
+            cfg.knowledge_packs = idx
+                .packs
+                .into_iter()
+                .map(|p| KnowledgePackConfig {
+                    id: p.id,
+                    name: p.name,
+                    root_path: p.root,
+                    globs: p.globs,
+                    enabled: p.enabled,
+                })
+                .collect();
+        }
+    }
+    let linked_skill_refs = crate::persist::get_agent_linked_skill_refs(agent_id);
     if let Some(obj) = val.as_object_mut() {
         obj.insert("toolPolicies".to_string(), json!(cfg.tool_policies));
         obj.insert("maxTurnsPerRun".to_string(), json!(cfg.max_turns_per_run));
         obj.insert("maxDurationSecs".to_string(), json!(cfg.max_duration_secs));
         obj.insert("failoverEngines".to_string(), json!(cfg.failover_engines));
         obj.insert("knowledgePacks".to_string(), json!(cfg.knowledge_packs));
+        obj.insert("linkedSkillRefs".to_string(), json!(linked_skill_refs));
     }
     val
 }
@@ -517,12 +606,62 @@ fn plain_text(value: &str, limit: usize) -> String {
         .to_string()
 }
 
+fn parse_optional_bool(val: &Value) -> Option<bool> {
+    if let Some(b) = val.as_bool() {
+        Some(b)
+    } else if let Some(s) = val.as_str() {
+        Some(s == "true" || s == "1")
+    } else {
+        None
+    }
+}
+
+fn parse_string_list(req: Option<&Value>, keys: &[&str]) -> Option<Vec<String>> {
+    let r = req?;
+    for key in keys {
+        if let Some(arr) = r.get(*key).and_then(Value::as_array) {
+            let mut out = Vec::new();
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() && !out.iter().any(|e| e == trimmed) {
+                        out.push(trimmed.to_string());
+                    }
+                }
+            }
+            return Some(out);
+        }
+    }
+    None
+}
+
+fn filter_valid_linked_skill_refs(refs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in refs {
+        if let Ok(valid) = crate::agent_mind::skills::validate_linked_skill_ref(raw) {
+            if !out.iter().any(|e| e == &valid) {
+                out.push(valid);
+            }
+        }
+    }
+    out
+}
+
 #[derive(Default)]
 struct CreateAgentOptions {
     avatar: Option<String>,
+    memory_budget: Option<i64>,
+    reflection_mode: Option<String>,
+    allow_agent_scheduling: Option<bool>,
+    allow_agent_messaging: Option<bool>,
     default_model: Option<String>,
     default_mode: Option<String>,
+    default_plan: Option<bool>,
     default_provider_options: Vec<Value>,
+    place_display_names: Vec<String>,
+    disabled_plugin_ids: Vec<String>,
+    linked_skill_refs: Vec<String>,
+    autonomy_patch: Option<Value>,
 }
 
 fn parse_create_options(req: Option<&Value>) -> CreateAgentOptions {
@@ -538,6 +677,19 @@ fn parse_create_options(req: Option<&Value>) -> CreateAgentOptions {
                 Some(v.to_string())
             }
         });
+    let memory_budget = req.and_then(|r| r.get("memoryBudget")).and_then(Value::as_i64);
+    let reflection_mode = req
+        .and_then(|r| r.get("reflectionMode"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let allow_agent_scheduling = req
+        .and_then(|r| r.get("allowAgentScheduling"))
+        .and_then(Value::as_bool);
+    let allow_agent_messaging = req
+        .and_then(|r| r.get("allowAgentMessaging"))
+        .and_then(Value::as_bool);
     let default_model = req
         .and_then(|r| r.get("defaultModel"))
         .and_then(|v| v.as_str())
@@ -550,6 +702,9 @@ fn parse_create_options(req: Option<&Value>) -> CreateAgentOptions {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let default_plan = req
+        .and_then(|r| r.get("defaultPlan"))
+        .and_then(parse_optional_bool);
     let mut default_provider_options = req
         .and_then(|r| r.get("defaultProviderOptions"))
         .and_then(|v| v.as_array())
@@ -568,11 +723,30 @@ fn parse_create_options(req: Option<&Value>) -> CreateAgentOptions {
             default_provider_options.push(json!({ "id": "effort", "value": effort }));
         }
     }
+    let place_display_names = parse_string_list(req, &["placeDisplayNames", "place_display_names"])
+        .unwrap_or_default();
+    let disabled_plugin_ids = parse_string_list(
+        req,
+        &["disabledPluginIds", "disabledPluginIDs", "disabled_plugin_ids"],
+    )
+    .unwrap_or_default();
+    let linked_skill_refs = filter_valid_linked_skill_refs(
+        &parse_string_list(req, &["linkedSkillRefs", "linked_skill_refs"]).unwrap_or_default(),
+    );
     CreateAgentOptions {
         avatar,
+        memory_budget,
+        reflection_mode,
+        allow_agent_scheduling,
+        allow_agent_messaging,
         default_model,
         default_mode,
+        default_plan,
         default_provider_options,
+        place_display_names,
+        disabled_plugin_ids,
+        linked_skill_refs,
+        autonomy_patch: req.cloned(),
     }
 }
 
@@ -595,6 +769,11 @@ fn push_agent_with_options(
     let safe_engine = teammate_engine(Some(engine));
     let safe_purpose = plain_text(purpose, 4000);
     let safe_brief = safe_purpose.clone();
+    let default_plan = if safe_engine == "claude-code" {
+        options.default_plan
+    } else {
+        options.default_plan.map(|_| false)
+    };
     let profile = {
         let mut state = agents().lock().unwrap();
         let next_order = state.len() as i32;
@@ -608,23 +787,45 @@ fn push_agent_with_options(
             created_at_unix_ms: now,
             pinned: false,
             order: next_order,
-            memory_budget: None,
-            reflection_mode: None,
-            allow_agent_scheduling: None,
-            allow_agent_messaging: None,
+            memory_budget: options.memory_budget,
+            reflection_mode: options.reflection_mode.clone(),
+            allow_agent_scheduling: options.allow_agent_scheduling,
+            allow_agent_messaging: options.allow_agent_messaging,
             default_mode: options.default_mode.clone(),
-            default_plan: None,
+            default_plan,
             default_model: options.default_model.clone(),
             default_provider_options: options.default_provider_options.clone(),
-            place_display_names: vec![],
-            disabled_plugin_ids: vec![],
+            place_display_names: options.place_display_names.clone(),
+            disabled_plugin_ids: options.disabled_plugin_ids.clone(),
         };
         state.push(p.clone());
         p
     };
     persist();
-    let _ = crate::agent_mind::sync_agent_instructions(&crate::agent_mind::agents_root(), &agent_id);
-    serde_json::to_value(&profile).unwrap_or_else(|_| json!({
+
+    if !options.linked_skill_refs.is_empty() {
+        let _ = crate::persist::set_agent_linked_skill_refs(&agent_id, &options.linked_skill_refs);
+    }
+
+    let mind_root = crate::agent_mind::agents_root();
+    if let Some(ref patch) = options.autonomy_patch {
+        let has_autonomy_fields = patch.get("toolPolicies").is_some()
+            || patch.get("maxTurnsPerRun").is_some()
+            || patch.get("maxDurationSecs").is_some()
+            || patch.get("failoverEngines").is_some()
+            || patch.get("knowledgePacks").is_some();
+        if has_autonomy_fields {
+            let mut cfg = AgentAutonomyConfig::default();
+            sanitize_autonomy_config_patch(patch, &mut cfg);
+            let _ = save_agent_autonomy_config(&agent_id, &cfg);
+            if patch.get("knowledgePacks").is_some() {
+                sync_autonomy_knowledge_packs_to_mind(&mind_root, &agent_id, &cfg, None);
+            }
+        }
+    }
+
+    let _ = crate::agent_mind::sync_agent_instructions(&mind_root, &agent_id);
+    let base = serde_json::to_value(&profile).unwrap_or_else(|_| json!({
         "id": agent_id,
         "name": safe_name,
         "engine": safe_engine,
@@ -637,9 +838,10 @@ fn push_agent_with_options(
         "defaultMode": options.default_mode,
         "defaultModel": options.default_model,
         "defaultProviderOptions": options.default_provider_options,
-        "placeDisplayNames": [],
-        "disabledPluginIds": []
-    }))
+        "placeDisplayNames": options.place_display_names,
+        "disabledPluginIds": options.disabled_plugin_ids,
+    }));
+    merge_autonomy_into_json(base, &agent_id)
 }
 
 #[tauri::command]
@@ -701,10 +903,6 @@ pub fn update_agent_profile(request: Option<Value>) -> Value {
             let eng_clean = teammate_engine(Some(eng));
             if agent.engine != eng_clean {
                 agent.engine = eng_clean.clone();
-                // Sanitization rule for engine transition from AgentSettingsPane
-                if eng_clean == "codex" && agent.default_mode.as_deref() == Some("fullAccess") {
-                    agent.default_mode = Some("acceptEdits".to_string());
-                }
                 if eng_clean != "claude-code" {
                     agent.default_plan = Some(false);
                 }
@@ -728,11 +926,7 @@ pub fn update_agent_profile(request: Option<Value>) -> Value {
             agent.allow_agent_messaging = Some(msg);
         }
         if default_mode.is_some() {
-            if agent.engine == "codex" && default_mode.as_deref() == Some("fullAccess") {
-                agent.default_mode = Some("acceptEdits".to_string());
-            } else {
-                agent.default_mode = default_mode;
-            }
+            agent.default_mode = default_mode;
         }
         if default_plan.is_some() {
             if agent.engine == "claude-code" {
@@ -756,13 +950,21 @@ pub fn update_agent_profile(request: Option<Value>) -> Value {
 
         let cloned = agent.clone();
         drop(items);
+        let mind_root = crate::agent_mind::agents_root();
         if let Some(req_val) = req {
+            if let Some(raw_refs) = parse_string_list(Some(req_val), &["linkedSkillRefs", "linked_skill_refs"]) {
+                let clean_refs = filter_valid_linked_skill_refs(&raw_refs);
+                let _ = crate::persist::set_agent_linked_skill_refs(agent_id, &clean_refs);
+            }
             let mut cfg = load_agent_autonomy_config(agent_id);
             sanitize_autonomy_config_patch(req_val, &mut cfg);
             let _ = save_agent_autonomy_config(agent_id, &cfg);
+            if req_val.get("knowledgePacks").is_some() {
+                sync_autonomy_knowledge_packs_to_mind(&mind_root, agent_id, &cfg, None);
+            }
         }
         persist();
-        let _ = crate::agent_mind::sync_agent_instructions(&crate::agent_mind::agents_root(), agent_id);
+        let _ = crate::agent_mind::sync_agent_instructions(&mind_root, agent_id);
         let base = serde_json::to_value(&cloned).unwrap_or_else(|_| agent_profile_json(agent_id));
         return merge_autonomy_into_json(base, agent_id);
     }
@@ -1463,6 +1665,234 @@ pub fn list_agent_audit_log(request: Option<Value>) -> Value {
     json!({ "entries": entries })
 }
 
+fn compute_readiness_pillars(
+    mind_root: &Path,
+    agent_id: &str,
+    agent_opt: Option<&AgentProfile>,
+    role: &str,
+    memory: &str,
+    skills: &[Value],
+    cfg: &AgentAutonomyConfig,
+) -> (u64, Vec<Value>) {
+    let lower_role = role.to_ascii_lowercase();
+    let lower_mem = memory.to_ascii_lowercase();
+    let combined = format!("{lower_role}\n{lower_mem}");
+
+    // 1. job_brief (max 15)
+    let brief_len = role.trim().chars().count();
+    let has_brief_structure = brief_len >= 160
+        || lower_role.contains("## job")
+        || lower_role.contains("## role")
+        || lower_role.contains("## deliverable")
+        || lower_role.contains("## execution standards")
+        || lower_role.contains("job:")
+        || lower_role.contains("deliverable:");
+    let job_score = if brief_len >= 40 && has_brief_structure {
+        15
+    } else if brief_len >= 40 {
+        8
+    } else if brief_len >= 15 {
+        4
+    } else {
+        0
+    };
+
+    // 2. never_list (max 15)
+    let never_cues = [
+        "never ",
+        "never-",
+        "never:",
+        "do not ",
+        "don't ",
+        "must not ",
+        "forbid",
+        "prohibit",
+        "## never-list",
+        "## never list",
+    ];
+    let never_hits = never_cues.iter().filter(|c| combined.contains(*c)).count();
+    let has_never_section =
+        lower_role.contains("never-list") || lower_role.contains("never list");
+    let never_score = if has_never_section || never_hits >= 2 {
+        15
+    } else if never_hits >= 1 {
+        8
+    } else {
+        0
+    };
+
+    // 3. places_sources (max 10)
+    let places_count = agent_opt.map(|a| a.place_display_names.len()).unwrap_or(0);
+    let has_sources_section =
+        lower_role.contains("## sources") || lower_role.contains("sources:");
+    let places_score = if places_count >= 1 {
+        10
+    } else if has_sources_section {
+        4
+    } else {
+        0
+    };
+
+    // 4. skills (max 15)
+    let active_local_skills = skills
+        .iter()
+        .filter(|s| {
+            s.get("enabled").and_then(Value::as_bool).unwrap_or(true)
+                && s.get("eligible").and_then(Value::as_bool).unwrap_or(true)
+        })
+        .count();
+    let linked_refs = crate::persist::get_agent_linked_skill_refs(agent_id);
+    let total_skills = active_local_skills + linked_refs.len();
+    let skills_score = if total_skills >= 2 || !linked_refs.is_empty() && total_skills >= 1 {
+        15
+    } else if total_skills >= 1 {
+        8
+    } else {
+        0
+    };
+
+    // 5. knowledge_packs (max 15)
+    let kp_index = crate::agent_mind::knowledge::load_knowledge_index_at(mind_root, agent_id);
+    let enabled_packs = kp_index
+        .packs
+        .iter()
+        .filter(|p| p.enabled)
+        .count()
+        .max(cfg.knowledge_packs.iter().filter(|p| p.enabled).count());
+    let indexed_chunks = kp_index.chunks.len();
+    let has_pack_globs = kp_index.packs.iter().any(|p| p.enabled && !p.globs.is_empty())
+        || cfg
+            .knowledge_packs
+            .iter()
+            .any(|p| p.enabled && !p.globs.is_empty());
+    let kp_score = if enabled_packs > 0 && indexed_chunks > 0 {
+        15
+    } else if enabled_packs > 0 && has_pack_globs {
+        11
+    } else if enabled_packs > 0 {
+        8
+    } else {
+        0
+    };
+
+    // 6. tool_policy_posture (max 10)
+    let has_shell_policy = cfg.tool_policies.contains_key("shell");
+    let has_write_policy = cfg.tool_policies.contains_key("filesystem_write");
+    let policy_score = if cfg.tool_policies.len() >= 3 && has_shell_policy && has_write_policy {
+        10
+    } else if has_shell_policy || has_write_policy || !cfg.tool_policies.is_empty() {
+        5
+    } else {
+        0
+    };
+
+    // 7. first_task (max 10)
+    let has_first_task = lower_role.contains("## first task")
+        || lower_role.contains("first task:")
+        || lower_role.contains("first_task")
+        || lower_role.contains("kickoff");
+    let has_deliverable = lower_role.contains("## deliverable")
+        || lower_role.contains("deliverable:")
+        || lower_role.contains("checklist");
+    let first_task_score = if has_first_task {
+        10
+    } else if has_deliverable {
+        5
+    } else {
+        0
+    };
+
+    // 8. autonomy_guardrails (max 10)
+    let has_turns = cfg.max_turns_per_run.is_some();
+    let has_dur = cfg.max_duration_secs.is_some();
+    let has_refl_or_sched = agent_opt
+        .and_then(|a| a.reflection_mode.as_deref())
+        .is_some_and(|m| !m.trim().is_empty())
+        || !cfg.failover_engines.is_empty()
+        || agent_opt
+            .and_then(|a| a.allow_agent_scheduling)
+            .is_some();
+    let guardrails_score = (if has_turns { 4 } else { 0 })
+        + (if has_dur { 3 } else { 0 })
+        + (if has_refl_or_sched { 3 } else { 0 });
+
+    let pillars = vec![
+        json!({
+            "id": "job_brief",
+            "label": "Job Brief",
+            "score": job_score,
+            "maxScore": 15,
+            "passed": job_score >= 8,
+            "hint": "Define clear role, deliverable, and standards (>= 40 chars)."
+        }),
+        json!({
+            "id": "never_list",
+            "label": "Never-List",
+            "score": never_score,
+            "maxScore": 15,
+            "passed": never_score >= 8,
+            "hint": "Specify explicit boundaries and prohibited actions."
+        }),
+        json!({
+            "id": "places_sources",
+            "label": "Places & Sources",
+            "score": places_score,
+            "maxScore": 10,
+            "passed": places_score >= 8,
+            "hint": "Authorize at least one workspace Place or document Sources."
+        }),
+        json!({
+            "id": "skills",
+            "label": "Active Skills",
+            "score": skills_score,
+            "maxScore": 15,
+            "passed": skills_score >= 8,
+            "hint": "Link workspace/global skills or create local agent skills."
+        }),
+        json!({
+            "id": "knowledge_packs",
+            "label": "Knowledge Packs",
+            "score": kp_score,
+            "maxScore": 15,
+            "passed": kp_score >= 8,
+            "hint": "Configure and index at least one scoped Knowledge Pack."
+        }),
+        json!({
+            "id": "tool_policy_posture",
+            "label": "Tool Policy Posture",
+            "score": policy_score,
+            "maxScore": 10,
+            "passed": policy_score >= 5,
+            "hint": "Configure explicit policies for shell, filesystem_write, and Kite tools."
+        }),
+        json!({
+            "id": "first_task",
+            "label": "First Task",
+            "score": first_task_score,
+            "maxScore": 10,
+            "passed": first_task_score >= 5,
+            "hint": "Include a concrete First Task / kickoff checklist in the contract."
+        }),
+        json!({
+            "id": "autonomy_guardrails",
+            "label": "Autonomy Guardrails",
+            "score": guardrails_score,
+            "maxScore": 10,
+            "passed": guardrails_score >= 7,
+            "hint": "Set maxTurnsPerRun, maxDurationSecs, and reflection mode."
+        }),
+    ];
+    let total: u64 = job_score
+        + never_score
+        + places_score
+        + skills_score
+        + kp_score
+        + policy_score
+        + first_task_score
+        + guardrails_score;
+    (total.min(100), pillars)
+}
+
 pub fn eval_agent_prompts_at(
     mind_root: &Path,
     agent_id: &str,
@@ -1576,6 +2006,15 @@ pub fn eval_agent_prompts_at(
         .iter()
         .filter(|r| r.get("passed").and_then(Value::as_bool) == Some(true))
         .count();
+    let (readiness_score, readiness_pillars) = compute_readiness_pillars(
+        mind_root,
+        agent_id,
+        agent_opt.as_ref(),
+        role,
+        &memory,
+        &skills,
+        &cfg,
+    );
 
     json!({
         "agentId": agent_id,
@@ -1584,6 +2023,8 @@ pub fn eval_agent_prompts_at(
         "totalCases": results.len(),
         "passedCases": passed_cases,
         "blockedMutations": total_blocked_mutations,
+        "readinessScore": readiness_score,
+        "readinessPillars": readiness_pillars,
         "results": results,
     })
 }
@@ -1783,6 +2224,7 @@ pub fn export_agent_bundle_at(mind_root: &Path, agent_id: &str) -> Result<Value,
         })
         .unwrap_or_default();
 
+    let linked_skill_refs = crate::persist::get_agent_linked_skill_refs(agent_id);
     Ok(json!({
         "schema": "kite-agent/v1",
         "bundleVersion": 1,
@@ -1799,7 +2241,10 @@ pub fn export_agent_bundle_at(mind_root: &Path, agent_id: &str) -> Result<Value,
             "defaultMode": profile.default_mode,
             "defaultPlan": profile.default_plan,
             "defaultModel": profile.default_model,
+            "defaultProviderOptions": profile.default_provider_options,
             "placeDisplayNames": safe_places,
+            "disabledPluginIds": profile.disabled_plugin_ids,
+            "linkedSkillRefs": linked_skill_refs,
             "toolPolicies": autonomy.tool_policies,
             "maxTurnsPerRun": autonomy.max_turns_per_run,
             "maxDurationSecs": autonomy.max_duration_secs,
@@ -1850,12 +2295,27 @@ pub fn import_agent_bundle(request: Option<Value>) -> Result<Value, String> {
             .and_then(Value::as_str)
             .unwrap_or(""),
     );
+    let linked_refs = parse_string_list(
+        Some(&Value::Object(agent_obj.clone())),
+        &["linkedSkillRefs", "linked_skill_refs"],
+    )
+    .or_else(|| parse_string_list(Some(bundle), &["linkedSkillRefs", "linked_skill_refs"]))
+    .unwrap_or_default();
     let created = create_agent(Some(json!({
         "name": raw_name,
         "engine": engine,
         "brief": brief,
         "defaultMode": agent_obj.get("defaultMode").cloned().unwrap_or(Value::Null),
         "defaultModel": agent_obj.get("defaultModel").cloned().unwrap_or(Value::Null),
+        "defaultPlan": agent_obj.get("defaultPlan").cloned().unwrap_or(Value::Null),
+        "defaultProviderOptions": agent_obj.get("defaultProviderOptions").cloned().unwrap_or(json!([])),
+        "memoryBudget": agent_obj.get("memoryBudget").cloned().unwrap_or(Value::Null),
+        "reflectionMode": agent_obj.get("reflectionMode").cloned().unwrap_or(Value::Null),
+        "allowAgentScheduling": agent_obj.get("allowAgentScheduling").cloned().unwrap_or(Value::Null),
+        "allowAgentMessaging": agent_obj.get("allowAgentMessaging").cloned().unwrap_or(Value::Null),
+        "placeDisplayNames": agent_obj.get("placeDisplayNames").cloned().unwrap_or(json!([])),
+        "disabledPluginIds": agent_obj.get("disabledPluginIds").cloned().unwrap_or(json!([])),
+        "linkedSkillRefs": linked_refs,
     })));
     let new_id = created
         .get("id")
@@ -1867,10 +2327,36 @@ pub fn import_agent_bundle(request: Option<Value>) -> Result<Value, String> {
     }
     let mut autonomy = AgentAutonomyConfig::default();
     sanitize_autonomy_config_patch(&Value::Object(agent_obj.clone()), &mut autonomy);
+    if autonomy.knowledge_packs.is_empty() {
+        if let Some(packs) = bundle.get("knowledgePacks").and_then(Value::as_array) {
+            let mut patch_val = serde_json::Map::new();
+            patch_val.insert("knowledgePacks".to_string(), Value::Array(packs.clone()));
+            sanitize_autonomy_config_patch(&Value::Object(patch_val), &mut autonomy);
+        }
+    }
+    let fallback_ws_root = resolve_agent_authorized_roots(Some(&new_id), None)
+        .into_iter()
+        .find(|p| p != &crate::agent_mind::get_agent_home_dir(&new_id));
+    for pack in &mut autonomy.knowledge_packs {
+        if pack.root_path.trim().is_empty() {
+            if let Some(ref ws_root) = fallback_ws_root {
+                pack.root_path = ws_root.to_string_lossy().to_string();
+            }
+        }
+    }
     save_agent_autonomy_config(&new_id, &autonomy)?;
 
+    let root = crate::agent_mind::agents_root();
+    if !autonomy.knowledge_packs.is_empty() {
+        sync_autonomy_knowledge_packs_to_mind(
+            &root,
+            &new_id,
+            &autonomy,
+            fallback_ws_root.as_deref(),
+        );
+    }
+
     if let Some(skills) = bundle.get("skills").and_then(Value::as_array) {
-        let root = crate::agent_mind::agents_root();
         let skills_dir = root.join(&new_id).join("skills");
         let _ = std::fs::create_dir_all(&skills_dir);
         for sk in skills {
@@ -1890,8 +2376,8 @@ pub fn import_agent_bundle(request: Option<Value>) -> Result<Value, String> {
                 }
             }
         }
-        let _ = crate::agent_mind::sync_agent_instructions(&root, &new_id);
     }
+    let _ = crate::agent_mind::sync_agent_instructions(&root, &new_id);
 
     Ok(json!({
         "imported": true,
@@ -1952,9 +2438,350 @@ pub fn list_curated_agent_templates() -> Value {
                 "brief": "Use Knowledge Packs and compact kite_ctx reads to synthesize grounded architecture maps without mutating repository files.",
                 "toolPolicies": { "ctx": "allow", "diff": "allow", "memory": "allow", "filesystem_write": "deny", "shell": "deny" },
                 "knowledgePackGlobs": ["docs/**/*.md", "odd/tasks/*.md", "README.md"]
+            },
+            {
+                "id": "ship-guard",
+                "name": "Ship Guard",
+                "engine": "antigravity",
+                "roleBadge": "Release & Clean-Room Gate",
+                "summary": "Slices dirty trees into Conventional Commits, verifies quality gates, and blocks clean-room leaks before push.",
+                "brief": "## Job\nPrepare safe, reviewable Conventional Commit slices, run proportional Tier 1/2/3 verification gates, and enforce clean-room hygiene before any commit or push.\n\n## Sources\n- AGENTS.md, odd/tasks/*.md, docs/qa/*.md, CHANGELOG.md\n- git status / kite_diff / node .kite/sanitizer/audit-references.mjs --check\n\n## Never-List\n- Never run git commit or git push without running `node .kite/sanitizer/audit-references.mjs --check` and confirming `[AUDIT CLEAN]`.\n- Never include Co-Authored-By trailers, AI attribution, external reference names, or `.kite/` internal files in public commits.\n- Never run git push without explicit user approval after presenting the commit slice plan and test output.\n- Never mark an ODD verification task complete when verify:gate fails or is incomplete.\n\n## Deliverable\nClean commit slice ledger (`git diff --stat`), observed verification gate outputs (`verify:ipc`, `verify:design`, `tsc`, Vitest, Cargo), `[AUDIT CLEAN]` proof, and push approval request.\n\n## First Task\nInspect `git status --short`, run `node .kite/sanitizer/audit-references.mjs --check`, group unstaged work into self-contained slices (~400 lines max), and report passing vs pending checks before committing.\n\n## Autonomy\nmaxTurnsPerRun: 16 | maxDurationSecs: 900 | reflectionMode: ask | shell: ask | filesystem_write: ask",
+                "defaultMode": "acceptEdits",
+                "memoryBudget": 2800,
+                "reflectionMode": "ask",
+                "maxTurnsPerRun": 16,
+                "maxDurationSecs": 900,
+                "failoverEngines": [],
+                "places": ["Current Workspace"],
+                "linkedSkillRefs": [
+                    "workspace:work-unit-commits",
+                    "workspace:kite-delivery-loop",
+                    "workspace:pre-push-cleanroom-gate"
+                ],
+                "toolPolicies": {
+                    "ctx": "allow",
+                    "diff": "allow",
+                    "tasks": "allow",
+                    "memory": "allow",
+                    "thread": "allow",
+                    "routine": "allow",
+                    "teammate": "allow",
+                    "filesystem_write": "ask",
+                    "shell": "ask"
+                },
+                "knowledgePackGlobs": ["AGENTS.md", "odd/tasks/*.md", "docs/qa/*.md", "CHANGELOG.md"]
+            },
+            {
+                "id": "discovery-architect",
+                "name": "Discovery Architect",
+                "engine": "antigravity",
+                "roleBadge": "Discovery & ODD Architect",
+                "summary": "Researches features and architecture, drafts clean-room ODD specs, and launches orchestrator threads.",
+                "brief": "## Job\nInvestigate product capabilities, codebase architecture, and docs; produce clean-room Organic Driven Development (`odd/tasks/<slug>.md`) specifications; and launch top-level orchestrator threads via `kite_thread launch` when ready.\n\n## Sources\n- AGENTS.md, odd/tasks/*.md, docs/**/*.md\n- kite_ctx compact reads/searches and linked discovery/ODD skills\n\n## Never-List\n- Never write external reference names into public `odd/tasks/*.md`, `docs/`, UI copy, or source code (keep reference notes strictly inside gitignored `.kite/tasks/`).\n- Never implement a single partial slice as the entire feature without inventorying all user-visible behaviors first.\n- Never execute unrequested destructive mutations or skip `Risk:` classification.\n- Never dump raw file trees when compact `kite_ctx` reads and concise ODD specs suffice.\n\n## Deliverable\nClean-room ODD spec (`## Specs` with verbatim quotes, `## Tasks` with `S#` & `Risk:` lines, `## Log`) and optional launched orchestrator thread (`kite_thread launch` receipt).\n\n## First Task\nInventory the requested capability across existing codebase files and docs, ask at most one clarifying product question if a real fork exists, draft `odd/tasks/<slug>.md`, and offer to launch it in a new orchestrator thread.\n\n## Autonomy\nmaxTurnsPerRun: 20 | maxDurationSecs: 1200 | reflectionMode: ask | shell: ask | filesystem_write: ask",
+                "defaultMode": "acceptEdits",
+                "memoryBudget": 3200,
+                "reflectionMode": "ask",
+                "maxTurnsPerRun": 20,
+                "maxDurationSecs": 1200,
+                "failoverEngines": [],
+                "places": ["Current Workspace"],
+                "linkedSkillRefs": [
+                    "workspace:port-from-product",
+                    "workspace:odd-workflow",
+                    "workspace:cognitive-doc-design"
+                ],
+                "toolPolicies": {
+                    "ctx": "allow",
+                    "diff": "allow",
+                    "tasks": "allow",
+                    "memory": "allow",
+                    "thread": "allow",
+                    "routine": "allow",
+                    "teammate": "allow",
+                    "filesystem_write": "ask",
+                    "shell": "ask"
+                },
+                "knowledgePackGlobs": ["odd/tasks/*.md", "docs/**/*.md", "AGENTS.md"]
             }
         ]
     })
+}
+
+pub fn install_curated_agent_template_core(
+    template_id: &str,
+    workspace_path: Option<&str>,
+    extra_places: &[String],
+) -> Result<Value, String> {
+    let clean_tpl_id = template_id.trim();
+    let templates_val = list_curated_agent_templates();
+    let tpl = templates_val
+        .get("templates")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter().find(|t| {
+                t.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.eq_ignore_ascii_case(clean_tpl_id))
+            })
+        })
+        .cloned()
+        .ok_or_else(|| format!("Unknown curated agent template '{clean_tpl_id}'."))?;
+
+    let tpl_id = tpl.get("id").and_then(Value::as_str).unwrap_or(clean_tpl_id);
+    let tpl_name = tpl.get("name").and_then(Value::as_str).unwrap_or("Specialist");
+    let tpl_engine = tpl.get("engine").and_then(Value::as_str).unwrap_or("antigravity");
+    let tpl_brief = tpl.get("brief").and_then(Value::as_str).unwrap_or("");
+    let tpl_default_mode = tpl
+        .get("defaultMode")
+        .and_then(Value::as_str)
+        .unwrap_or("fullAccess");
+    let tpl_memory_budget = tpl
+        .get("memoryBudget")
+        .and_then(Value::as_i64)
+        .unwrap_or(2800);
+    let tpl_reflection_mode = tpl
+        .get("reflectionMode")
+        .and_then(Value::as_str)
+        .unwrap_or("ask");
+    let tpl_max_turns = tpl
+        .get("maxTurnsPerRun")
+        .and_then(Value::as_u64)
+        .map(|n| n.clamp(1, 100) as u32)
+        .or(Some(16));
+    let tpl_max_duration = tpl
+        .get("maxDurationSecs")
+        .and_then(Value::as_u64)
+        .map(|n| n.clamp(30, 7200))
+        .or(Some(900));
+
+    let linked_refs = filter_valid_linked_skill_refs(
+        &parse_string_list(Some(&tpl), &["linkedSkillRefs"]).unwrap_or_default(),
+    );
+    let pack_globs = parse_string_list(Some(&tpl), &["knowledgePackGlobs"]).unwrap_or_default();
+
+    let mut places: Vec<String> = Vec::new();
+    let mut resolved_ws_root: Option<PathBuf> = None;
+
+    let workspaces = crate::persist::workspaces()
+        .lock()
+        .map(|w| w.clone())
+        .unwrap_or_default();
+
+    for ep in extra_places {
+        let clean = ep.trim();
+        if clean.is_empty() {
+            continue;
+        }
+        if !places.iter().any(|p| p.eq_ignore_ascii_case(clean)) {
+            places.push(clean.to_string());
+        }
+        if resolved_ws_root.is_none() {
+            if let Some(ws) = workspaces
+                .iter()
+                .find(|w| w.id == clean || w.display_name.eq_ignore_ascii_case(clean))
+            {
+                if let Some(p) = crate::persist::workspace_path(&ws.id) {
+                    let pb = PathBuf::from(p);
+                    if pb.is_dir() {
+                        resolved_ws_root = Some(pb);
+                    }
+                }
+            } else {
+                let pb = PathBuf::from(clean);
+                if pb.is_dir() {
+                    resolved_ws_root = Some(pb);
+                }
+            }
+        }
+    }
+
+    if let Some(ws_arg) = workspace_path.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(ws) = workspaces.iter().find(|w| {
+            w.id == ws_arg
+                || w.display_name.eq_ignore_ascii_case(ws_arg)
+                || crate::persist::workspace_path(&w.id)
+                    .is_some_and(|p| PathBuf::from(&p) == PathBuf::from(ws_arg))
+        }) {
+            if !places.iter().any(|p| p.eq_ignore_ascii_case(&ws.display_name)) {
+                places.push(ws.display_name.clone());
+            }
+            if let Some(p) = crate::persist::workspace_path(&ws.id) {
+                let pb = PathBuf::from(p);
+                if pb.is_dir() {
+                    resolved_ws_root = Some(pb);
+                }
+            }
+        } else {
+            if !places.iter().any(|p| p.eq_ignore_ascii_case(ws_arg)) {
+                places.push(ws_arg.to_string());
+            }
+            let pb = PathBuf::from(ws_arg);
+            if pb.is_dir() {
+                resolved_ws_root = Some(pb);
+            }
+        }
+    } else if places.is_empty() {
+        let mut sorted_ws = workspaces;
+        sorted_ws.sort_by(|a, b| b.last_opened_at_unix_ms.cmp(&a.last_opened_at_unix_ms));
+        for ws in sorted_ws {
+            if let Some(p) = crate::persist::workspace_path(&ws.id) {
+                let pb = PathBuf::from(p);
+                if pb.is_dir() {
+                    places.push(ws.display_name);
+                    resolved_ws_root = Some(pb);
+                    break;
+                }
+            }
+        }
+    }
+
+    let existing_id = {
+        let list = agents().lock().unwrap();
+        list.iter()
+            .find(|a| a.name.eq_ignore_ascii_case(tpl_name) || a.id == tpl_id)
+            .map(|a| a.id.clone())
+    };
+
+    let (agent_id, created) = if let Some(aid) = existing_id {
+        let mut merged_places = {
+            let mut list = agents().lock().unwrap();
+            if let Some(a) = list.iter_mut().find(|a| a.id == aid) {
+                a.engine = teammate_engine(Some(tpl_engine));
+                a.purpose = tpl_brief.to_string();
+                a.brief = tpl_brief.to_string();
+                a.memory_budget = Some(tpl_memory_budget);
+                a.reflection_mode = Some(tpl_reflection_mode.to_string());
+                a.default_mode = Some(tpl_default_mode.to_string());
+                a.allow_agent_scheduling = Some(true);
+                a.allow_agent_messaging = Some(true);
+                for p in &places {
+                    if !a.place_display_names.iter().any(|e| e.eq_ignore_ascii_case(p)) {
+                        a.place_display_names.push(p.clone());
+                    }
+                }
+                a.place_display_names.clone()
+            } else {
+                places.clone()
+            }
+        };
+        if merged_places.is_empty() && !places.is_empty() {
+            merged_places = places.clone();
+        }
+        let _ = merged_places;
+        persist();
+        (aid, false)
+    } else {
+        let created_val = create_agent(Some(json!({
+            "name": tpl_name,
+            "engine": tpl_engine,
+            "brief": tpl_brief,
+            "defaultMode": tpl_default_mode,
+            "memoryBudget": tpl_memory_budget,
+            "reflectionMode": tpl_reflection_mode,
+            "allowAgentScheduling": true,
+            "allowAgentMessaging": true,
+            "placeDisplayNames": places,
+            "linkedSkillRefs": linked_refs,
+        })));
+        let new_id = created_val
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Failed to allocate curated agent id.".to_string())?
+            .to_string();
+        (new_id, true)
+    };
+
+    if !linked_refs.is_empty() {
+        crate::persist::set_agent_linked_skill_refs(&agent_id, &linked_refs)?;
+    }
+
+    let mut cfg = load_agent_autonomy_config(&agent_id);
+    sanitize_autonomy_config_patch(&tpl, &mut cfg);
+    cfg.max_turns_per_run = tpl_max_turns;
+    cfg.max_duration_secs = tpl_max_duration;
+
+    let authorized_roots = resolve_agent_authorized_roots(Some(&agent_id), resolved_ws_root.as_deref());
+    let pack_root = resolved_ws_root
+        .clone()
+        .or_else(|| {
+            authorized_roots
+                .iter()
+                .find(|p| p != &&crate::agent_mind::get_agent_home_dir(&agent_id) && p.is_dir())
+                .cloned()
+        });
+
+    let mind_root = crate::agent_mind::agents_root();
+    if let Some(ref kp_dir) = pack_root {
+        let kp_id = format!("kp-{tpl_id}-workspace");
+        let kp_name = format!("{tpl_name} Context");
+        let kp_root_str = kp_dir.to_string_lossy().to_string();
+        if let Some(existing_kp) = cfg.knowledge_packs.iter_mut().find(|p| p.id == kp_id) {
+            existing_kp.name = kp_name.clone();
+            existing_kp.root_path = kp_root_str.clone();
+            existing_kp.globs = pack_globs.clone();
+            existing_kp.enabled = true;
+        } else {
+            cfg.knowledge_packs.push(KnowledgePackConfig {
+                id: kp_id.clone(),
+                name: kp_name.clone(),
+                root_path: kp_root_str.clone(),
+                globs: pack_globs.clone(),
+                enabled: true,
+            });
+        }
+        save_agent_autonomy_config(&agent_id, &cfg)?;
+        crate::agent_mind::knowledge::save_knowledge_pack_at(
+            &mind_root,
+            &agent_id,
+            &authorized_roots,
+            Some(&kp_id),
+            &kp_name,
+            &kp_root_str,
+            pack_globs,
+            true,
+        )
+        .map_err(|e| format!("{}: {}", e.code, e.message))?;
+    } else {
+        save_agent_autonomy_config(&agent_id, &cfg)?;
+    }
+
+    let _ = crate::agent_mind::sync_agent_instructions(&mind_root, &agent_id);
+    let eval = eval_agent_prompts_at(
+        &mind_root,
+        &agent_id,
+        &["Verify status and check documentation".to_string()],
+    );
+
+    Ok(json!({
+        "installed": true,
+        "created": created,
+        "templateId": tpl_id,
+        "agentId": agent_id,
+        "agent": agent_profile_json(&agent_id),
+        "readinessScore": eval["readinessScore"],
+        "readinessPillars": eval["readinessPillars"],
+    }))
+}
+
+#[tauri::command]
+pub fn install_curated_agent_template(request: Value) -> Result<Value, String> {
+    let req = request.get("request").unwrap_or(&request);
+    let template_id = req
+        .get("templateId")
+        .or_else(|| req.get("template_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "templateId is required.".to_string())?;
+    let workspace_path = req
+        .get("workspacePath")
+        .or_else(|| req.get("workspace_path"))
+        .or_else(|| req.get("workspaceId"))
+        .or_else(|| req.get("workspace_id"))
+        .and_then(Value::as_str);
+    let extra_places = parse_string_list(Some(req), &["extraPlaces", "extra_places", "places"])
+        .unwrap_or_default();
+    install_curated_agent_template_core(template_id, workspace_path, &extra_places)
 }
 
 fn install_action(value: Option<&str>) -> String {
@@ -2376,7 +3203,14 @@ mod tests {
         assert!(sanitized.contains("<workspace>"));
 
         let templates = list_curated_agent_templates();
-        assert_eq!(templates["templates"].as_array().unwrap().len(), 5);
+        let tpl_arr = templates["templates"].as_array().unwrap();
+        assert_eq!(tpl_arr.len(), 7);
+        assert!(tpl_arr.iter().any(|t| t["id"] == "ship-guard" && t["engine"] == "antigravity"));
+        assert!(tpl_arr.iter().any(|t| t["id"] == "discovery-architect" && t["engine"] == "antigravity"));
+        assert!(!tpl_arr.iter().any(|t| {
+            let name = t["name"].as_str().unwrap_or("");
+            name.contains("Blind Judge") || name.contains("QA Hunter") || name.contains("Watchdog")
+        }));
 
         let summary = get_agent_autonomy_summary(None);
         assert!(summary["auditCounts"].is_object());
@@ -2387,5 +3221,157 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&mind_root);
+    }
+
+    #[test]
+    fn create_update_and_import_preserve_full_agent_fields_and_readiness_rubric() {
+        let ws_dir = std::env::temp_dir().join(format!("kite-ag-rt-ws-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(ws_dir.join("AGENTS.md"), "# Workspace Rules\nClean room.\n").unwrap();
+
+        let created = create_agent(Some(json!({
+            "name": "Full Roundtrip Agent",
+            "engine": "antigravity",
+            "brief": "## Job\nKeep code clean.\n\n## Never-List\n- Never leak secrets.\n\n## First Task\nInspect status.",
+            "memoryBudget": 3200,
+            "reflectionMode": "auto",
+            "allowAgentScheduling": true,
+            "allowAgentMessaging": false,
+            "placeDisplayNames": [ws_dir.to_string_lossy()],
+            "disabledPluginIds": ["kite-ctx"],
+            "linkedSkillRefs": ["workspace:odd-workflow"],
+            "toolPolicies": { "shell": "ask", "filesystem_write": "ask", "ctx": "allow" },
+            "maxTurnsPerRun": 12,
+            "maxDurationSecs": 600,
+            "failoverEngines": ["codex"],
+            "knowledgePacks": [{ "name": "Agents", "rootPath": ws_dir.to_string_lossy(), "globs": ["AGENTS.md"], "enabled": true }]
+        })));
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["memoryBudget"], 3200);
+        assert_eq!(created["reflectionMode"], "auto");
+        assert_eq!(created["allowAgentMessaging"], false);
+        assert_eq!(created["linkedSkillRefs"], json!(["workspace:odd-workflow"]));
+        assert_eq!(created["toolPolicies"]["shell"], "ask");
+        assert_eq!(created["failoverEngines"], json!(["codex"]));
+        assert_eq!(created["knowledgePacks"][0]["name"], "Agents");
+
+        let updated = update_agent_profile(Some(json!({
+            "agentId": id,
+            "linkedSkillRefs": ["workspace:odd-workflow", "workspace:kite-delivery-loop"],
+            "toolPolicies": { "shell": "deny", "filesystem_write": "ask", "ctx": "allow" },
+            "failoverEngines": ["claude-code"]
+        })));
+        assert_eq!(
+            updated["linkedSkillRefs"],
+            json!(["workspace:odd-workflow", "workspace:kite-delivery-loop"])
+        );
+        assert_eq!(updated["toolPolicies"]["shell"], "deny");
+        assert_eq!(updated["failoverEngines"], json!(["claude-code"]));
+
+        let bundle = export_agent_bundle(Some(json!({ "agentId": id }))).unwrap();
+        let imported = import_agent_bundle(Some(json!({ "bundle": bundle }))).unwrap();
+        let imported_id = imported["agent"]["id"].as_str().unwrap().to_string();
+        assert_eq!(imported["agent"]["reflectionMode"], "auto");
+        assert_eq!(imported["agent"]["memoryBudget"], 3200);
+        assert_eq!(imported["agent"]["toolPolicies"]["shell"], "deny");
+        assert_eq!(
+            imported["agent"]["linkedSkillRefs"],
+            json!(["workspace:odd-workflow", "workspace:kite-delivery-loop"])
+        );
+
+        let bare = create_agent(Some(json!({
+            "name": "Bare Agent",
+            "engine": "antigravity",
+            "brief": "Helper"
+        })));
+        let bare_id = bare["id"].as_str().unwrap().to_string();
+        let bare_eval = eval_agent_prompts_at(
+            &crate::agent_mind::agents_root(),
+            &bare_id,
+            &["Read diff".to_string()],
+        );
+        assert!(bare_eval["readinessScore"].as_u64().unwrap() < 30);
+        assert_eq!(bare_eval["readinessPillars"].as_array().unwrap().len(), 8);
+
+        let rich_eval = eval_agent_prompts_at(
+            &crate::agent_mind::agents_root(),
+            &id,
+            &["Read diff".to_string()],
+        );
+        assert!(
+            rich_eval["readinessScore"].as_u64().unwrap() >= 85,
+            "richly configured specialist should score >= 85, got {}",
+            rich_eval["readinessScore"]
+        );
+
+        agents().lock().unwrap().retain(|a| a.id != id && a.id != imported_id && a.id != bare_id);
+        let _ = std::fs::remove_dir_all(&ws_dir);
+        let _ = std::fs::remove_dir_all(crate::agent_mind::agents_root().join(&id));
+        let _ = std::fs::remove_dir_all(crate::agent_mind::agents_root().join(&imported_id));
+        let _ = std::fs::remove_dir_all(crate::agent_mind::agents_root().join(&bare_id));
+    }
+
+    #[test]
+    fn install_curated_agent_template_is_idempotent_for_ship_guard_and_discovery_architect() {
+        let ws_dir = std::env::temp_dir().join(format!("kite-curated-ws-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(ws_dir.join("odd").join("tasks")).unwrap();
+        std::fs::create_dir_all(ws_dir.join("docs")).unwrap();
+        std::fs::write(ws_dir.join("AGENTS.md"), "# Kite Agents\n").unwrap();
+        std::fs::write(ws_dir.join("odd").join("tasks").join("sample.md"), "# Sample ODD\n").unwrap();
+
+        let ws_str = ws_dir.to_string_lossy().to_string();
+
+        // Install Ship Guard twice (idempotent)
+        let first_sg = install_curated_agent_template_core("ship-guard", Some(&ws_str), &[]).unwrap();
+        assert_eq!(first_sg["created"], true);
+        assert_eq!(first_sg["agent"]["engine"], "antigravity");
+        assert!(
+            first_sg["readinessScore"].as_u64().unwrap() >= 85,
+            "ship-guard readiness must be >= 85, got {}",
+            first_sg["readinessScore"]
+        );
+        let sg_id = first_sg["agentId"].as_str().unwrap().to_string();
+
+        let second_sg = install_curated_agent_template_core("ship-guard", Some(&ws_str), &[]).unwrap();
+        assert_eq!(second_sg["created"], false);
+        assert_eq!(second_sg["agentId"].as_str(), Some(sg_id.as_str()));
+        assert_eq!(
+            second_sg["agent"]["linkedSkillRefs"],
+            json!([
+                "workspace:work-unit-commits",
+                "workspace:kite-delivery-loop",
+                "workspace:pre-push-cleanroom-gate"
+            ])
+        );
+
+        // Install Discovery Architect via IPC entrypoint
+        let da = install_curated_agent_template(json!({
+            "request": {
+                "templateId": "discovery-architect",
+                "workspacePath": ws_str
+            }
+        }))
+        .unwrap();
+        assert_eq!(da["created"], true);
+        assert_eq!(da["agent"]["engine"], "antigravity");
+        assert!(
+            da["readinessScore"].as_u64().unwrap() >= 85,
+            "discovery-architect readiness must be >= 85, got {}",
+            da["readinessScore"]
+        );
+        let da_id = da["agentId"].as_str().unwrap().to_string();
+        assert_eq!(
+            da["agent"]["linkedSkillRefs"],
+            json!([
+                "workspace:port-from-product",
+                "workspace:odd-workflow",
+                "workspace:cognitive-doc-design"
+            ])
+        );
+
+        agents().lock().unwrap().retain(|a| a.id != sg_id && a.id != da_id);
+        let _ = std::fs::remove_dir_all(&ws_dir);
+        let _ = std::fs::remove_dir_all(crate::agent_mind::agents_root().join(&sg_id));
+        let _ = std::fs::remove_dir_all(crate::agent_mind::agents_root().join(&da_id));
     }
 }

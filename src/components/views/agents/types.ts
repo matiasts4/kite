@@ -9,6 +9,37 @@ export interface LearnedSkillSummary {
   uses: number;
   lastUsed: string | null;
   lastOutcome: string | null;
+  enabled?: boolean;
+  manualOnly?: boolean;
+  contextMode?: 'inline' | 'fork' | string;
+  requiresBins?: string[];
+  requiresEnv?: string[];
+  eligible?: boolean;
+  missingRequirements?: string[];
+}
+
+export interface DiscoverableSkill {
+  id: string;
+  refKey: string;
+  name: string;
+  description: string;
+  scope: 'workspace' | 'global' | string;
+  path: string;
+  manualOnly: boolean;
+  contextMode: 'inline' | 'fork' | string;
+  requiresBins: string[];
+  requiresEnv: string[];
+  eligible: boolean;
+  missingRequirements: string[];
+}
+
+export interface ReadinessPillar {
+  id: string;
+  label: string;
+  score: number;
+  maxScore: number;
+  passed: boolean;
+  hint: string;
 }
 
 export interface LearnedSkillDocument extends LearnedSkillSummary {
@@ -66,6 +97,7 @@ export interface AgentMindSnapshot {
   memory: string;
   user: string;
   skills: LearnedSkillSummary[];
+  linkedSkillRefs?: string[];
   memoryUpdatedAtUnixMs: number | null;
   userUpdatedAtUnixMs: number | null;
   memoryRevision: string | null;
@@ -103,6 +135,7 @@ export interface FullAgentProfile extends AgentProfile {
   maxDurationSecs?: number | null;
   failoverEngines?: string[];
   knowledgePacks?: KnowledgePackConfig[];
+  linkedSkillRefs?: string[];
 }
 
 export interface PlaybookStage {
@@ -186,6 +219,8 @@ export interface DryRunEvalReport {
   totalCases: number;
   passedCases: number;
   blockedMutations: number;
+  readinessScore?: number;
+  readinessPillars?: ReadinessPillar[];
   results: DryRunCaseResult[];
 }
 
@@ -198,6 +233,12 @@ export interface CuratedAgentTemplate {
   brief: string;
   toolPolicies: Record<string, 'allow' | 'ask' | 'deny'>;
   knowledgePackGlobs: string[];
+  defaultMode?: string;
+  memoryBudget?: number;
+  reflectionMode?: string;
+  maxTurnsPerRun?: number;
+  maxDurationSecs?: number;
+  linkedSkillRefs?: string[];
 }
 
 export type TabType = 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit' | 'settings';

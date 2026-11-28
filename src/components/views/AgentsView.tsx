@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react';
 import './agents/agent-surface.css';
 import { invokeCommand } from '../../lib/ipc';
 import { subscribeLiveChatRuns } from '../../lib/liveChatRunsStore';
@@ -16,16 +16,36 @@ import {
   MEMORY_DELIMITER,
   parseMemoryEntries,
 } from './agents/types';
-import { AgentMemoryTab } from './agents/AgentMemoryTab';
-import { AgentSkillsTab } from './agents/AgentSkillsTab';
-import { AgentStartersTab } from './agents/AgentStartersTab';
-import { AgentSettingsTab } from './agents/AgentSettingsTab';
-import { AgentPlaybooksTab } from './agents/AgentPlaybooksTab';
-import { AgentAuditTab } from './agents/AgentAuditTab';
-import { AgentEvalDrawer } from './agents/AgentEvalDrawer';
-import { AgentBundleModal } from './agents/AgentBundleModal';
-import { AgentTerminalPane } from './agents/AgentTerminalPane';
-import { AgentCreatePane } from './agents/AgentCreatePane';
+const AgentMemoryTab = lazy(() =>
+  import('./agents/AgentMemoryTab').then((m) => ({ default: m.AgentMemoryTab })),
+);
+const AgentSkillsTab = lazy(() =>
+  import('./agents/AgentSkillsTab').then((m) => ({ default: m.AgentSkillsTab })),
+);
+const AgentStartersTab = lazy(() =>
+  import('./agents/AgentStartersTab').then((m) => ({ default: m.AgentStartersTab })),
+);
+const AgentSettingsTab = lazy(() =>
+  import('./agents/AgentSettingsTab').then((m) => ({ default: m.AgentSettingsTab })),
+);
+const AgentPlaybooksTab = lazy(() =>
+  import('./agents/AgentPlaybooksTab').then((m) => ({ default: m.AgentPlaybooksTab })),
+);
+const AgentAuditTab = lazy(() =>
+  import('./agents/AgentAuditTab').then((m) => ({ default: m.AgentAuditTab })),
+);
+const AgentEvalDrawer = lazy(() =>
+  import('./agents/AgentEvalDrawer').then((m) => ({ default: m.AgentEvalDrawer })),
+);
+const AgentBundleModal = lazy(() =>
+  import('./agents/AgentBundleModal').then((m) => ({ default: m.AgentBundleModal })),
+);
+const AgentTerminalPane = lazy(() =>
+  import('./agents/AgentTerminalPane').then((m) => ({ default: m.AgentTerminalPane })),
+);
+const AgentCreatePane = lazy(() =>
+  import('./agents/AgentCreatePane').then((m) => ({ default: m.AgentCreatePane })),
+);
 import {
   getEngineDisplayName as getCanonicalEngineDisplayName,
   supportsAgentChat,
@@ -75,6 +95,7 @@ export interface AgentChatSurfaceProps {
   agents: AgentProfile[];
   workspaceId?: string | null;
   workspaces?: Workspace[];
+  threadId?: string | null;
 }
 
 export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
@@ -82,11 +103,13 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   agents,
   workspaceId,
   workspaces,
+  threadId,
 }) => {
   return (
     <ChatView
       workspaceId={workspaceId ?? null}
       workspaces={workspaces}
+      threadId={threadId ?? null}
       agentId={agent.id}
       agentName={agent.name}
       agentEngine={agent.engine}
@@ -96,29 +119,40 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   );
 };
 
+export type AgentViewMode =
+  | 'chats'
+  | 'settings'
+  | 'memory'
+  | 'skills'
+  | 'starters'
+  | 'playbooks'
+  | 'audit';
+
 export interface AgentsViewProps {
   agents?: AgentProfile[];
   workspaceId?: string | null;
   workspaces?: Workspace[];
   selectedAgentId: string | null;
+  selectedThreadId?: string | null;
   onSelectAgent: (id: string) => void;
   agentEditorOpen?: boolean;
   onCloseAgentEditor?: () => void;
   onAgentCreated?: (agent: AgentProfile) => void;
   onAgentUpdated?: (agent: AgentProfile) => void;
   onAgentDeleted?: (agentId: string) => void;
-  initialMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit';
-  viewMode?: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit';
-  onViewModeChange?: (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters') => void;
+  initialMode?: AgentViewMode;
+  viewMode?: AgentViewMode;
+  onViewModeChange?: (mode: AgentViewMode) => void;
   onOpenRoutines?: () => void;
   runningCount?: number;
 }
 
-export const AgentsView: React.FC<AgentsViewProps> = ({
+const AgentsViewInner: React.FC<AgentsViewProps> = ({
   agents: agentsProp,
   workspaceId,
   workspaces,
   selectedAgentId,
+  selectedThreadId,
   onSelectAgent,
   agentEditorOpen,
   onCloseAgentEditor,
@@ -134,15 +168,10 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   const [internalAgents, setInternalAgents] = useState<AgentProfile[]>([]);
   const agents = agentsProp ?? internalAgents;
 
-  const [internalViewMode, setInternalViewMode] = useState<'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit'>(controlledViewMode ?? initialMode);
+  const [internalViewMode, setInternalViewMode] = useState<AgentViewMode>(controlledViewMode ?? initialMode);
   useEffect(() => {
     if (controlledViewMode !== undefined) {
-      setInternalViewMode((prev) => {
-        if (controlledViewMode === 'settings' && (prev === 'playbooks' || prev === 'audit')) {
-          return prev;
-        }
-        return controlledViewMode;
-      });
+      setInternalViewMode(controlledViewMode);
     }
   }, [controlledViewMode]);
   const viewMode = internalViewMode;
@@ -150,20 +179,15 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   const [isBundleOpen, setIsBundleOpen] = useState(false);
 
   const setViewMode = useCallback(
-    (mode: 'chats' | 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => {
+    (mode: AgentViewMode) => {
       setInternalViewMode(mode);
-      if (mode === 'playbooks' || mode === 'audit') {
-        onViewModeChange?.('settings');
-      } else {
-        onViewModeChange?.(mode);
-      }
+      onViewModeChange?.(mode);
     },
     [onViewModeChange]
   );
 
   const [lastSettingsTab, setLastSettingsTab] = useState<'settings' | 'memory' | 'skills' | 'playbooks' | 'audit'>('settings');
-  const [surfacePreference, setSurfacePreference] = useState<'chat' | 'terminal'>('chat');
-  const [loading, setLoading] = useState<boolean>(true);
+  const [loading, setLoading] = useState<boolean>(() => !(agentsProp && agentsProp.length > 0));
   const [error, setError] = useState<string | null>(null);
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [liveRunningCount, setLiveRunningCount] = useState<number>(0);
@@ -241,25 +265,47 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
   const onSelectAgentRef = useRef(onSelectAgent);
   onSelectAgentRef.current = onSelectAgent;
 
-  // 1. Load initial agent list & starters
-  const fetchAgentsAndStarters = useCallback(async () => {
-    setLoading(true);
+  const selectedAgentIdRef = useRef(selectedAgentId);
+  selectedAgentIdRef.current = selectedAgentId;
+  const loadedAgentDataRef = useRef<string | null>(null);
+  const startersLoadedRef = useRef(false);
+
+  const fetchStarters = useCallback(async (force: boolean = false) => {
+    if (!force && startersLoadedRef.current) return;
+    startersLoadedRef.current = true;
+    try {
+      const startersList = await invokeCommand<StarterSummary[]>('list_agent_starters', {
+        supportedCatalogVersion: 1,
+      }).catch(() => []);
+      setStarters(startersList);
+    } catch {
+      startersLoadedRef.current = false;
+    }
+  }, []);
+
+  // 1. Load initial agent roster without blocking on non-chat starter catalogs
+  const fetchAgents = useCallback(async () => {
+    if (agentsProp && agentsProp.length > 0) {
+      setLoading(false);
+    } else if (!agentsProp) {
+      setLoading(true);
+    }
     setError(null);
     try {
-      const [roster, startersList] = await Promise.all([
-        agentsProp ? Promise.resolve(agentsProp) : invokeCommand<AgentProfile[]>('list_agent_profiles'),
-        invokeCommand<StarterSummary[]>('list_agent_starters', { supportedCatalogVersion: 1 }).catch(() => []),
-      ]);
+      const roster = agentsProp
+        ? agentsProp
+        : await invokeCommand<AgentProfile[]>('list_agent_profiles');
       if (!agentsProp) {
         setInternalAgents(roster);
       }
-      setStarters(startersList);
 
       if (roster.length > 0) {
-        const targetId = selectedAgentId && roster.some((a) => a.id === selectedAgentId)
-          ? selectedAgentId
-          : roster[0].id;
-        if (targetId !== selectedAgentId) {
+        const currentSelected = selectedAgentIdRef.current;
+        const targetId =
+          currentSelected && roster.some((a) => a.id === currentSelected)
+            ? currentSelected
+            : roster[0].id;
+        if (targetId !== currentSelected) {
           onSelectAgentRef.current(targetId);
         }
       }
@@ -269,11 +315,11 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [agentsProp, selectedAgentId]);
+  }, [agentsProp]);
 
   useEffect(() => {
-    void fetchAgentsAndStarters();
-  }, [fetchAgentsAndStarters]);
+    void fetchAgents();
+  }, [fetchAgents]);
 
   useEffect(() => {
     const openCreate = () => setInternalCreatingAgent(true);
@@ -298,7 +344,7 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
         setProfile(fullProf);
         setSettingsDraft({
           name: fullProf.name || '',
-          purpose: fullProf.purpose || fullProf.brief || '',
+          purpose: fullProf.brief || fullProf.purpose || '',
           engine: fullProf.engine || 'antigravity',
           memoryBudget: fullProf.memoryBudget || 2200,
           reflectionMode: fullProf.reflectionMode || 'ask',
@@ -323,15 +369,24 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
       setSkillDocument(null);
     } catch (err: unknown) {
       console.error('[AgentsView] Failed to load agent mind/profile:', err);
+      loadedAgentDataRef.current = null;
       setError(err instanceof Error ? err.message : 'Failed to load agent memory');
     }
   }, []);
 
   useEffect(() => {
-    if (selectedAgentId) {
-      void loadAgentData(selectedAgentId);
+    if (!selectedAgentId) return;
+    if (viewMode === 'chats' && !isCreating && !isBundleOpen && !isEvalOpen) return;
+    if (loadedAgentDataRef.current === selectedAgentId) return;
+    loadedAgentDataRef.current = selectedAgentId;
+    void loadAgentData(selectedAgentId);
+  }, [selectedAgentId, viewMode, isCreating, isBundleOpen, isEvalOpen, loadAgentData]);
+
+  useEffect(() => {
+    if (viewMode === 'skills' || viewMode === 'starters' || isBundleOpen) {
+      void fetchStarters();
     }
-  }, [selectedAgentId, loadAgentData]);
+  }, [viewMode, isBundleOpen, fetchStarters]);
 
   // Poll live running tasks for active agent
   useEffect(() => {
@@ -674,9 +729,9 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
     setSettingsDirty(false);
   };
 
-  const handleSelectTab = (tab: 'settings' | 'memory' | 'skills' | 'starters' | 'playbooks' | 'audit') => {
+  const handleSelectTab = (tab: AgentViewMode) => {
     setViewMode(tab);
-    if (tab !== 'starters') {
+    if (tab !== 'chats' && tab !== 'starters') {
       setLastSettingsTab(tab);
     }
   };
@@ -691,30 +746,32 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
 
   if (isCreating) {
     return (
-      <AgentCreatePane
-        agents={agents}
-        onCancel={() => {
-          if (onCloseAgentEditor) {
-            onCloseAgentEditor();
-          } else {
-            setInternalCreatingAgent(false);
-          }
-        }}
-        onCreated={(agent) => {
-          if (onAgentCreated) {
-            onAgentCreated(agent);
-          } else {
-            setInternalAgents((current) => (current.some((item) => item.id === agent.id) ? current : [...current, agent]));
-          }
-          onSelectAgent(agent.id);
-          if (onCloseAgentEditor) {
-            onCloseAgentEditor();
-          } else {
-            setInternalCreatingAgent(false);
-          }
-          window.dispatchEvent(new CustomEvent('studio-agent-created', { detail: agent }));
-        }}
-      />
+      <Suspense fallback={null}>
+        <AgentCreatePane
+          agents={agents}
+          onCancel={() => {
+            if (onCloseAgentEditor) {
+              onCloseAgentEditor();
+            } else {
+              setInternalCreatingAgent(false);
+            }
+          }}
+          onCreated={(agent) => {
+            if (onAgentCreated) {
+              onAgentCreated(agent);
+            } else {
+              setInternalAgents((current) => (current.some((item) => item.id === agent.id) ? current : [...current, agent]));
+            }
+            onSelectAgent(agent.id);
+            if (onCloseAgentEditor) {
+              onCloseAgentEditor();
+            } else {
+              setInternalCreatingAgent(false);
+            }
+            window.dispatchEvent(new CustomEvent('studio-agent-created', { detail: agent }));
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -790,53 +847,37 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
           </span>
         )}
 
-        {viewMode === 'chats' && isLlm && (
-          <div
-            role="group"
-            aria-label="Interaction surface"
-            className="agent-surface-toggle"
-          >
-            <button
-              type="button"
-              className={`agent-surface-toggle__btn${surfacePreference === 'chat' ? ' agent-surface-toggle__btn--active' : ''}`}
-              onClick={() => setSurfacePreference('chat')}
-              aria-pressed={surfacePreference === 'chat'}
-              title="Use conversational Chat UI"
-            >
-              Chat
-            </button>
-            <button
-              type="button"
-              className={`agent-surface-toggle__btn${surfacePreference === 'terminal' ? ' agent-surface-toggle__btn--active' : ''}`}
-              onClick={() => setSurfacePreference('terminal')}
-              aria-pressed={surfacePreference === 'terminal'}
-              title="Open interactive CLI Terminal"
-            >
-              Terminal
-            </button>
-          </div>
-        )}
-
         <button
           type="button"
-          className="agent-settings-toggle"
+          className={`agent-edit-toggle${viewMode !== 'chats' ? ' agent-edit-toggle--active' : ''}`}
           onClick={handleToggleSettings}
-          aria-label={viewMode === 'chats' ? 'Agent settings' : 'Close agent settings'}
+          aria-label={viewMode === 'chats' ? 'Edit agent' : 'Back to chat'}
           aria-pressed={viewMode !== 'chats'}
-          title={viewMode === 'chats' ? 'Settings, memory, and skills' : 'Close settings and go back to the chats'}
+          title={
+            viewMode === 'chats'
+              ? 'Edit settings, skills, memory, playbooks, and audit'
+              : 'Return to agent chats'
+          }
         >
-          {viewMode === 'chats' ? <SettingsIcon size={13} /> : <CloseIcon size={13} />}
-          {viewMode === 'chats' && memoryNoteCount + skillsCount > 0 && (
-            <i aria-hidden="true" className="agent-settings-toggle__dot" />
+          {viewMode === 'chats' ? (
+            <>
+              <SettingsIcon size={12} />
+              <span>Edit</span>
+            </>
+          ) : (
+            <>
+              <CloseIcon size={12} />
+              <span>Back to chat</span>
+            </>
           )}
         </button>
       </header>
 
       <div className="agent-pane__rule" />
 
-      {/* Navigation Tabs (Hidden when in 'chats' mode) */}
+      {/* Configuration Modules (visible only while editing the agent) */}
       {viewMode !== 'chats' && (
-        <nav aria-label={`${selectedAgent.name} settings sections`} className="agent-face-tabs ui-tabs">
+        <nav aria-label={`${selectedAgent.name} sections`} className="agent-face-tabs ui-tabs">
           <div className="ui-tabs__list">
             <button
               type="button"
@@ -848,23 +889,6 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
             >
               <SlidersIcon size={12} />
               <span className="ui-tab__label" data-label="Settings">Settings</span>
-            </button>
-
-            <button
-              type="button"
-              aria-label={memoryNoteCount > 0 ? `Agent Memory, ${memoryNoteCount}` : 'Agent Memory'}
-              className={viewMode === 'memory' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
-              onClick={() => handleSelectTab('memory')}
-              aria-current={viewMode === 'memory' ? 'page' : undefined}
-              title={
-                memoryNoteCount > 0
-                  ? `What this agent knows between chats — ${memoryNoteCount}`
-                  : 'What this agent knows between chats'
-              }
-            >
-              <BrainIcon size={12} />
-              <span className="ui-tab__label" data-label="Memory">Memory</span>
-              {memoryNoteCount > 0 && <span className="ui-tab__count" data-count="">{memoryNoteCount}</span>}
             </button>
 
             <button
@@ -885,6 +909,23 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
               <WandIcon size={12} />
               <span className="ui-tab__label" data-label="Skills">Skills</span>
               {skillsCount > 0 && <span className="ui-tab__count" data-count="">{skillsCount}</span>}
+            </button>
+
+            <button
+              type="button"
+              aria-label={memoryNoteCount > 0 ? `Agent Memory, ${memoryNoteCount}` : 'Agent Memory'}
+              className={viewMode === 'memory' ? 'ui-tab ui-tab--selected' : 'ui-tab'}
+              onClick={() => handleSelectTab('memory')}
+              aria-current={viewMode === 'memory' ? 'page' : undefined}
+              title={
+                memoryNoteCount > 0
+                  ? `What this agent knows between chats — ${memoryNoteCount}`
+                  : 'What this agent knows between chats'
+              }
+            >
+              <BrainIcon size={12} />
+              <span className="ui-tab__label" data-label="Memory">Memory</span>
+              {memoryNoteCount > 0 && <span className="ui-tab__count" data-count="">{memoryNoteCount}</span>}
             </button>
 
             <button
@@ -915,118 +956,173 @@ export const AgentsView: React.FC<AgentsViewProps> = ({
       )}
 
       {/* Content Surfaces */}
-      {viewMode === 'chats' && isLlm && surfacePreference === 'chat' && (
+      {viewMode === 'chats' && isLlm && (
         <AgentChatSurface
           agent={selectedAgent}
           agents={agents}
           workspaceId={workspaceId}
           workspaces={workspaces}
+          threadId={selectedThreadId}
         />
       )}
 
-      {viewMode === 'chats' && (!isLlm || surfacePreference === 'terminal') && (
-        <AgentTerminalPane
-          agentId={selectedAgent.id}
-          agentName={selectedAgent.name}
-          engine={selectedAgent.engine}
-          workspaceId={workspaceId}
-        />
+      {viewMode === 'chats' && !isLlm && (
+        <Suspense fallback={null}>
+          <AgentTerminalPane
+            agentId={selectedAgent.id}
+            agentName={selectedAgent.name}
+            engine={selectedAgent.engine}
+            workspaceId={workspaceId}
+          />
+        </Suspense>
       )}
 
       {viewMode === 'memory' && (
-        <AgentMemoryTab
-          agentName={selectedAgent.name}
-          mind={mind}
-          memoryTarget={memoryTarget}
-          setMemoryTarget={setMemoryTarget}
-          memoryBudget={settingsDraft.memoryBudget}
-          memorySaving={memorySaving}
-          lastDeletedEntry={lastDeletedEntry}
-          error={error}
-          successMessage={successNotice}
-          onSaveRawMemory={handleSaveRawMemory}
-          onAddMemoryNote={handleAddMemoryNote}
-          onSaveInlineEntry={handleSaveInlineEntry}
-          onDeleteEntry={handleDeleteEntry}
-          onUndoDeleteEntry={handleUndoDeleteEntry}
-        />
+        <Suspense fallback={null}>
+          <AgentMemoryTab
+            agentId={selectedAgent.id}
+            agentName={selectedAgent.name}
+            workspaceId={workspaceId}
+            workspaces={workspaces}
+            placeDisplayNames={settingsDraft?.placeDisplayNames ?? selectedAgent.placeDisplayNames ?? []}
+            mind={mind}
+            memoryTarget={memoryTarget}
+            setMemoryTarget={setMemoryTarget}
+            memoryBudget={settingsDraft.memoryBudget}
+            memorySaving={memorySaving}
+            lastDeletedEntry={lastDeletedEntry}
+            error={error}
+            successMessage={successNotice}
+            onSaveRawMemory={handleSaveRawMemory}
+            onAddMemoryNote={handleAddMemoryNote}
+            onSaveInlineEntry={handleSaveInlineEntry}
+            onDeleteEntry={handleDeleteEntry}
+            onUndoDeleteEntry={handleUndoDeleteEntry}
+          />
+        </Suspense>
       )}
 
       {viewMode === 'skills' && (
-        <AgentSkillsTab
-          agentName={selectedAgent.name}
-          mind={mind}
-          selectedSkillId={selectedSkillId}
-          skillDocument={skillDocument}
-          skillLoading={skillLoading}
-          skillSaving={skillSaving}
-          starters={starters}
-          onInstallStarter={handleInstallStarter}
-          onMindUpdated={setMind}
-          onSelectSkill={handleSelectSkill}
-          onSaveSkill={handleSaveSkill}
-          onDeleteSkill={handleDeleteSkill}
-          onClearSelectedSkill={() => {
-            setSelectedSkillId(null);
-            setSkillDocument(null);
-          }}
-          onNavigateToStarters={() => handleSelectTab('starters')}
-        />
+        <Suspense fallback={null}>
+          <AgentSkillsTab
+            agentId={selectedAgent.id}
+            agentName={selectedAgent.name}
+            workspaceId={workspaceId}
+            workspaces={workspaces}
+            mind={mind}
+            selectedSkillId={selectedSkillId}
+            skillDocument={skillDocument}
+            skillLoading={skillLoading}
+            skillSaving={skillSaving}
+            starters={starters}
+            onInstallStarter={handleInstallStarter}
+            onMindUpdated={setMind}
+            onSelectSkill={handleSelectSkill}
+            onSaveSkill={handleSaveSkill}
+            onDeleteSkill={handleDeleteSkill}
+            onClearSelectedSkill={() => {
+              setSelectedSkillId(null);
+              setSkillDocument(null);
+            }}
+            onNavigateToStarters={() => handleSelectTab('starters')}
+          />
+        </Suspense>
       )}
 
       {viewMode === 'starters' && (
-        <AgentStartersTab
-          agentName={selectedAgent.name}
-          mind={mind}
-          starters={starters}
-          installingStarterId={installingStarterId}
-          onInstallStarter={handleInstallStarter}
-        />
+        <Suspense fallback={null}>
+          <AgentStartersTab
+            agentName={selectedAgent.name}
+            mind={mind}
+            starters={starters}
+            installingStarterId={installingStarterId}
+            onInstallStarter={handleInstallStarter}
+          />
+        </Suspense>
       )}
 
       {viewMode === 'playbooks' && (
-        <AgentPlaybooksTab
-          agentId={selectedAgent.id}
-          agents={agents}
-          workspaceId={workspaceId}
-        />
+        <Suspense fallback={null}>
+          <AgentPlaybooksTab
+            agentId={selectedAgent.id}
+            agents={agents}
+            workspaceId={workspaceId}
+            onOpenThread={(tid) =>
+              window.dispatchEvent(
+                new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
+              )
+            }
+          />
+        </Suspense>
       )}
 
       {viewMode === 'audit' && (
-        <AgentAuditTab agentId={selectedAgent.id} />
+        <Suspense fallback={null}>
+          <AgentAuditTab
+            agentId={selectedAgent.id}
+            onOpenThread={(tid) =>
+              window.dispatchEvent(
+                new CustomEvent('kite:select-thread', { detail: { threadId: tid, mode: 'chat' } })
+              )
+            }
+          />
+        </Suspense>
       )}
 
       {viewMode === 'settings' && (
-        <AgentSettingsTab
-          agentId={selectedAgent.id}
-          settingsDraft={settingsDraft}
-          setSettingsDraft={setSettingsDraft}
-          settingsDirty={settingsDirty}
-          setSettingsDirty={setSettingsDirty}
-          workspaces={workspaces}
-          error={error}
-          successMessage={successNotice}
-          onSaveSettings={handleSaveSettings}
-          onRevertSettings={handleRevertSettings}
-          onOpenRoutines={onOpenRoutines}
-          onOpenDryRunEval={() => setIsEvalOpen(true)}
-          onOpenBundleModal={() => setIsBundleOpen(true)}
-        />
+        <Suspense fallback={null}>
+          <AgentSettingsTab
+            agentId={selectedAgent.id}
+            settingsDraft={settingsDraft}
+            setSettingsDraft={setSettingsDraft}
+            settingsDirty={settingsDirty}
+            setSettingsDirty={setSettingsDirty}
+            workspaces={workspaces}
+            error={error}
+            successMessage={successNotice}
+            onSaveSettings={handleSaveSettings}
+            onRevertSettings={handleRevertSettings}
+            onOpenRoutines={onOpenRoutines}
+            onOpenDryRunEval={() => setIsEvalOpen(true)}
+            onOpenBundleModal={() => setIsBundleOpen(true)}
+          />
+        </Suspense>
       )}
 
-      <AgentEvalDrawer
-        isOpen={isEvalOpen}
-        agentId={selectedAgent.id}
-        agentName={selectedAgent.name}
-        onClose={() => setIsEvalOpen(false)}
-      />
+      {(viewMode !== 'chats' || isEvalOpen) && (
+        <Suspense fallback={null}>
+          <AgentEvalDrawer
+            isOpen={isEvalOpen}
+            agentId={selectedAgent.id}
+            agentName={selectedAgent.name}
+            onClose={() => setIsEvalOpen(false)}
+          />
+        </Suspense>
+      )}
 
-      <AgentBundleModal
-        isOpen={isBundleOpen}
-        agentId={selectedAgent.id}
-        agentName={selectedAgent.name}
-        onClose={() => setIsBundleOpen(false)}
-      />
+      {(viewMode !== 'chats' || isBundleOpen) && (
+        <Suspense fallback={null}>
+          <AgentBundleModal
+            isOpen={isBundleOpen}
+            agentId={selectedAgent.id}
+            agentName={selectedAgent.name}
+            onClose={() => setIsBundleOpen(false)}
+            onImported={() => {
+              window.dispatchEvent(new CustomEvent('kite:agents-changed'));
+              loadedAgentDataRef.current = null;
+              startersLoadedRef.current = false;
+              void fetchAgents();
+              void fetchStarters(true);
+              if (selectedAgentId) {
+                loadedAgentDataRef.current = selectedAgentId;
+                void loadAgentData(selectedAgentId);
+              }
+            }}
+          />
+        </Suspense>
+      )}
     </section>
   );
 };
+
+export const AgentsView = React.memo(AgentsViewInner);

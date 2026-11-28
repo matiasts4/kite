@@ -5,6 +5,7 @@ import type { AvatarChoice } from '../../AgentAvatar';
 import { AgentAvatarCustomizer } from './AgentAvatarCustomizer';
 import { SelectMenu } from '../../ui/SelectMenu';
 import { AUTOMATIC_MODEL_ID, engineToChatProvider, type ModelOption } from '../chat/types';
+import { reconcileEffortForModel, resolveEffortChoicesForModel } from '../chat/driverDeclaration';
 import { catalogEmptyMessage, type CatalogEmptyKind } from '../chat/catalogEmptyState';
 import {
   BrandLogo,
@@ -20,6 +21,7 @@ import {
   CloseIcon,
 } from './agentIcons';
 import {
+  RECOMMENDED_SPECIALIST_TEMPLATES,
   SPECIALIST_AGENT_PRESETS,
   type SpecialistAgentPreset,
 } from './agentPresets';
@@ -56,6 +58,7 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [stage, setStage] = useState<DraftStage | null>(null);
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null);
+  const [installingTemplateId, setInstallingTemplateId] = useState<string | null>(null);
 
   const faceSeed = useRef<string>(
     typeof globalThis.crypto?.randomUUID === 'function'
@@ -93,6 +96,7 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
     setModelsNote(catalogEmptyMessage('loading', engineToChatProvider(engine)));
     setCatalogKind('loading');
     setDefaultModel(null);
+    setEffort(null);
     const provider = engineToChatProvider(engine);
     invokeCommand<{ models?: ModelOption[]; catalogState?: CatalogEmptyKind }>('list_chat_provider_models', {
       provider,
@@ -132,6 +136,28 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
     })),
   ];
 
+  const selectedLiveModel = defaultModel
+    ? liveModels.find((model) => model.id === defaultModel) ?? null
+    : null;
+  const resolvedModelEffort = resolveEffortChoicesForModel(selectedLiveModel);
+  const effortDisabledByModel = Boolean(selectedLiveModel && !resolvedModelEffort);
+  const effortMenuRows = [
+    { id: 'default', title: 'Automatic', detail: 'Let the provider choose.' },
+    ...(resolvedModelEffort
+      ? resolvedModelEffort.choices.map((choice) => ({
+          id: choice.id,
+          title: choice.label,
+          detail: choice.detail,
+        }))
+      : effortDisabledByModel
+        ? []
+        : [
+            { id: 'low', title: 'Low', detail: 'Quick responses with focused reasoning.' },
+            { id: 'medium', title: 'Medium', detail: 'Balanced reasoning for everyday tasks.' },
+            { id: 'high', title: 'High', detail: 'Deep reasoning and thorough analysis.' },
+          ]),
+  ];
+
   const trimmedName = name.trim();
   const duplicateName =
     trimmedName.length > 0 &&
@@ -145,6 +171,30 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
     setPurpose(preset.brief);
     setEngine(preset.engine);
     setError(null);
+  };
+
+  const handleInstallRecommendedTemplate = async (templateId: string) => {
+    if (creating || installingTemplateId) return;
+    setInstallingTemplateId(templateId);
+    setError(null);
+    try {
+      const res = await invokeCommand<{
+        installed: boolean;
+        created: boolean;
+        templateId: string;
+        agentId: string;
+        agent?: AgentProfile;
+      }>('install_curated_agent_template', {
+        templateId,
+      });
+      if (res?.agent) {
+        onCreated(res.agent);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Could not install recommended specialist.');
+    } finally {
+      setInstallingTemplateId(null);
+    }
   };
 
   const handleCreate = async () => {
@@ -392,16 +442,43 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
                 <AudioLinesIcon size={13} className="ai-create-row__wave" />
               </button>
 
+              {/* Recommended Specialists (Antigravity 1-Click Install) */}
+              <fieldset className="form-field">
+                <legend>Install Recommended Specialist (Antigravity)</legend>
+                <div className="agent-preset-grid">
+                  {RECOMMENDED_SPECIALIST_TEMPLATES.map((tpl) => {
+                    const isInstalling = installingTemplateId === tpl.id;
+                    return (
+                      <div key={tpl.id} className="agent-preset-card">
+                        <div className="agent-preset-card__top">
+                          <BrandLogo engine={tpl.engine} size={13} />
+                          <strong className="agent-preset-card__title">{tpl.name}</strong>
+                          <span className="agent-preset-card__badge">{tpl.roleBadge}</span>
+                        </div>
+                        <small className="agent-preset-card__summary">{tpl.summary}</small>
+                        <div className="agent-preset-card__actions">
+                          <button
+                            type="button"
+                            className="primary-button action-button--row"
+                            disabled={creating || installingTemplateId !== null}
+                            onClick={() => void handleInstallRecommendedTemplate(tpl.id)}
+                          >
+                            {isInstalling ? 'Installing…' : `Install ${tpl.name}`}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <p className="form-field__hint">
+                  Idempotently provisions the Antigravity specialist with full charter, linked skills, Places, and Knowledge Pack.
+                </p>
+              </fieldset>
+
               {/* Preset Specialist Templates */}
               <fieldset className="form-field">
                 <legend>Specialist Templates (1-Click Preset)</legend>
-                <div
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))',
-                    gap: '8px',
-                  }}
-                >
+                <div className="agent-preset-grid">
                   {SPECIALIST_AGENT_PRESETS.map((preset) => {
                     const isSelected = selectedPresetId === preset.id;
                     return (
@@ -410,49 +487,18 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
                         type="button"
                         disabled={creating}
                         onClick={() => handleApplyPreset(preset)}
-                        style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'flex-start',
-                          gap: '4px',
-                          padding: '10px 12px',
-                          borderRadius: '8px',
-                          textAlign: 'left',
-                          cursor: 'pointer',
-                          border: isSelected
-                            ? '1px solid var(--accent, #58a6ff)'
-                            : '1px solid var(--block-stroke, rgba(255,255,255,0.08))',
-                          background: isSelected
-                            ? 'var(--selected-fill, rgba(88,166,255,0.1))'
-                            : 'var(--block-fill, rgba(255,255,255,0.03))',
-                          transition: 'border-color 0.15s ease, background 0.15s ease',
-                        }}
+                        className={`agent-preset-card${isSelected ? ' agent-preset-card--selected' : ''}`}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', width: '100%' }}>
+                        <div className="agent-preset-card__top">
                           <BrandLogo engine={preset.engine} size={13} />
-                          <strong style={{ fontSize: '12.5px', color: 'var(--text-primary)' }}>
+                          <strong className="agent-preset-card__title">
                             {preset.name}
                           </strong>
-                          <span
-                            style={{
-                              marginLeft: 'auto',
-                              fontSize: '10.5px',
-                              padding: '1px 6px',
-                              borderRadius: '999px',
-                              background: 'var(--chip-fill, rgba(255,255,255,0.06))',
-                              color: 'var(--text-secondary)',
-                            }}
-                          >
+                          <span className="agent-preset-card__badge">
                             {preset.roleBadge}
                           </span>
                         </div>
-                        <small
-                          style={{
-                            fontSize: '11.5px',
-                            lineHeight: 1.35,
-                            color: 'var(--text-secondary)',
-                          }}
-                        >
+                        <small className="agent-preset-card__summary">
                           {preset.summary}
                         </small>
                       </button>
@@ -532,7 +578,16 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
                   disabled={creating}
                   rows={modelRows}
                   emptyLabel={modelsNote || catalogEmptyMessage(catalogKind, engineToChatProvider(engine))}
-                  onSelect={(id) => setDefaultModel(id === AUTOMATIC_MODEL_ID ? null : id)}
+                  onSelect={(id) => {
+                    const nextModelId = id === AUTOMATIC_MODEL_ID ? null : id;
+                    setDefaultModel(nextModelId);
+                    const nextModelMeta = nextModelId
+                      ? liveModels.find((model) => model.id === nextModelId) ?? null
+                      : null;
+                    if (nextModelId === null || nextModelMeta) {
+                      setEffort((prev) => reconcileEffortForModel(nextModelMeta, prev));
+                    }
+                  }}
                 />
                 {modelsNote ? <p className="form-field__hint">{modelsNote}</p> : null}
               </div>
@@ -570,21 +625,11 @@ export const AgentCreatePane: React.FC<AgentCreatePaneProps> = ({
                   label="Reasoning effort"
                   value={effort || 'default'}
                   triggerLabel={
-                    effort === 'low'
-                      ? 'Low'
-                      : effort === 'medium'
-                        ? 'Medium'
-                        : effort === 'high'
-                          ? 'High'
-                          : 'Automatic'
+                    effortMenuRows.find((row) => row.id === (effort || 'default'))?.title ||
+                    'Automatic'
                   }
-                  disabled={creating}
-                  rows={[
-                    { id: 'default', title: 'Automatic', detail: 'Let the provider choose.' },
-                    { id: 'low', title: 'Low', detail: 'Quick responses with focused reasoning.' },
-                    { id: 'medium', title: 'Medium', detail: 'Balanced reasoning for everyday tasks.' },
-                    { id: 'high', title: 'High', detail: 'Deep reasoning and thorough analysis.' },
-                  ]}
+                  disabled={creating || effortDisabledByModel}
+                  rows={effortMenuRows}
                   onSelect={(id) => setEffort(id === 'default' ? null : id)}
                 />
               </div>

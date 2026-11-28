@@ -15,6 +15,42 @@ pub struct AgentMindError {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillFrontmatter {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub manual_only: bool,
+    pub context_mode: String,
+    pub requires_bins: Vec<String>,
+    pub requires_env: Vec<String>,
+}
+
+impl Default for SkillFrontmatter {
+    fn default() -> Self {
+        Self {
+            name: None,
+            description: None,
+            manual_only: false,
+            context_mode: "inline".to_string(),
+            requires_bins: Vec::new(),
+            requires_env: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedSkillContent {
+    pub ref_key: String,
+    pub id: String,
+    pub scope: String,
+    pub path: String,
+    pub frontmatter: SkillFrontmatter,
+    pub body: String,
+    pub source: String,
+}
+
 impl AgentMindError {
     pub(crate) fn new(code: &str, message: &str) -> Self {
         Self { code: code.chars().take(64).collect(), message: message.chars().take(500).collect() }

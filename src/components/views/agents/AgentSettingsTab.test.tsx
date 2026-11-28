@@ -242,10 +242,64 @@ describe('AgentSettingsTab - Plugin & MCP Integration', () => {
       );
 
       const select = screen.getByRole('combobox', { name: /Add from workspace/i });
-      await user.selectOptions(select, 'Project Kite');
+      await user.click(select);
+      await user.click(await screen.findByRole('option', { name: 'Project Kite' }));
 
       expect(setSettingsDirty).toHaveBeenCalledWith(true);
       expect(currentDraft.placeDisplayNames).toEqual(['Project Kite']);
+    });
+
+    it('renders Readiness Score (0-100) and 8-pillar checklist via dry_run_agent_eval', async () => {
+      const user = userEvent.setup();
+      vi.spyOn(ipc, 'invokeCommand').mockImplementation(async (cmd: string) => {
+        if (cmd === 'dry_run_agent_eval') {
+          return {
+            agentId: 'agent-1',
+            compiledPromptChars: 1200,
+            estimatedPromptTokens: 300,
+            totalCases: 2,
+            passedCases: 2,
+            blockedMutations: 0,
+            readinessScore: 88,
+            readinessPillars: [
+              { id: 'charter', label: 'Purpose & Charter', score: 15, maxScore: 15, passed: true, hint: 'Charter defined' },
+              { id: 'engine', label: 'Provider & Model', score: 15, maxScore: 15, passed: true, hint: 'Antigravity ready' },
+              { id: 'skills', label: 'Skills Linked', score: 15, maxScore: 15, passed: true, hint: '2 linked skills' },
+              { id: 'places', label: 'Places Authorized', score: 15, maxScore: 15, passed: true, hint: '1 workspace place' },
+              { id: 'packs', label: 'Knowledge Packs', score: 10, maxScore: 10, passed: true, hint: '1 pack indexed' },
+              { id: 'tools', label: 'Tool Guardrails', score: 10, maxScore: 10, passed: true, hint: 'Safe defaults' },
+              { id: 'memory', label: 'Memory Notes', score: 8, maxScore: 10, passed: true, hint: 'Notes present' },
+              { id: 'eval', label: 'Dry-Run Gate', score: 0, maxScore: 10, passed: false, hint: 'Run weekly audit' },
+            ],
+            results: [],
+          };
+        }
+        return { allServers: [] };
+      });
+
+      render(
+        <AgentSettingsTab
+          agentId="agent-1"
+          settingsDraft={defaultDraft}
+          setSettingsDraft={vi.fn()}
+          settingsDirty={false}
+          setSettingsDirty={vi.fn()}
+          onSaveSettings={vi.fn()}
+          onRevertSettings={vi.fn()}
+          onOpenDryRunEval={vi.fn()}
+        />
+      );
+
+      expect(await screen.findByText('Readiness Score: 88/100')).toBeInTheDocument();
+      expect(screen.getByText('Purpose & Charter')).toBeInTheDocument();
+      expect(screen.getByText('Dry-Run Gate')).toBeInTheDocument();
+      expect(screen.getByText('Run weekly audit')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: 'Refresh score' }));
+      expect(ipc.invokeCommand).toHaveBeenCalledWith('dry_run_agent_eval', {
+        agentId: 'agent-1',
+        prompts: ['Verify readiness and sources'],
+      });
     });
 
     it('calls onSaveSettings without firing a duplicate update_agent_profile IPC call', async () => {

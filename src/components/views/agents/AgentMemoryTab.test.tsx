@@ -154,4 +154,129 @@ describe('AgentMemoryTab (T3 Knowledge Packs & Smart Memory)', () => {
       expect(screen.getByText(/SharedContextStore/i)).toBeInTheDocument();
     });
   });
+
+  it('uses workspace SelectMenu with autoAuthorizePlace and supports Knowledge Pack Edit & Enable toggle', async () => {
+    const savedPack = {
+      id: 'kp-2',
+      name: 'Core ODDs',
+      root: 'C:\\repo\\kite',
+      globs: ['odd/tasks/*.md'],
+      enabled: true,
+      createdAtUnixMs: Date.now(),
+    };
+    mockInvoke.mockImplementation(async (cmd: string, payload?: any) => {
+      if (cmd === 'list_agent_knowledge_packs') {
+        return {
+          agentId: sampleMind.agentId,
+          packs: [],
+          entries: [],
+          totalChunks: 0,
+          manifestPreview: '',
+        };
+      }
+      if (cmd === 'save_agent_knowledge_pack') {
+        const nextEnabled =
+          typeof payload?.request?.enabled === 'boolean' ? payload.request.enabled : true;
+        const nextName = payload?.request?.name || savedPack.name;
+        return {
+          agentId: sampleMind.agentId,
+          packs: [{ ...savedPack, name: nextName, enabled: nextEnabled }],
+          entries: [
+            {
+              packId: 'kp-2',
+              name: nextName,
+              root: savedPack.root,
+              globs: savedPack.globs,
+              indexedAtUnixMs: Date.now(),
+              fileCount: 2,
+              chunkCount: 8,
+            },
+          ],
+          totalChunks: 8,
+          manifestPreview: `## Knowledge Packs\n- ${nextName}`,
+        };
+      }
+      return null;
+    });
+
+    render(
+      <AgentMemoryTab
+        agentName="Architect"
+        mind={sampleMind}
+        workspaceId="ws-1"
+        workspaces={[
+          {
+            id: 'ws-1',
+            displayName: 'Project Kite',
+            createdAtUnixMs: 1,
+            lastOpenedAtUnixMs: 1,
+            pinned: true,
+            available: true,
+          },
+        ]}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: /Knowledge Packs/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: /Authorized root folder/i })).toBeInTheDocument();
+    });
+
+    // Custom path input is hidden while workspace option is selected
+    expect(screen.queryByLabelText('Custom folder path')).toBeNull();
+
+    // Switching to Custom path... reveals custom path input, switching back selects ws-1
+    fireEvent.click(screen.getByRole('combobox', { name: /Authorized root folder/i }));
+    fireEvent.click(await screen.findByRole('option', { name: /Custom path\.\.\./i }));
+    expect(screen.getByLabelText('Custom folder path')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('combobox', { name: /Authorized root folder/i }));
+    fireEvent.click(await screen.findByRole('option', { name: /Project Kite/i }));
+    expect(screen.queryByLabelText('Custom folder path')).toBeNull();
+
+    fireEvent.change(screen.getByPlaceholderText('Architecture & ODDs'), {
+      target: { value: 'Core ODDs' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Attach Knowledge Pack' }));
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_agent_knowledge_pack', {
+        request: expect.objectContaining({
+          agentId: sampleMind.agentId,
+          name: 'Core ODDs',
+          root: '',
+          workspaceId: 'ws-1',
+          autoAuthorizePlace: true,
+          enabled: true,
+        }),
+      });
+    });
+
+    // Toggle pack enabled off
+    const toggle = await screen.findByRole('switch', { name: 'Enable Core ODDs' });
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_agent_knowledge_pack', {
+        request: expect.objectContaining({
+          id: 'kp-2',
+          enabled: false,
+        }),
+      });
+    });
+
+    // Edit existing pack
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('button', { name: 'Save Knowledge Pack' })).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Architecture & ODDs'), {
+      target: { value: 'Core ODDs v2' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Knowledge Pack' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Core ODDs v2')).toBeInTheDocument();
+    });
+  });
 });

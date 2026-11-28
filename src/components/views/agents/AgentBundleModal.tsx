@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { RECOMMENDED_SPECIALIST_TEMPLATES } from './agentPresets';
 import type { CuratedAgentTemplate } from './types';
 
 export interface AgentBundleModalProps {
@@ -9,6 +10,8 @@ export interface AgentBundleModalProps {
   onClose: () => void;
   onImported?: () => void;
 }
+
+const RECOMMENDED_IDS = new Set(['ship-guard', 'discovery-architect']);
 
 export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
   isOpen,
@@ -30,8 +33,30 @@ export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
     setStatus(null);
     void invoke<{ templates?: CuratedAgentTemplate[] }>('list_curated_agent_templates')
       .then((res) => setTemplates(res?.templates ?? []))
-      .catch(() => {});
+      .catch((err) => {
+        console.warn('[AgentBundleModal] Failed to load curated templates:', err);
+      });
   }, [isOpen]);
+
+  const recommendedTemplates = useMemo(() => {
+    const fromBackend = templates.filter((t) => RECOMMENDED_IDS.has(t.id));
+    if (fromBackend.length > 0) return fromBackend;
+    return RECOMMENDED_SPECIALIST_TEMPLATES.map((p) => ({
+      id: p.id,
+      name: p.name,
+      engine: p.engine,
+      roleBadge: p.roleBadge,
+      summary: p.summary,
+      brief: p.brief,
+      toolPolicies: {},
+      knowledgePackGlobs: [],
+    }));
+  }, [templates]);
+
+  const coreTemplates = useMemo(
+    () => templates.filter((t) => !RECOMMENDED_IDS.has(t.id)),
+    [templates]
+  );
 
   if (!isOpen) return null;
 
@@ -68,27 +93,22 @@ export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
     }
   };
 
-  const handleInstallTemplate = async (tpl: CuratedAgentTemplate) => {
+  const handleInstallCuratedTemplate = async (templateId: string, templateName: string) => {
     setBusy(true);
     setError(null);
     try {
-      await invoke('import_agent_bundle', {
-        request: {
-          bundle: {
-            schema: 'kite-agent/v1',
-            bundleVersion: 1,
-            agent: {
-              name: tpl.name,
-              engine: tpl.engine,
-              brief: tpl.brief,
-              toolPolicies: tpl.toolPolicies,
-            },
-            skills: [],
-            knowledgePacks: [],
-          },
-        },
+      const res = await invoke<{
+        installed?: boolean;
+        created?: boolean;
+        readinessScore?: number;
+      }>('install_curated_agent_template', {
+        request: { templateId },
       });
-      setStatus(`Created specialist from template: ${tpl.name}`);
+      const scoreSuffix =
+        typeof res?.readinessScore === 'number' ? ` (Readiness ${res.readinessScore}/100)` : '';
+      setStatus(
+        `${res?.created === false ? 'Updated' : 'Installed'} specialist: ${templateName}${scoreSuffix}`
+      );
       onImported?.();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Template install failed');
@@ -99,40 +119,19 @@ export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
 
   return (
     <div
-      className="notif-modal-backdrop"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 9999,
-        backgroundColor: 'var(--glass-modal-scrim, rgba(0, 0, 0, 0.72))',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '16px',
-      }}
+      className="notif-modal-backdrop agent-modal-backdrop"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
-        className="notif-modal-dialog ui-card"
+        className="notif-modal-dialog ui-card agent-modal-dialog"
         role="dialog"
         aria-label={`Portable Bundles & Templates — ${agentName}`}
-        style={{
-          width: '680px',
-          maxWidth: '100%',
-          maxHeight: '86vh',
-          padding: '18px',
-          borderRadius: 'var(--dialog-radius, 14px)',
-          overflowY: 'auto',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px',
-        }}
       >
         <div className="agent-playbooks__run-header">
           <div>
-            <strong>Portable `.kite-agent.json` Bundles & Templates</strong>
+            <strong>Portable `.kite-agent.json` Bundles &amp; Templates</strong>
             <p className="agent-knowledge__meta">
               Share specialist charters, skills, tool policies, and relative Knowledge Pack globs without credentials or local paths.
             </p>
@@ -153,8 +152,8 @@ export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
           </p>
         ) : null}
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={{ display: 'flex', gap: '8px' }}>
+        <div className="agent-modal-section">
+          <div className="agent-modal-row">
             <button type="button" className="primary-button" disabled={busy} onClick={() => void handleExport()}>
               Export {agentName} (.kite-agent.json)
             </button>
@@ -164,20 +163,18 @@ export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
               aria-label="Exported agent bundle JSON"
               readOnly
               rows={6}
-              className="ui-field"
-              style={{ minHeight: '120px', padding: '8px' }}
+              className="ui-field agent-modal-textarea"
               value={exportedJson}
             />
           ) : null}
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <div className="agent-modal-section">
           <span className="ui-eyebrow">Import `.kite-agent.json` Bundle</span>
           <textarea
             aria-label="Paste bundle JSON"
             rows={4}
-            className="ui-field"
-            style={{ minHeight: '90px', padding: '8px' }}
+            className="ui-field agent-modal-textarea"
             placeholder='{"schema":"kite-agent/v1","agent":{...}}'
             value={importJson}
             onChange={(e) => setImportJson(e.currentTarget.value)}
@@ -194,10 +191,32 @@ export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
           </div>
         </div>
 
-        {templates.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <span className="ui-eyebrow">Curated Specialist Templates</span>
-            {templates.map((tpl) => (
+        <div className="agent-modal-section">
+          <span className="ui-eyebrow">Recommended Specialists (Antigravity)</span>
+          {recommendedTemplates.map((tpl) => (
+            <div key={tpl.id} className="agent-knowledge__item ui-card">
+              <div className="agent-knowledge__item-info">
+                <strong>{tpl.name}</strong>
+                <span className="agent-knowledge__meta">
+                  {tpl.engine} · {tpl.summary}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={busy}
+                onClick={() => void handleInstallCuratedTemplate(tpl.id, tpl.name)}
+              >
+                Install {tpl.name}
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {coreTemplates.length > 0 ? (
+          <div className="agent-modal-section">
+            <span className="ui-eyebrow">Curated Core Templates</span>
+            {coreTemplates.map((tpl) => (
               <div key={tpl.id} className="agent-knowledge__item ui-card">
                 <div className="agent-knowledge__item-info">
                   <strong>{tpl.name}</strong>
@@ -209,7 +228,7 @@ export const AgentBundleModal: React.FC<AgentBundleModalProps> = ({
                   type="button"
                   className="chrome-button"
                   disabled={busy}
-                  onClick={() => void handleInstallTemplate(tpl)}
+                  onClick={() => void handleInstallCuratedTemplate(tpl.id, tpl.name)}
                 >
                   Create from template
                 </button>

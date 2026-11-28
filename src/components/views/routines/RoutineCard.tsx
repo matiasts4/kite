@@ -87,7 +87,7 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
     <li
       className="ui-card__row routine-row"
       style={{
-        borderBottom: '1px solid var(--block-stroke, rgba(255, 255, 255, 0.08))',
+        borderBottom: '1px solid var(--glass-inner-border, var(--block-stroke, rgba(255, 255, 255, 0.08)))',
         padding: '14px 16px',
         display: 'flex',
         flexDirection: 'column',
@@ -119,9 +119,10 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
             alignItems: 'center',
             gap: '4px',
             padding: '2px 8px',
-            borderRadius: '12px',
+            borderRadius: 'var(--pill-radius, 9999px)',
             fontSize: '11px',
-            backgroundColor: 'var(--block-fill, rgba(255, 255, 255, 0.06))',
+            backgroundColor: 'var(--glass-field-bg, var(--block-fill))',
+            border: '1px solid var(--glass-inner-border, var(--block-stroke, transparent))',
             color: 'var(--text-secondary, #9da2b4)',
           }}
         >
@@ -155,9 +156,10 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
             title="An agent scheduled this with the schedule tool."
             style={{
               padding: '2px 8px',
-              borderRadius: '12px',
+              borderRadius: 'var(--pill-radius, 9999px)',
               fontSize: '11px',
-              backgroundColor: 'rgba(92, 143, 255, 0.15)',
+              backgroundColor: 'var(--accent-tint, color-mix(in srgb, var(--accent, #5c8fff) 15%, transparent))',
+              border: '1px solid var(--accent-tint-strong, transparent)',
               color: 'var(--accent, #5c8fff)',
             }}
           >
@@ -217,10 +219,11 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
             fontSize: '12px',
             lineHeight: '1.4',
             color: 'var(--text-secondary, #a8adbf)',
-            backgroundColor: 'rgba(0, 0, 0, 0.18)',
+            backgroundColor: 'var(--glass-field-bg, var(--block-fill))',
             padding: '6px 10px',
-            borderRadius: '6px',
-            borderLeft: '2px solid var(--block-stroke, rgba(255, 255, 255, 0.15))',
+            borderRadius: 'var(--control-radius, 8px)',
+            border: '1px solid var(--glass-inner-border, var(--block-stroke, transparent))',
+            borderLeft: '2px solid var(--vl-stroke-strong, var(--block-stroke))',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             display: '-webkit-box',
@@ -286,9 +289,9 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
               onClick={(e) => onOpenThread(routine, e)}
               className="secondary-button"
               style={{
-                padding: '2px 8px',
-                height: '24px',
-                borderRadius: '4px',
+                padding: '0 8px',
+                height: 'var(--vl-control-sm, 26px)',
+                borderRadius: 'var(--control-radius, 8px)',
                 fontSize: '11px',
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -309,9 +312,9 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
             onClick={() => onRunNow(routine)}
             className="chrome-button"
             style={{
-              width: '26px',
-              height: '26px',
-              borderRadius: '4px',
+              width: 'var(--vl-control-sm, 26px)',
+              height: 'var(--vl-control-sm, 26px)',
+              borderRadius: 'var(--vl-radius-sm, 6px)',
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -335,9 +338,9 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
             onClick={() => onEdit(routine)}
             className="chrome-button"
             style={{
-              width: '26px',
-              height: '26px',
-              borderRadius: '4px',
+              width: 'var(--vl-control-sm, 26px)',
+              height: 'var(--vl-control-sm, 26px)',
+              borderRadius: 'var(--vl-radius-sm, 6px)',
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
@@ -357,9 +360,9 @@ export const RoutineCard: React.FC<RoutineCardProps> = ({
             onClick={() => onDelete(routine)}
             className="chrome-button routine-row__delete"
             style={{
-              width: '26px',
-              height: '26px',
-              borderRadius: '4px',
+              width: 'var(--vl-control-sm, 26px)',
+              height: 'var(--vl-control-sm, 26px)',
+              borderRadius: 'var(--vl-radius-sm, 6px)',
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',

@@ -1,11 +1,33 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { SelectMenu } from '../../ui/SelectMenu';
 import type { AgentAuditLogEntry } from './types';
 
 export interface AgentAuditTabProps {
   agentId: string;
   onOpenThread?: (threadId: string) => void;
 }
+
+const VERDICT_OPTIONS = [
+  { id: 'all', title: 'All verdicts' },
+  { id: 'allowed', title: 'Allowed' },
+  { id: 'asked', title: 'Asked' },
+  { id: 'denied', title: 'Denied' },
+];
+
+const TOOL_FAMILY_OPTIONS = [
+  { id: 'all', title: 'All families' },
+  { id: 'thread', title: 'thread' },
+  { id: 'memory', title: 'memory' },
+  { id: 'routine', title: 'routine' },
+  { id: 'teammate', title: 'teammate' },
+  { id: 'tasks', title: 'tasks' },
+  { id: 'ctx', title: 'ctx' },
+  { id: 'diff', title: 'diff' },
+  { id: 'subagents', title: 'subagents' },
+  { id: 'filesystem_write', title: 'filesystem_write' },
+  { id: 'shell', title: 'shell' },
+];
 
 export const AgentAuditTab: React.FC<AgentAuditTabProps> = ({ agentId, onOpenThread }) => {
   const [entries, setEntries] = useState<AgentAuditLogEntry[]>([]);
@@ -76,31 +98,22 @@ export const AgentAuditTab: React.FC<AgentAuditTabProps> = ({ agentId, onOpenThr
             value={searchText}
             onChange={(e) => setSearchText(e.currentTarget.value)}
           />
-          <select
-            aria-label="Filter by verdict"
-            className="ui-field"
+          <SelectMenu
+            variant="toolbar"
+            label="Filter by verdict"
             value={verdictFilter}
-            onChange={(e) => setVerdictFilter(e.currentTarget.value as typeof verdictFilter)}
-          >
-            <option value="all">All verdicts</option>
-            <option value="allowed">Allowed</option>
-            <option value="asked">Asked</option>
-            <option value="denied">Denied</option>
-          </select>
-          <select
-            aria-label="Filter by tool family"
-            className="ui-field"
+            triggerLabel={VERDICT_OPTIONS.find((v) => v.id === verdictFilter)?.title || 'All verdicts'}
+            rows={VERDICT_OPTIONS}
+            onSelect={(id) => setVerdictFilter(id as typeof verdictFilter)}
+          />
+          <SelectMenu
+            variant="toolbar"
+            label="Filter by tool family"
             value={familyFilter}
-            onChange={(e) => setFamilyFilter(e.currentTarget.value)}
-          >
-            <option value="all">All families</option>
-            <option value="tasks">tasks</option>
-            <option value="ctx">ctx</option>
-            <option value="diff">diff</option>
-            <option value="memory">memory</option>
-            <option value="routine">routine</option>
-            <option value="shell">shell</option>
-          </select>
+            triggerLabel={TOOL_FAMILY_OPTIONS.find((f) => f.id === familyFilter)?.title || 'All families'}
+            rows={TOOL_FAMILY_OPTIONS}
+            onSelect={(id) => setFamilyFilter(id)}
+          />
           <button
             type="button"
             className="chrome-button"

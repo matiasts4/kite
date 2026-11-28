@@ -64,50 +64,25 @@ export const SPECIALIST_AGENT_PRESETS: SpecialistAgentPreset[] = [
   },
 ];
 
-export const CURATED_V2_SPECIALIST_TEMPLATES: SpecialistAgentPreset[] = [
+export const RECOMMENDED_SPECIALIST_TEMPLATES: SpecialistAgentPreset[] = [
   {
-    id: 'odd-architect',
-    name: 'ODD Architect',
-    roleBadge: 'Architecture & ODDs',
+    id: 'ship-guard',
+    name: 'Ship Guard',
+    roleBadge: 'Release & Clean-Room Gate',
     engine: 'antigravity',
-    summary: 'Writes clean-room ODD specs, maps dependencies, and plans reviewable slices.',
+    summary:
+      'Slices dirty trees into Conventional Commits, verifies quality gates, and blocks clean-room leaks before push.',
     brief:
-      'Author concise Organic Driven Development specifications, enforce clean module boundaries, and keep Risk assessments explicit.',
+      'Prepare safe, reviewable Conventional Commit slices, run proportional verification gates, and enforce clean-room hygiene before any commit or push.',
   },
   {
-    id: 'security-policy-auditor',
-    name: 'Security & Policy Auditor',
-    roleBadge: 'Security Auditor',
-    engine: 'claude-code',
-    summary: 'Audits diffs, tool permissions, credential handling, and Places sandboxes.',
+    id: 'discovery-architect',
+    name: 'Discovery Architect',
+    roleBadge: 'Discovery & ODD Architect',
+    engine: 'antigravity',
+    summary:
+      'Researches features and architecture, drafts clean-room ODD specs, and launches orchestrator threads.',
     brief:
-      'Inspect diffs and permission boundaries for privilege escalation, secret leaks, path traversal, and missing input validation.',
-  },
-  {
-    id: 'test-regression-runner',
-    name: 'Test & Regression Runner',
-    roleBadge: 'Test & QA Engineer',
-    engine: 'codex',
-    summary: 'Reproduces failures RED-first and runs focused Cargo/Vitest/TSC verification suites.',
-    brief:
-      'Verify changes through RED->GREEN tests across Rust Cargo suites, Vitest specs, and TypeScript checks without mocking away assertions.',
-  },
-  {
-    id: 'pr-diff-reviewer',
-    name: 'PR Diff Reviewer',
-    roleBadge: 'PR Reviewer',
-    engine: 'claude-code',
-    summary: 'Reviews slices for correctness, edge cases, UI token adherence, and clean-room hygiene.',
-    brief:
-      'Perform adversarial read-only diff reviews highlighting concrete bugs, contract breaks, and design token drift.',
-  },
-  {
-    id: 'research-librarian',
-    name: 'Research Librarian',
-    roleBadge: 'Codebase Librarian',
-    engine: 'grok',
-    summary: 'Indexes documentation and ODD specs into concise SharedContext handoffs.',
-    brief:
-      'Use Knowledge Packs and compact kite_ctx reads to synthesize grounded architecture maps without mutating repository files.',
+      'Investigate product capabilities, codebase architecture, and docs; produce clean-room Organic Driven Development specs; and launch orchestrator threads when ready.',
   },
 ];

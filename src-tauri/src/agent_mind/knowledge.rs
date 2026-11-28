@@ -636,6 +636,129 @@ pub fn search_knowledge_packs_at(
     })
 }
 
+fn sync_knowledge_packs_to_autonomy(agent_id: &str, index: &KnowledgeIndexFile) {
+    let mut cfg = crate::agents::load_agent_autonomy_config(agent_id);
+    cfg.knowledge_packs = index
+        .packs
+        .iter()
+        .map(|p| crate::agents::KnowledgePackConfig {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            root_path: p.root.clone(),
+            globs: p.globs.clone(),
+            enabled: p.enabled,
+        })
+        .collect();
+    let _ = crate::agents::save_agent_autonomy_config(agent_id, &cfg);
+}
+
+fn path_matches_or_inside(candidate: &Path, workspace_root: &Path) -> bool {
+    let cand_norm = crate::agents::normalize_lexical_path(
+        &candidate.canonicalize().unwrap_or_else(|_| candidate.to_path_buf()),
+    );
+    let ws_norm = crate::agents::normalize_lexical_path(
+        &workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf()),
+    );
+    if cand_norm == ws_norm || cand_norm.starts_with(&ws_norm) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let c = cand_norm.to_string_lossy().to_ascii_lowercase();
+        let w = ws_norm.to_string_lossy().to_ascii_lowercase();
+        let w_trim = w.trim_end_matches('\\');
+        return c == w_trim || c.starts_with(&format!("{w_trim}\\"));
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn ensure_agent_place_authorized(agent_id: &str, place_label: &str) {
+    let clean = place_label.trim();
+    if clean.is_empty() {
+        return;
+    }
+    let changed = {
+        let Ok(mut items) = crate::persist::agents().lock() else {
+            return;
+        };
+        let Some(agent) = items.iter_mut().find(|a| a.id == agent_id) else {
+            return;
+        };
+        if agent
+            .place_display_names
+            .iter()
+            .any(|p| p.trim().eq_ignore_ascii_case(clean))
+        {
+            false
+        } else {
+            agent.place_display_names.push(clean.to_string());
+            true
+        }
+    };
+    if changed {
+        crate::persist::persist();
+    }
+}
+
+fn resolve_and_auto_authorize_workspace(
+    agent_id: &str,
+    workspace_id: Option<&str>,
+    raw_root: &str,
+    explicit_auto_authorize: Option<bool>,
+) -> Option<PathBuf> {
+    let workspaces = crate::persist::workspaces()
+        .lock()
+        .map(|w| w.clone())
+        .unwrap_or_default();
+
+    let mut matched_ws: Option<(String, PathBuf)> = None;
+    if let Some(ws_id) = workspace_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(ws) = workspaces
+            .iter()
+            .find(|w| w.id == ws_id || w.display_name.eq_ignore_ascii_case(ws_id))
+        {
+            if let Some(p) = crate::persist::workspace_path(&ws.id) {
+                matched_ws = Some((ws.display_name.clone(), PathBuf::from(p)));
+            }
+        }
+    }
+
+    let trimmed_root = raw_root.trim();
+    if matched_ws.is_none() && !trimmed_root.is_empty() {
+        let candidate = PathBuf::from(trimmed_root);
+        for ws in &workspaces {
+            if let Some(p) = crate::persist::workspace_path(&ws.id) {
+                let ws_path = PathBuf::from(p);
+                if path_matches_or_inside(&candidate, &ws_path) {
+                    matched_ws = Some((ws.display_name.clone(), ws_path));
+                    break;
+                }
+            }
+        }
+    }
+
+    let auto_authorize = explicit_auto_authorize.unwrap_or(true);
+    if let Some((display_name, ws_path)) = matched_ws {
+        if auto_authorize {
+            ensure_agent_place_authorized(agent_id, &display_name);
+        }
+        return ws_path.is_dir().then_some(ws_path);
+    }
+
+    if explicit_auto_authorize == Some(true) && !trimmed_root.is_empty() {
+        let direct = PathBuf::from(trimmed_root);
+        if direct.is_dir() {
+            ensure_agent_place_authorized(agent_id, trimmed_root);
+            return Some(direct);
+        }
+    }
+
+    None
+}
+
 fn snapshot_json(agent_id: &str, index: &KnowledgeIndexFile) -> Value {
     let total_chunks = index.chunks.len();
     let manifest_preview = render_knowledge_manifest_at(&agents_root(), agent_id);
@@ -664,7 +787,15 @@ pub fn save_agent_knowledge_pack(request: Value) -> Result<Value, AgentMindError
     require_known_agent(agent_id)?;
     let id = req.get("id").and_then(Value::as_str);
     let name = req.get("name").and_then(Value::as_str).unwrap_or("");
-    let root_path = req.get("root").and_then(Value::as_str).unwrap_or("");
+    let raw_root = req.get("root").and_then(Value::as_str).unwrap_or("");
+    let workspace_id = req
+        .get("workspaceId")
+        .or_else(|| req.get("workspace_id"))
+        .and_then(Value::as_str);
+    let explicit_auto = req
+        .get("autoAuthorizePlace")
+        .or_else(|| req.get("auto_authorize_place"))
+        .and_then(Value::as_bool);
     let enabled = req.get("enabled").and_then(Value::as_bool).unwrap_or(true);
     let globs: Vec<String> = req
         .get("globs")
@@ -676,17 +807,34 @@ pub fn save_agent_knowledge_pack(request: Value) -> Result<Value, AgentMindError
                 .collect()
         })
         .unwrap_or_default();
-    let allowed = resolve_agent_authorized_roots(Some(agent_id), None);
+
+    let matched_ws_path =
+        resolve_and_auto_authorize_workspace(agent_id, workspace_id, raw_root, explicit_auto);
+    let effective_root = if raw_root.trim().is_empty() {
+        matched_ws_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        raw_root.to_string()
+    };
+    let bound_ws = if explicit_auto == Some(false) {
+        None
+    } else {
+        matched_ws_path.as_deref()
+    };
+    let allowed = resolve_agent_authorized_roots(Some(agent_id), bound_ws);
     let index = save_knowledge_pack_at(
         &agents_root(),
         agent_id,
         &allowed,
         id,
         name,
-        root_path,
+        &effective_root,
         globs,
         enabled,
     )?;
+    sync_knowledge_packs_to_autonomy(agent_id, &index);
     Ok(snapshot_json(agent_id, &index))
 }
 
@@ -697,6 +845,7 @@ pub fn delete_agent_knowledge_pack(request: Value) -> Result<Value, AgentMindErr
     require_known_agent(agent_id)?;
     let pack_id = req.get("packId").and_then(Value::as_str).unwrap_or("");
     let index = delete_knowledge_pack_at(&agents_root(), agent_id, pack_id)?;
+    sync_knowledge_packs_to_autonomy(agent_id, &index);
     Ok(snapshot_json(agent_id, &index))
 }
 
@@ -705,8 +854,34 @@ pub fn reindex_agent_knowledge_packs(request: Value) -> Result<Value, AgentMindE
     let req = request_body(&request);
     let agent_id = req.get("agentId").and_then(Value::as_str).unwrap_or("");
     require_known_agent(agent_id)?;
-    let allowed = resolve_agent_authorized_roots(Some(agent_id), None);
-    let index = reindex_knowledge_packs_at(&agents_root(), agent_id, &allowed)?;
+    let workspace_id = req
+        .get("workspaceId")
+        .or_else(|| req.get("workspace_id"))
+        .and_then(Value::as_str);
+    let explicit_auto = req
+        .get("autoAuthorizePlace")
+        .or_else(|| req.get("auto_authorize_place"))
+        .and_then(Value::as_bool);
+
+    let root_dir = agents_root();
+    let existing = load_knowledge_index_at(&root_dir, agent_id);
+    let mut bound_ws =
+        resolve_and_auto_authorize_workspace(agent_id, workspace_id, "", explicit_auto);
+    for pack in existing.packs.iter().filter(|p| p.enabled) {
+        let matched =
+            resolve_and_auto_authorize_workspace(agent_id, workspace_id, &pack.root, explicit_auto);
+        if bound_ws.is_none() {
+            bound_ws = matched;
+        }
+    }
+    let effective_bound = if explicit_auto == Some(false) {
+        None
+    } else {
+        bound_ws.as_deref()
+    };
+    let allowed = resolve_agent_authorized_roots(Some(agent_id), effective_bound);
+    let index = reindex_knowledge_packs_at(&root_dir, agent_id, &allowed)?;
+    sync_knowledge_packs_to_autonomy(agent_id, &index);
     Ok(snapshot_json(agent_id, &index))
 }
 
@@ -718,4 +893,128 @@ pub fn search_agent_knowledge_packs(request: Value) -> Result<Value, AgentMindEr
     let query = req.get("query").and_then(Value::as_str).unwrap_or("");
     let limit = req.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
     Ok(search_knowledge_packs_at(&agents_root(), agent_id, query, limit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn save_and_reindex_knowledge_pack_auto_authorizes_registered_workspace_and_syncs_autonomy() {
+        let ws_dir = std::env::temp_dir().join(format!("kite-kp-ws-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(ws_dir.join("docs")).unwrap();
+        std::fs::write(ws_dir.join("docs").join("guide.md"), "# Guide\nClean docs.\n").unwrap();
+
+        let ws_id = format!("ws-kp-{}", Uuid::new_v4().simple());
+        let ws_name = format!("WorkspaceKP-{}", Uuid::new_v4().simple());
+        let agent_id = Uuid::new_v4().to_string();
+
+        {
+            let mut wss = crate::persist::workspaces().lock().unwrap();
+            wss.push(crate::persist::Workspace {
+                id: ws_id.clone(),
+                display_name: ws_name.clone(),
+                created_at_unix_ms: 1_700_000_000_000,
+                last_opened_at_unix_ms: 1_700_000_000_000,
+                pinned: false,
+                available: true,
+            });
+        }
+        crate::persist::paths()
+            .lock()
+            .unwrap()
+            .insert(ws_id.clone(), ws_dir.to_string_lossy().to_string());
+        {
+            let mut list = crate::persist::agents().lock().unwrap();
+            list.push(crate::persist::AgentProfile {
+                id: agent_id.clone(),
+                name: "Knowledge Tester".into(),
+                engine: "antigravity".into(),
+                purpose: "Test KP".into(),
+                brief: "Test KP".into(),
+                avatar: None,
+                created_at_unix_ms: 1_700_000_000_000,
+                pinned: false,
+                order: 99,
+                memory_budget: None,
+                reflection_mode: None,
+                allow_agent_scheduling: None,
+                allow_agent_messaging: None,
+                default_mode: None,
+                default_plan: None,
+                default_model: None,
+                default_provider_options: Vec::new(),
+                place_display_names: Vec::new(),
+                disabled_plugin_ids: Vec::new(),
+            });
+        }
+
+        // Unregistered external directory with default autoAuthorizePlace must still be denied
+        let outside_dir = std::env::temp_dir().join(format!("kite-kp-out-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let denied_err = save_agent_knowledge_pack(json!({
+            "request": {
+                "agentId": agent_id,
+                "name": "Outside",
+                "root": outside_dir.to_string_lossy(),
+                "globs": ["**/*.md"]
+            }
+        }))
+        .expect_err("unregistered random root must still require Places authorization");
+        assert_eq!(denied_err.code, "knowledge_places_denied");
+
+        // Registered workspace with autoAuthorizePlace: false stays denied
+        let explicit_false_err = save_agent_knowledge_pack(json!({
+            "request": {
+                "agentId": agent_id,
+                "name": "No Auto",
+                "workspaceId": ws_id,
+                "root": ws_dir.join("docs").to_string_lossy(),
+                "autoAuthorizePlace": false,
+                "globs": ["**/*.md"]
+            }
+        }))
+        .expect_err("autoAuthorizePlace=false must keep knowledge_places_denied");
+        assert_eq!(explicit_false_err.code, "knowledge_places_denied");
+
+        // Registered workspace with default autoAuthorizePlace authorizes Place & syncs SQLite
+        let snap = save_agent_knowledge_pack(json!({
+            "request": {
+                "agentId": agent_id,
+                "name": "Docs Pack",
+                "workspaceId": ws_id,
+                "root": ws_dir.join("docs").to_string_lossy(),
+                "globs": ["**/*.md"]
+            }
+        }))
+        .expect("auto-authorized Place should allow saving Knowledge Pack");
+        assert_eq!(snap["totalChunks"].as_u64(), Some(1));
+
+        let places = crate::persist::agents()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|a| a.id == agent_id)
+            .map(|a| a.place_display_names.clone())
+            .unwrap_or_default();
+        assert!(places.iter().any(|p| p == &ws_name));
+
+        let autonomy = crate::agents::load_agent_autonomy_config(&agent_id);
+        assert_eq!(autonomy.knowledge_packs.len(), 1);
+        assert_eq!(autonomy.knowledge_packs[0].name, "Docs Pack");
+
+        let reindexed = reindex_agent_knowledge_packs(json!({
+            "request": { "agentId": agent_id, "workspaceId": ws_id }
+        }))
+        .expect("reindex should succeed");
+        assert_eq!(reindexed["totalChunks"].as_u64(), Some(1));
+
+        crate::persist::agents().lock().unwrap().retain(|a| a.id != agent_id);
+        crate::persist::workspaces().lock().unwrap().retain(|w| w.id != ws_id);
+        crate::persist::paths().lock().unwrap().remove(&ws_id);
+        let _ = fs::remove_dir_all(&ws_dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+        let _ = fs::remove_dir_all(agents_root().join(&agent_id));
+    }
 }

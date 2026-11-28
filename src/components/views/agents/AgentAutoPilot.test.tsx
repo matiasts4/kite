@@ -292,4 +292,78 @@ describe('AgentAutoPilot multi-turn continuation', () => {
 
     window.removeEventListener('kite:agent-announce', announceListener);
   });
+
+  it('never re-triggers autopilot_next mid-turn across 30s watch window while threadRunning is true, and renders reactive telemetry + gate chips', async () => {
+    const autopilotRequests: any[] = [];
+    invokeMock.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === 'autopilot_next') {
+        autopilotRequests.push(args.request);
+        if (autopilotRequests.length === 1) {
+          return { action: 'prompt', prompt: 'Step 1', reason: 'Turn 1' };
+        }
+        if (autopilotRequests.length === 2) {
+          return { action: 'verify', gates: ['npm run verify:ipc'], reason: 'Verify IPC' };
+        }
+        return { action: 'complete', reason: 'Verified' };
+      }
+      if (cmd === 'run_autopilot_verification_gates') {
+        return {
+          allPassed: true,
+          results: [{ command: 'npm run verify:ipc', passed: true, output: 'ok' }],
+        };
+      }
+      return null;
+    });
+
+    const baseProps = {
+      surface: 'thread' as const,
+      profile: { id: 'agent-1', name: 'Orion', engine: 'antigravity' },
+      threadId: 'thread-watch',
+      workspaceId: 'ws-1',
+      threadItems: [{ kind: 'user', text: 'Run checks' }],
+      onSubmitThreadPrompt: async () => {},
+    };
+
+    const { rerender } = render(<AgentAutoPilot {...baseProps} threadRunning={false} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /auto/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByText('Complete'));
+      await Promise.resolve();
+    });
+
+    // Live reactive telemetry readout visible
+    const telemetry = screen.getByLabelText('AutoPilot live telemetry');
+    expect(telemetry).toHaveTextContent(/Turn 1\/12 · 00:0\d/);
+
+    // Advance 35s while thread is actively running -> MUST NOT trigger a 2nd autopilot_next mid-turn
+    rerender(<AgentAutoPilot {...baseProps} threadRunning={true} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(35_000);
+      await Promise.resolve();
+    });
+    expect(autopilotRequests).toHaveLength(1);
+    expect(screen.getByLabelText('AutoPilot live telemetry')).toHaveTextContent(/00:3[56]/);
+
+    // Finish turn and advance past idle settle -> triggers turn 2 verification + gate chip
+    rerender(
+      <AgentAutoPilot
+        {...baseProps}
+        threadRunning={false}
+        threadItems={[
+          { kind: 'user', text: 'Run checks' },
+          { kind: 'assistant', text: 'Finished step 1' },
+        ]}
+      />
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1600);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(autopilotRequests.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByLabelText('Verification gate results')).toHaveTextContent('✓ npm run verify:ipc');
+  });
 });

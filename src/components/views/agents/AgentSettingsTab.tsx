@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { invokeCommand } from '../../../lib/ipc';
 import type { AgentProfile, Workspace } from '../../../types';
 import type { AvatarChoice } from '../../AgentAvatar';
+import { SelectMenu } from '../../ui/SelectMenu';
 import { AgentAvatarCustomizer } from './AgentAvatarCustomizer';
+import type { DryRunEvalReport } from './types';
 import {
   BrandLogo,
   TEAMMATE_ENGINE_IDS,
@@ -95,6 +97,8 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [resolvedAgentId, setResolvedAgentId] = useState<string>(agentId || '');
   const [initialEngine, setInitialEngine] = useState<string>(settingsDraft.engine || 'antigravity');
+  const [readinessReport, setReadinessReport] = useState<DryRunEvalReport | null>(null);
+  const [readinessLoading, setReadinessLoading] = useState<boolean>(false);
 
   const [customAvatar, setCustomAvatar] = useState<AvatarChoice | null>(() => {
     if (settingsDraft.avatar) {
@@ -134,12 +138,38 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
           }
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.warn('[AgentSettingsTab] Could not list agent profiles:', err);
+      });
 
     return () => {
       isMounted = false;
     };
   }, [agentId, settingsDraft.name, settingsDraft.avatar]);
+
+  const refreshReadinessScore = useCallback(async (targetId: string) => {
+    if (!targetId) return;
+    setReadinessLoading(true);
+    try {
+      const res = await invokeCommand<DryRunEvalReport>('dry_run_agent_eval', {
+        agentId: targetId,
+        prompts: ['Verify readiness and sources'],
+      });
+      if (res && typeof res.readinessScore === 'number') {
+        setReadinessReport(res);
+      }
+    } catch (err) {
+      console.warn('[AgentSettingsTab] Could not evaluate readiness score:', err);
+    } finally {
+      setReadinessLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (resolvedAgentId) {
+      void refreshReadinessScore(resolvedAgentId);
+    }
+  }, [resolvedAgentId, refreshReadinessScore]);
 
   const effectiveId = resolvedAgentId || settingsDraft.name || 'agent-preview';
 
@@ -652,28 +682,20 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
                 disabled={readOnly || saving}
               />
               {workspaces && workspaces.length > 0 && (
-                <select
-                  className="ui-field rounded-control text-caption"
-                  style={{ height: 'var(--vl-control-md, 32px)', maxWidth: '160px' }}
-                  aria-label="Add from workspace"
+                <SelectMenu
+                  variant="field"
+                  label="Add from workspace"
                   value=""
-                  onChange={(e) => {
-                    if (e.target.value) {
-                      handleAddPlace(e.target.value);
-                    }
-                  }}
-                  disabled={readOnly || saving}
-                >
-                  <option value="" disabled>Add from workspace…</option>
-                  {workspaces.map((w: any) => {
+                  triggerLabel="Add from workspace…"
+                  rows={workspaces.map((w: any) => {
                     const wsName = w.displayName || w.name || 'Workspace';
-                    return (
-                      <option key={w.id} value={wsName}>
-                        {wsName}
-                      </option>
-                    );
+                    return { id: wsName, title: wsName };
                   })}
-                </select>
+                  disabled={readOnly || saving}
+                  onSelect={(val) => {
+                    if (val) handleAddPlace(val);
+                  }}
+                />
               )}
               <button
                 type="button"
@@ -690,10 +712,50 @@ export const AgentSettingsTab: React.FC<AgentSettingsTabProps> = ({
             </p>
           </section>
 
-          {(onOpenDryRunEval || onOpenBundleModal) ? (
+          {(onOpenDryRunEval || onOpenBundleModal || resolvedAgentId) ? (
             <section className="agent-setting-group">
-              <h2 className="agent-setting-label">Validation & Portable Bundles</h2>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              <h2 className="agent-setting-label">Validation, Readiness &amp; Portable Bundles</h2>
+              {readinessReport && typeof readinessReport.readinessScore === 'number' ? (
+                <div className="ui-card agent-readiness__card">
+                  <div className="agent-readiness__header">
+                    <span
+                      className="agent-readiness__score-pill"
+                      data-strong={readinessReport.readinessScore >= 85 ? 'true' : 'false'}
+                    >
+                      Readiness Score: {readinessReport.readinessScore}/100
+                    </span>
+                    <button
+                      type="button"
+                      className="chrome-button"
+                      disabled={readinessLoading}
+                      onClick={() => void refreshReadinessScore(resolvedAgentId)}
+                    >
+                      {readinessLoading ? 'Checking…' : 'Refresh score'}
+                    </button>
+                  </div>
+                  {Array.isArray(readinessReport.readinessPillars) &&
+                  readinessReport.readinessPillars.length > 0 ? (
+                    <div className="agent-readiness__pillars">
+                      {readinessReport.readinessPillars.map((pillar) => (
+                        <div
+                          key={pillar.id}
+                          className="agent-readiness__pillar"
+                          data-passed={pillar.passed ? 'true' : 'false'}
+                        >
+                          <div className="agent-readiness__pillar-top">
+                            <strong>{pillar.label}</strong>
+                            <span className="agent-readiness__pillar-status">
+                              {pillar.passed ? '✓ Passed' : 'Needs work'} ({pillar.score}/{pillar.maxScore})
+                            </span>
+                          </div>
+                          <span className="agent-knowledge__meta">{pillar.hint}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="agent-modal-row">
                 {onOpenDryRunEval ? (
                   <button
                     type="button"

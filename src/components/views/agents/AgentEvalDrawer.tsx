@@ -48,36 +48,15 @@ export const AgentEvalDrawer: React.FC<AgentEvalDrawerProps> = ({
 
   return (
     <div
-      className="notif-modal-backdrop"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 9999,
-        backgroundColor: 'var(--glass-modal-scrim, rgba(0, 0, 0, 0.72))',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '16px',
-      }}
+      className="notif-modal-backdrop agent-modal-backdrop"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
-        className="notif-modal-dialog ui-card"
+        className="notif-modal-dialog ui-card agent-modal-dialog"
         role="dialog"
         aria-label={`Dry-Run Eval for ${agentName}`}
-        style={{
-          width: '640px',
-          maxWidth: '100%',
-          maxHeight: '85vh',
-          padding: '18px',
-          borderRadius: 'var(--dialog-radius, 14px)',
-          overflowY: 'auto',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px',
-        }}
       >
         <div className="agent-playbooks__run-header">
           <div>
@@ -97,14 +76,13 @@ export const AgentEvalDrawer: React.FC<AgentEvalDrawerProps> = ({
           </p>
         ) : null}
 
-        <form onSubmit={(e) => void handleRunEval(e)} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <form onSubmit={(e) => void handleRunEval(e)} className="agent-modal-section">
           <label className="agent-knowledge__field">
             <span className="ui-eyebrow">Test prompts (one per line)</span>
             <textarea
               aria-label="Dry-Run test prompts"
               rows={3}
-              className="ui-field"
-              style={{ minHeight: '78px', padding: '8px 10px' }}
+              className="ui-field agent-modal-textarea"
               value={promptsText}
               onChange={(e) => setPromptsText(e.currentTarget.value)}
             />
@@ -117,11 +95,45 @@ export const AgentEvalDrawer: React.FC<AgentEvalDrawerProps> = ({
         </form>
 
         {report ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div className="agent-knowledge__meta">
-              Prompt size: {report.estimatedPromptTokens} tokens ({report.compiledPromptChars} chars) ·{' '}
-              Passed: {report.passedCases}/{report.totalCases} · Blocked mutations: {report.blockedMutations}
+          <div className="agent-modal-section">
+            <div className="agent-readiness__header">
+              <div className="agent-knowledge__meta">
+                Prompt size: {report.estimatedPromptTokens} tokens ({report.compiledPromptChars} chars) ·{' '}
+                Passed: {report.passedCases}/{report.totalCases} · Blocked mutations: {report.blockedMutations}
+              </div>
+              {typeof report.readinessScore === 'number' ? (
+                <span
+                  className="agent-readiness__score-pill"
+                  data-strong={report.readinessScore >= 85 ? 'true' : 'false'}
+                >
+                  Readiness Score: {report.readinessScore}/100
+                </span>
+              ) : null}
             </div>
+
+            {Array.isArray(report.readinessPillars) && report.readinessPillars.length > 0 ? (
+              <div className="ui-card agent-readiness__card">
+                <span className="ui-eyebrow">8-Pillar Readiness Checklist</span>
+                <div className="agent-readiness__pillars">
+                  {report.readinessPillars.map((pillar) => (
+                    <div
+                      key={pillar.id}
+                      className="agent-readiness__pillar"
+                      data-passed={pillar.passed ? 'true' : 'false'}
+                    >
+                      <div className="agent-readiness__pillar-top">
+                        <strong>{pillar.label}</strong>
+                        <span className="agent-readiness__pillar-status">
+                          {pillar.passed ? '✓ Passed' : 'Needs work'} ({pillar.score}/{pillar.maxScore})
+                        </span>
+                      </div>
+                      <span className="agent-knowledge__meta">{pillar.hint}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             {report.results.map((r, i) => (
               <div key={i} className="agent-playbooks__node">
                 <div className="agent-playbooks__node-top">

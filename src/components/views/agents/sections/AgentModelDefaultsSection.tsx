@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { invokeCommand } from '../../../../lib/ipc';
 import { SelectMenu } from '../../../ui/SelectMenu';
 import { EffortPicker } from '../../chat/EffortPicker';
-import { resolveEffortChoicesForModel } from '../../chat/driverDeclaration';
+import { reconcileEffortForModel, resolveEffortChoicesForModel } from '../../chat/driverDeclaration';
 import {
   supportsAgentChat,
   getEngineDisplayName,
@@ -156,10 +156,38 @@ export const AgentModelDefaultsSection: React.FC<AgentModelDefaultsSectionProps>
                   disabled={readOnly || saving}
                   rows={modelRows}
                   onSelect={(id) => {
-                    setSettingsDraft((prev: any) => ({
-                      ...prev,
-                      defaultModel: id === AUTOMATIC_MODEL_ID ? null : id,
-                    }));
+                    const nextModelId = id === AUTOMATIC_MODEL_ID ? null : id;
+                    const nextModelMeta = nextModelId
+                      ? liveModels.find((model) => model.id === nextModelId)
+                      : null;
+                    setSettingsDraft((prev: any) => {
+                      const currentEffort =
+                        prev.defaultEffort ||
+                        prev.defaultProviderOptions?.find((o: any) => o?.effort)?.effort ||
+                        null;
+                      const reconciledEffort =
+                        nextModelId === null || nextModelMeta
+                          ? reconcileEffortForModel(nextModelMeta, currentEffort)
+                          : currentEffort;
+                      const opts = Array.isArray(prev.defaultProviderOptions)
+                        ? prev.defaultProviderOptions
+                            .map((o: any) => {
+                              if (!o || !('effort' in o)) return o;
+                              if (reconciledEffort) {
+                                return { ...o, effort: reconciledEffort };
+                              }
+                              const { effort: _removed, ...rest } = o;
+                              return Object.keys(rest).length > 0 ? rest : null;
+                            })
+                            .filter(Boolean)
+                        : [];
+                      return {
+                        ...prev,
+                        defaultModel: nextModelId,
+                        defaultEffort: reconciledEffort,
+                        defaultProviderOptions: opts,
+                      };
+                    });
                     setSettingsDirty(true);
                   }}
                 />

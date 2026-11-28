@@ -1,8 +1,11 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { invokeCommand } from '../../../lib/ipc';
 import { setAgentSkillEnabled, writeAgentSkill } from '../../../lib/ipc/agents';
+import type { Workspace } from '../../../types';
+import { SelectMenu } from '../../ui/SelectMenu';
 import {
   AgentMindSnapshot,
+  DiscoverableSkill,
   LearnedSkillDocument,
   StarterSummary,
   formatRelativeAge,
@@ -257,8 +260,11 @@ function renderProcedureMarkdown(source: string): React.ReactNode {
 }
 
 export interface AgentSkillsTabProps {
+  agentId?: string;
   agentName: string;
   mind: AgentMindSnapshot | null;
+  workspaceId?: string | null;
+  workspaces?: Workspace[];
   selectedSkillId: string | null;
   skillDocument: LearnedSkillDocument | null;
   skillLoading: boolean;
@@ -298,8 +304,11 @@ function formatLastUsedLabel(lastUsed: string | null): string | null {
 }
 
 export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
+  agentId: agentIdProp,
   agentName,
   mind,
+  workspaceId = null,
+  workspaces = [],
   selectedSkillId,
   skillDocument,
   skillLoading,
@@ -313,6 +322,7 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
   onMindUpdated,
   readOnly = false,
 }) => {
+  const effectiveAgentId = agentIdProp || mind?.agentId || '';
   const [isEditingSkill, setIsEditingSkill] = useState<boolean>(false);
   const [skillSourceDraft, setSkillSourceDraft] = useState<string>('');
   const [isConfirmingDeleteSkill, setIsConfirmingDeleteSkill] = useState<boolean>(false);
@@ -324,6 +334,25 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
   const [creatingSkill, setCreatingSkill] = useState<boolean>(false);
   const [togglingSkillId, setTogglingSkillId] = useState<string | null>(null);
 
+  // Discoverable repo & global skills state
+  const [discoveryWorkspaceId, setDiscoveryWorkspaceId] = useState<string | null>(
+    workspaceId ?? workspaces[0]?.id ?? null
+  );
+  const [discoverableSkills, setDiscoverableSkills] = useState<DiscoverableSkill[]>([]);
+  const [workspaceRootLabel, setWorkspaceRootLabel] = useState<string | null>(null);
+  const [linkedRefsLocal, setLinkedRefsLocal] = useState<string[]>(mind?.linkedSkillRefs ?? []);
+  const [discoverLoading, setDiscoverLoading] = useState<boolean>(false);
+  const [linkingRefKey, setLinkingRefKey] = useState<string | null>(null);
+
+  // Capture from Chat state
+  const [isCapturingFromChat, setIsCapturingFromChat] = useState<boolean>(false);
+  const [captureName, setCaptureName] = useState<string>('');
+  const [captureDescription, setCaptureDescription] = useState<string>('');
+  const [captureMessagesText, setCaptureMessagesText] = useState<string>('');
+  const [captureManualOnly, setCaptureManualOnly] = useState<boolean>(false);
+  const [capturingSkill, setCapturingSkill] = useState<boolean>(false);
+  const [loadingLatestChat, setLoadingLatestChat] = useState<boolean>(false);
+
   // Starters state
   const [startersList, setStartersList] = useState<StarterSummary[]>(startersProp || []);
   const [startersLoading, setStartersLoading] = useState<boolean>(false);
@@ -332,6 +361,50 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
 
   const starterMenuRef = useRef<HTMLDivElement>(null);
   const starterButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (workspaceId !== undefined) {
+      setDiscoveryWorkspaceId(workspaceId ?? workspaces[0]?.id ?? null);
+    }
+  }, [workspaceId, workspaces]);
+
+  useEffect(() => {
+    if (Array.isArray(mind?.linkedSkillRefs)) {
+      setLinkedRefsLocal(mind.linkedSkillRefs);
+    }
+  }, [mind?.linkedSkillRefs]);
+
+  const loadDiscoverableSkills = useCallback(async () => {
+    if (!effectiveAgentId) return;
+    setDiscoverLoading(true);
+    try {
+      const res = await invokeCommand<{
+        skills?: DiscoverableSkill[];
+        workspaceRoot?: string | null;
+        linkedSkillRefs?: string[];
+      }>('list_discoverable_skills', {
+        workspaceId: discoveryWorkspaceId ?? undefined,
+        agentId: effectiveAgentId,
+      });
+      if (Array.isArray(res?.skills)) {
+        setDiscoverableSkills(res.skills);
+      }
+      if (res?.workspaceRoot !== undefined) {
+        setWorkspaceRootLabel(res.workspaceRoot ?? null);
+      }
+      if (Array.isArray(res?.linkedSkillRefs)) {
+        setLinkedRefsLocal(res.linkedSkillRefs);
+      }
+    } catch (err) {
+      console.warn('[AgentSkillsTab] Could not load discoverable skills:', err);
+    } finally {
+      setDiscoverLoading(false);
+    }
+  }, [effectiveAgentId, discoveryWorkspaceId]);
+
+  useEffect(() => {
+    void loadDiscoverableSkills();
+  }, [loadDiscoverableSkills]);
 
   // Load starter skills if not passed via props
   useEffect(() => {
@@ -517,11 +590,11 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
   };
 
   const handleToggleSkillEnabled = async (skillId: string, currentEnabled: boolean) => {
-    if (readOnly || !mind?.agentId || togglingSkillId) return;
+    if (readOnly || !effectiveAgentId || togglingSkillId) return;
     setTogglingSkillId(skillId);
     setLocalError(null);
     try {
-      const nextMind = await setAgentSkillEnabled(mind.agentId, skillId, !currentEnabled, true);
+      const nextMind = await setAgentSkillEnabled(effectiveAgentId, skillId, !currentEnabled, true);
       onMindUpdated?.(nextMind);
     } catch (err: unknown) {
       console.error('[AgentSkillsTab] Failed to toggle skill:', err);
@@ -531,12 +604,127 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
     }
   };
 
+  const activeLinkedRefs = mind?.linkedSkillRefs ?? linkedRefsLocal;
+
+  const handleToggleLinkedSkill = async (refKey: string) => {
+    if (readOnly || !effectiveAgentId || linkingRefKey) return;
+    setLinkingRefKey(refKey);
+    setLocalError(null);
+    const isLinked = activeLinkedRefs.includes(refKey);
+    const nextRefs = isLinked
+      ? activeLinkedRefs.filter((r) => r !== refKey)
+      : [...activeLinkedRefs, refKey];
+    try {
+      const nextMind = await invokeCommand<AgentMindSnapshot>('set_agent_linked_skills', {
+        agentId: effectiveAgentId,
+        linkedSkillRefs: nextRefs,
+      });
+      setLinkedRefsLocal(nextMind?.linkedSkillRefs ?? nextRefs);
+      if (nextMind) {
+        onMindUpdated?.(nextMind);
+      }
+    } catch (err: unknown) {
+      console.error('[AgentSkillsTab] Failed to update linked skills:', err);
+      setLocalError(err instanceof Error ? err.message : 'Failed to update linked skills');
+    } finally {
+      setLinkingRefKey(null);
+    }
+  };
+
+  const prefillLatestChat = async () => {
+    if (!effectiveAgentId || loadingLatestChat) return;
+    setLoadingLatestChat(true);
+    try {
+      const summaryRes = await invokeCommand<{
+        summaries?: Array<{ id: string; title?: string }>;
+      }>('list_agent_chat_summaries', { agentId: effectiveAgentId });
+      const latestThreadId = summaryRes?.summaries?.[0]?.id;
+      if (!latestThreadId) return;
+      const threadRes = await invokeCommand<{
+        items?: Array<{ kind?: string; text?: string }>;
+      }>('load_agent_chat_thread', {
+        agentId: effectiveAgentId,
+        threadId: latestThreadId,
+      });
+      const relevant = (threadRes?.items ?? [])
+        .filter((it) => (it.kind === 'user' || it.kind === 'assistant') && (it.text ?? '').trim())
+        .slice(-8)
+        .map((it) => `${it.kind === 'user' ? 'User' : 'Assistant'}: ${(it.text ?? '').trim()}`);
+      if (relevant.length > 0) {
+        setCaptureMessagesText(relevant.join('\n'));
+      }
+    } catch (err) {
+      console.warn('[AgentSkillsTab] Could not prefill latest chat:', err);
+    } finally {
+      setLoadingLatestChat(false);
+    }
+  };
+
+  const handleOpenCaptureFromChat = () => {
+    setIsCreatingSkill(false);
+    setIsCapturingFromChat(true);
+    setLocalError(null);
+    if (!captureMessagesText.trim()) {
+      void prefillLatestChat();
+    }
+  };
+
+  const handleCaptureFromChat = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (readOnly || hasSkillsFolderIssue || !effectiveAgentId) return;
+    const trimmedName = captureName.trim();
+    const lines = captureMessagesText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (!trimmedName || lines.length === 0) {
+      setLocalError('Provide a skill name and at least one conversation step.');
+      return;
+    }
+    const messages = lines.map((line) => {
+      const userMatch = line.match(/^(?:user|human|request)\s*:\s*(.+)$/i);
+      if (userMatch) return { role: 'user', text: userMatch[1].trim() };
+      const assistantMatch = line.match(/^(?:assistant|agent|procedure)\s*:\s*(.+)$/i);
+      if (assistantMatch) return { role: 'assistant', text: assistantMatch[1].trim() };
+      const cmdMatch = line.match(/^(?:command|tool)\s*:\s*(.+)$/i);
+      if (cmdMatch) return { role: 'tool', text: cmdMatch[1].trim() };
+      return { role: 'assistant', text: line };
+    });
+
+    setCapturingSkill(true);
+    setLocalError(null);
+    try {
+      const nextMind = await invokeCommand<AgentMindSnapshot & { capturedSkillId?: string }>(
+        'capture_agent_skill_from_chat',
+        {
+          agentId: effectiveAgentId,
+          name: trimmedName,
+          description: captureDescription.trim(),
+          messages,
+          manualOnly: captureManualOnly,
+        }
+      );
+      onMindUpdated?.(nextMind);
+      setIsCapturingFromChat(false);
+      setCaptureName('');
+      setCaptureDescription('');
+      setCaptureMessagesText('');
+      setCaptureManualOnly(false);
+    } catch (err: unknown) {
+      console.error('[AgentSkillsTab] Failed to capture skill from chat:', err);
+      setLocalError(err instanceof Error ? err.message : 'Failed to capture skill from chat');
+    } finally {
+      setCapturingSkill(false);
+    }
+  };
+
   const renderNewSkillButton = () => (
     <button
       type="button"
       className="secondary-button action-button--row"
       disabled={readOnly || hasSkillsFolderIssue}
       onClick={() => {
+        setIsCapturingFromChat(false);
         setIsCreatingSkill(true);
         setLocalError(null);
       }}
@@ -545,6 +733,17 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
         <PlusSvg size={11} />
       </span>
       + New Skill
+    </button>
+  );
+
+  const renderCaptureFromChatButton = () => (
+    <button
+      type="button"
+      className="secondary-button action-button--row"
+      disabled={readOnly || hasSkillsFolderIssue || !effectiveAgentId}
+      onClick={handleOpenCaptureFromChat}
+    >
+      Capture from Chat
     </button>
   );
 
@@ -793,6 +992,7 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
           {skillsCount > 0 ? (
             <div className="ui-tabs__trailing">
               {renderNewSkillButton()}
+              {renderCaptureFromChatButton()}
               {hasAvailableStarters ? renderStarterControl() : null}
             </div>
           ) : null}
@@ -881,6 +1081,89 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
           </div>
         )}
 
+        {isCapturingFromChat && (
+          <div className="agent-mind-column">
+            <form className="ui-card agent-skills__new-form" onSubmit={(e) => void handleCaptureFromChat(e)}>
+              <div className="agent-skills__section-header">
+                <strong>Capture skill from chat</strong>
+                <button
+                  type="button"
+                  className="chrome-button"
+                  disabled={loadingLatestChat || capturingSkill}
+                  onClick={() => void prefillLatestChat()}
+                >
+                  {loadingLatestChat ? 'Loading chat…' : 'Load latest chat'}
+                </button>
+              </div>
+              <div className="agent-skills__new-field">
+                <label htmlFor="capture-skill-name">Skill name</label>
+                <input
+                  id="capture-skill-name"
+                  type="text"
+                  className="ui-field"
+                  value={captureName}
+                  onChange={(e) => setCaptureName(e.currentTarget.value)}
+                  placeholder="e.g. Pre-push Clean-Room Audit"
+                  disabled={capturingSkill}
+                />
+              </div>
+              <div className="agent-skills__new-field">
+                <label htmlFor="capture-skill-description">When it fires</label>
+                <input
+                  id="capture-skill-description"
+                  type="text"
+                  className="ui-field"
+                  value={captureDescription}
+                  onChange={(e) => setCaptureDescription(e.currentTarget.value)}
+                  placeholder="Run when preparing a clean-room commit or push"
+                  disabled={capturingSkill}
+                />
+              </div>
+              <div className="agent-skills__new-field">
+                <label htmlFor="capture-skill-messages">Conversation steps</label>
+                <textarea
+                  id="capture-skill-messages"
+                  className="ui-field ui-field--area"
+                  rows={5}
+                  value={captureMessagesText}
+                  onChange={(e) => setCaptureMessagesText(e.currentTarget.value)}
+                  placeholder="Paste conversation turns or steps (one per line, optionally prefixed with User: / Assistant: / Command:)"
+                  disabled={capturingSkill}
+                />
+              </div>
+              <label className="agent-skills__capture-check">
+                <input
+                  type="checkbox"
+                  checked={captureManualOnly}
+                  onChange={(e) => setCaptureManualOnly(e.currentTarget.checked)}
+                  disabled={capturingSkill}
+                />
+                <span>Manual-only (disable automatic invocation)</span>
+              </label>
+              <div className="agent-skills__new-actions">
+                <button
+                  type="button"
+                  className="secondary-button action-button--row"
+                  disabled={capturingSkill}
+                  onClick={() => {
+                    setIsCapturingFromChat(false);
+                    setLocalError(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="primary-button action-button--row"
+                  disabled={capturingSkill || !captureName.trim() || !captureMessagesText.trim()}
+                >
+                  {capturingSkill ? 'Capturing…' : 'Save captured skill'}
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
         {mind && mind.skills && mind.skills.length > 0 ? (
           <div className="agent-mind-column">
             <p className="agent-mind-lede">
@@ -890,8 +1173,9 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
             <div className="ui-card agent-skills__rows">
               {mind.skills.map((skill) => {
                 const hasIssue = hasSkillReadIssue(mind, skill.id);
-                const isEnabled = (skill as typeof skill & { enabled?: boolean }).enabled !== false;
+                const isEnabled = skill.enabled !== false;
                 const lastUsedLabel = formatLastUsedLabel(skill.lastUsed);
+                const isIneligible = skill.eligible === false;
                 return (
                   <div
                     key={skill.id}
@@ -921,6 +1205,24 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
                       <span className="agent-skills__row-copy">
                         <strong>{skill.name}</strong>
                         <span>{skill.description || 'No description — the agent should add one.'}</span>
+                        {(skill.manualOnly || skill.contextMode === 'fork' || isIneligible) ? (
+                          <span className="agent-skills__badges">
+                            {skill.manualOnly ? (
+                              <span className="agent-skills__badge">manual-only</span>
+                            ) : null}
+                            {skill.contextMode === 'fork' ? (
+                              <span className="agent-skills__badge">context: fork</span>
+                            ) : null}
+                            {isIneligible ? (
+                              <span
+                                className="agent-skills__badge agent-skills__badge--warn"
+                                title={skill.missingRequirements?.join(', ') || 'Missing prerequisites'}
+                              >
+                                ineligible
+                              </span>
+                            ) : null}
+                          </span>
+                        ) : null}
                         {(skill.uses > 0 || lastUsedLabel) ? (
                           <small>
                             {skill.uses > 0 ? (skill.uses === 1 ? 'Fired once' : `Fired ${skill.uses}×`) : ''}
@@ -967,10 +1269,113 @@ export const AgentSkillsTab: React.FC<AgentSkillsTabProps> = ({
             </div>
             <div className="agent-skills__empty-actions">
               {renderNewSkillButton()}
+              {renderCaptureFromChatButton()}
               {hasAvailableStarters ? renderStarterControl('Add starter skill') : null}
             </div>
           </section>
         )}
+
+        {effectiveAgentId ? (
+          <div className="agent-mind-column agent-skills__section">
+            <div className="agent-skills__section-header">
+              <div>
+                <h2 className="ui-eyebrow">Repo &amp; Global Skills</h2>
+                <p className="agent-knowledge__meta">
+                  Link workspace <code>.agents/skills/*</code> and global <code>SKILL.md</code> skills directly without copying files.
+                  {workspaceRootLabel ? ` · Root: ${workspaceRootLabel}` : ''}
+                </p>
+              </div>
+              <div className="agent-modal-row">
+                {workspaces.length > 0 ? (
+                  <SelectMenu
+                    variant="toolbar"
+                    label="Skill discovery workspace"
+                    value={discoveryWorkspaceId ?? workspaces[0].id}
+                    triggerLabel={
+                      workspaces.find((w) => w.id === discoveryWorkspaceId)?.displayName ||
+                      workspaces[0].displayName
+                    }
+                    rows={workspaces.map((ws) => ({
+                      id: ws.id,
+                      title: ws.displayName,
+                    }))}
+                    onSelect={(id) => setDiscoveryWorkspaceId(id)}
+                  />
+                ) : null}
+                <button
+                  type="button"
+                  className="chrome-button"
+                  disabled={discoverLoading}
+                  onClick={() => void loadDiscoverableSkills()}
+                >
+                  {discoverLoading ? 'Scanning…' : 'Refresh'}
+                </button>
+              </div>
+            </div>
+
+            {discoverableSkills.length === 0 ? (
+              <div className="ui-card agent-knowledge__empty">
+                No workspace or global SKILL.md entries discovered yet.
+              </div>
+            ) : (
+              <div className="ui-card agent-skills__rows">
+                {discoverableSkills.map((dSkill) => {
+                  const isLinked = activeLinkedRefs.includes(dSkill.refKey);
+                  return (
+                    <div
+                      key={dSkill.refKey}
+                      className={`ui-card__row${!dSkill.eligible ? ' agent-skills__row--disabled' : ''}`}
+                    >
+                      <div className="agent-skills__row-main">
+                        <span aria-hidden="true" className="agent-skills__row-icon">
+                          <FileTextSvg size={14} />
+                        </span>
+                        <span className="agent-skills__row-copy">
+                          <strong>{dSkill.name}</strong>
+                          <span>{dSkill.description || dSkill.path}</span>
+                          <span className="agent-skills__badges">
+                            <span className="agent-skills__badge agent-skills__badge--scope">
+                              {dSkill.scope}
+                            </span>
+                            {dSkill.manualOnly ? (
+                              <span className="agent-skills__badge">manual-only</span>
+                            ) : null}
+                            {dSkill.contextMode === 'fork' ? (
+                              <span className="agent-skills__badge">context: fork</span>
+                            ) : null}
+                            {!dSkill.eligible ? (
+                              <span
+                                className="agent-skills__badge agent-skills__badge--warn"
+                                title={dSkill.missingRequirements?.join(', ') || 'Missing prerequisites'}
+                              >
+                                ineligible
+                              </span>
+                            ) : null}
+                          </span>
+                          {!dSkill.eligible && dSkill.missingRequirements?.length > 0 ? (
+                            <small>Missing: {dSkill.missingRequirements.join(', ')}</small>
+                          ) : null}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={isLinked}
+                        aria-label={`Link ${dSkill.name}`}
+                        className={`agent-skills__switch${isLinked ? ' is-checked' : ''}`}
+                        disabled={readOnly || linkingRefKey === dSkill.refKey}
+                        onClick={() => void handleToggleLinkedSkill(dSkill.refKey)}
+                      >
+                        <span className="agent-skills__switch-thumb" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        ) : null}
       </div>
     </div>
   );

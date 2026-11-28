@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import type { Workspace } from '../../../types';
+import { SelectMenu } from '../../ui/SelectMenu';
 import {
   AgentMindSnapshot,
   MemoryEntryMeta,
   MemoryTarget,
+  KnowledgePackDef,
   KnowledgePackSnapshot,
   KnowledgePackSearchMatch,
   MEMORY_DELIMITER,
@@ -225,8 +228,12 @@ export interface WriteAgentMemoryArgs {
 }
 
 export interface AgentMemoryTabProps {
+  agentId?: string;
   agentName?: string;
   mind: AgentMindSnapshot | null;
+  workspaceId?: string | null;
+  workspaces?: Workspace[];
+  placeDisplayNames?: string[];
   memoryTarget?: MemoryTarget;
   setMemoryTarget?: (target: MemoryTarget) => void;
   memoryBudget?: number | null;
@@ -248,8 +255,12 @@ export interface AgentMemoryTabProps {
 }
 
 export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
+  agentId: agentIdProp,
   agentName: agentNameProp,
   mind: mindProp,
+  workspaceId: workspaceIdProp = null,
+  workspaces: workspacesProp = [],
+  placeDisplayNames: _placeDisplayNamesProp,
   memoryTarget: memoryTargetProp,
   setMemoryTarget: setMemoryTargetProp,
   memoryBudget: memoryBudgetProp,
@@ -282,9 +293,22 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
   const [localSaving, setLocalSaving] = useState<boolean>(false);
   const [localMind, setLocalMind] = useState<AgentMindSnapshot | null>(mindProp);
 
+  const defaultRootChoice = useMemo(() => {
+    if (workspaceIdProp && workspacesProp.some((w) => w.id === workspaceIdProp)) {
+      return workspaceIdProp;
+    }
+    if (workspacesProp.length > 0) {
+      return workspacesProp[0].id;
+    }
+    return '__custom__';
+  }, [workspaceIdProp, workspacesProp]);
+
   // Knowledge Packs state
   const [knowledgeSnapshot, setKnowledgeSnapshot] = useState<KnowledgePackSnapshot | null>(null);
+  const [editingPackId, setEditingPackId] = useState<string | null>(null);
+  const [editingPackEnabled, setEditingPackEnabled] = useState<boolean>(true);
   const [packName, setPackName] = useState<string>('');
+  const [selectedRootChoice, setSelectedRootChoice] = useState<string>(defaultRootChoice);
   const [packRoot, setPackRoot] = useState<string>('');
   const [packGlobs, setPackGlobs] = useState<string>('odd/tasks/*.md, docs/**');
   const [packBusy, setPackBusy] = useState<boolean>(false);
@@ -295,8 +319,14 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
 
   const activeMind = mindProp ?? localMind;
   const effectiveAgentName = profile?.name ?? agentNameProp ?? 'This agent';
-  const effectiveAgentId = profile?.id ?? activeMind?.agentId ?? '';
+  const effectiveAgentId = profile?.id ?? agentIdProp ?? activeMind?.agentId ?? '';
   const activeTarget = memoryTargetProp ?? internalTarget;
+
+  useEffect(() => {
+    if (!editingPackId && !packRoot.trim()) {
+      setSelectedRootChoice(defaultRootChoice);
+    }
+  }, [defaultRootChoice, editingPackId, packRoot]);
 
   // Sync internal state when agent changes
   useEffect(() => {
@@ -497,9 +527,23 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
       .filter((cluster) => cluster.entries.length > 0);
   }, [memoryClusters, searchFilter, showArchived, getEntryMeta]);
 
+  const isCustomRoot = selectedRootChoice === '__custom__';
+  const canSubmitPack = Boolean(
+    effectiveAgentId && packName.trim() && (!isCustomRoot || packRoot.trim())
+  );
+
+  const resetPackForm = useCallback(() => {
+    setEditingPackId(null);
+    setEditingPackEnabled(true);
+    setPackName('');
+    setPackRoot('');
+    setPackGlobs('odd/tasks/*.md, docs/**');
+    setSelectedRootChoice(defaultRootChoice);
+  }, [defaultRootChoice]);
+
   const handleSaveKnowledgePack = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!effectiveAgentId || !packName.trim() || !packRoot.trim()) return;
+    if (!canSubmitPack) return;
     setPackBusy(true);
     setPackError(null);
     try {
@@ -507,17 +551,23 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
         .split(',')
         .map((g) => g.trim())
         .filter(Boolean);
+      const effectiveWorkspaceId = isCustomRoot
+        ? (workspaceIdProp ?? undefined)
+        : selectedRootChoice;
       const snap = await invoke<KnowledgePackSnapshot>('save_agent_knowledge_pack', {
         request: {
           agentId: effectiveAgentId,
+          ...(editingPackId ? { id: editingPackId } : {}),
           name: packName.trim(),
-          root: packRoot.trim(),
+          root: isCustomRoot ? packRoot.trim() : '',
           globs,
-          enabled: true,
+          enabled: editingPackId ? editingPackEnabled : true,
+          ...(effectiveWorkspaceId ? { workspaceId: effectiveWorkspaceId } : {}),
+          autoAuthorizePlace: true,
         },
       });
       setKnowledgeSnapshot(snap);
-      setPackName('');
+      resetPackForm();
     } catch (err: unknown) {
       const msg =
         err instanceof Error
@@ -525,6 +575,47 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
           : typeof err === 'object' && err !== null && 'message' in err
             ? String((err as { message: unknown }).message)
             : 'Failed to attach Knowledge Pack';
+      setPackError(msg);
+    } finally {
+      setPackBusy(false);
+    }
+  };
+
+  const handleEditKnowledgePack = (pack: KnowledgePackDef) => {
+    setEditingPackId(pack.id);
+    setEditingPackEnabled(pack.enabled);
+    setPackName(pack.name);
+    setPackGlobs(pack.globs.join(', '));
+    setSelectedRootChoice('__custom__');
+    setPackRoot(pack.root);
+    setPackError(null);
+  };
+
+  const handleToggleKnowledgePack = async (pack: KnowledgePackDef) => {
+    if (!effectiveAgentId) return;
+    setPackBusy(true);
+    setPackError(null);
+    try {
+      const snap = await invoke<KnowledgePackSnapshot>('save_agent_knowledge_pack', {
+        request: {
+          agentId: effectiveAgentId,
+          id: pack.id,
+          name: pack.name,
+          root: pack.root,
+          globs: pack.globs,
+          enabled: !pack.enabled,
+          ...(workspaceIdProp ? { workspaceId: workspaceIdProp } : {}),
+          autoAuthorizePlace: true,
+        },
+      });
+      setKnowledgeSnapshot(snap);
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : typeof err === 'object' && err !== null && 'message' in err
+            ? String((err as { message: unknown }).message)
+            : 'Failed to update Knowledge Pack';
       setPackError(msg);
     } finally {
       setPackBusy(false);
@@ -540,6 +631,9 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
         request: { agentId: effectiveAgentId, packId },
       });
       setKnowledgeSnapshot(snap);
+      if (editingPackId === packId) {
+        resetPackForm();
+      }
     } catch (err: unknown) {
       setPackError(err instanceof Error ? err.message : 'Failed to remove Knowledge Pack');
     } finally {
@@ -553,7 +647,11 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
     setPackError(null);
     try {
       const snap = await invoke<KnowledgePackSnapshot>('reindex_agent_knowledge_packs', {
-        request: { agentId: effectiveAgentId },
+        request: {
+          agentId: effectiveAgentId,
+          ...(workspaceIdProp ? { workspaceId: workspaceIdProp } : {}),
+          autoAuthorizePlace: true,
+        },
       });
       setKnowledgeSnapshot(snap);
     } catch (err: unknown) {
@@ -1014,16 +1112,48 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
                     onChange={(e) => setPackName(e.currentTarget.value)}
                   />
                 </label>
-                <label className="agent-knowledge__field">
+                <div className="agent-knowledge__field">
                   <span className="ui-eyebrow">Authorized root folder</span>
-                  <input
-                    type="text"
-                    className="ui-field"
-                    placeholder="C:\repo\docs"
-                    value={packRoot}
-                    onChange={(e) => setPackRoot(e.currentTarget.value)}
+                  <SelectMenu
+                    variant="field"
+                    label="Authorized root folder"
+                    value={selectedRootChoice}
+                    triggerLabel={
+                      isCustomRoot
+                        ? 'Custom path...'
+                        : workspacesProp.find((w) => w.id === selectedRootChoice)?.displayName ||
+                          'Select workspace'
+                    }
+                    rows={[
+                      ...workspacesProp.map((ws) => ({
+                        id: ws.id,
+                        title: ws.displayName,
+                        detail: 'Workspace root (auto-authorizes Place)',
+                      })),
+                      {
+                        id: '__custom__',
+                        title: 'Custom path...',
+                        detail: 'Enter a folder path manually',
+                      },
+                    ]}
+                    onSelect={(id) => {
+                      setSelectedRootChoice(id);
+                      if (id !== '__custom__') {
+                        setPackRoot('');
+                      }
+                    }}
                   />
-                </label>
+                  {isCustomRoot ? (
+                    <input
+                      type="text"
+                      className="ui-field"
+                      aria-label="Custom folder path"
+                      placeholder="C:\repo\docs"
+                      value={packRoot}
+                      onChange={(e) => setPackRoot(e.currentTarget.value)}
+                    />
+                  ) : null}
+                </div>
                 <label className="agent-knowledge__field">
                   <span className="ui-eyebrow">File globs</span>
                   <input
@@ -1039,10 +1169,20 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
                 <button
                   type="submit"
                   className="primary-button"
-                  disabled={packBusy || !packName.trim() || !packRoot.trim()}
+                  disabled={packBusy || !canSubmitPack}
                 >
-                  Attach Knowledge Pack
+                  {editingPackId ? 'Save Knowledge Pack' : 'Attach Knowledge Pack'}
                 </button>
+                {editingPackId ? (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={packBusy}
+                    onClick={resetPackForm}
+                  >
+                    Cancel edit
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="chrome-button"
@@ -1066,19 +1206,45 @@ export const AgentMemoryTab: React.FC<AgentMemoryTabProps> = ({
                   return (
                     <div key={pack.id} className="ui-card agent-knowledge__item">
                       <div className="agent-knowledge__item-info">
-                        <strong>{pack.name}</strong>
+                        <div>
+                          <strong>{pack.name}</strong>
+                          {!pack.enabled ? (
+                            <span className="agent-memory__badge">Disabled</span>
+                          ) : null}
+                        </div>
                         <span className="agent-knowledge__meta">
                           {pack.root} · {pack.globs.join(', ') || '*'} · {entry?.fileCount ?? 0} files / {entry?.chunkCount ?? 0} chunks
                         </span>
                       </div>
-                      <button
-                        type="button"
-                        className="chrome-button"
-                        disabled={packBusy}
-                        onClick={() => void handleDeleteKnowledgePack(pack.id)}
-                      >
-                        Remove
-                      </button>
+                      <div className="agent-knowledge__item-actions">
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={pack.enabled}
+                          aria-label={`Enable ${pack.name}`}
+                          className={`agent-skills__switch${pack.enabled ? ' is-checked' : ''}`}
+                          disabled={packBusy}
+                          onClick={() => void handleToggleKnowledgePack(pack)}
+                        >
+                          <span className="agent-skills__switch-thumb" />
+                        </button>
+                        <button
+                          type="button"
+                          className="chrome-button"
+                          disabled={packBusy}
+                          onClick={() => handleEditKnowledgePack(pack)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="chrome-button"
+                          disabled={packBusy}
+                          onClick={() => void handleDeleteKnowledgePack(pack.id)}
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </div>
                   );
                 })}

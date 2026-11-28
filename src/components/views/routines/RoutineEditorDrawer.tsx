@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import type { AgentProfile } from '../../../types';
+import { SelectMenu } from '../../ui/SelectMenu';
 import type {
   RoutineItem,
   RoutineCadence,
@@ -173,6 +174,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !busy) {
         e.preventDefault();
+        e.stopPropagation();
         onClose();
       }
     };
@@ -247,7 +249,15 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
         onClose();
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      let msg = 'Failed to save routine';
+      if (err instanceof Error) {
+        msg = err.message;
+      } else if (typeof err === 'object' && err !== null && 'message' in err) {
+        const raw = (err as { message?: unknown }).message;
+        if (typeof raw === 'string' && raw.trim()) msg = raw;
+      } else if (typeof err === 'string' && err.trim()) {
+        msg = err;
+      }
       setLocalError(msg);
     }
   };
@@ -412,36 +422,28 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
 
             {/* Assigned Agent & Engine Selector */}
             <div className="routine-form__field">
-              <label htmlFor="routine-modal-agent" className="routine-form__label">
-                Assigned Agent Profile & Engine
-              </label>
+              <span className="routine-form__label">
+                Assigned Agent Profile &amp; Engine
+              </span>
               <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <select
-                  id="routine-modal-agent"
-                  value={agentId}
-                  disabled={busy || (Boolean(editingRoutine) && Boolean(editingRoutine?.agentId))}
-                  onChange={(e) => setAgentId(e.target.value)}
-                  style={{
-                    flex: 1,
-                    height: 'var(--vl-control-md, 32px)',
-                    padding: '0 10px',
-                    backgroundColor: 'var(--glass-elevated-bg, var(--block-fill, rgba(255, 255, 255, 0.04)))',
-                    border: '1px solid var(--glass-border, var(--block-stroke, rgba(255, 255, 255, 0.1)))',
-                    borderRadius: 'var(--control-radius, 8px)',
-                    color: 'var(--text-primary, #fff)',
-                    fontSize: '13px',
-                    outline: 'none',
-                  }}
-                >
-                  {agents.map((ag) => (
-                    <option key={ag.id} value={ag.id}>
-                      {ag.name} ({ag.engine || 'antigravity'})
-                    </option>
-                  ))}
-                  {agents.length === 0 && (
-                    <option value="">Default Antigravity Agent</option>
-                  )}
-                </select>
+                <div className="routine-form__select" style={{ flex: 1 }}>
+                  <SelectMenu
+                    label="Assigned Agent Profile & Engine"
+                    variant="field"
+                    value={agentId}
+                    disabled={busy || (Boolean(editingRoutine) && Boolean(editingRoutine?.agentId))}
+                    onSelect={(id) => setAgentId(id)}
+                    rows={
+                      agents.length > 0
+                        ? agents.map((ag) => ({
+                            id: ag.id,
+                            title: `${ag.name} (${ag.engine || 'antigravity'})`,
+                            engine: ag.engine,
+                          }))
+                        : [{ id: '', title: 'Default Antigravity Agent' }]
+                    }
+                  />
+                </div>
 
                 {selectedAgent?.engine && (
                   <span
@@ -622,7 +624,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                     style={{
                       flex: 1,
                       padding: '6px 10px',
-                      borderRadius: '5px',
+                      borderRadius: 'var(--vl-radius-sm, 6px)',
                       border: '0',
                       backgroundColor: customCadenceKind === 'preset' ? 'rgba(92, 143, 255, 0.2)' : 'transparent',
                       color: customCadenceKind === 'preset' ? 'var(--accent, #5c8fff)' : 'var(--text-secondary, #9da2b4)',
@@ -639,7 +641,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                     style={{
                       flex: 1,
                       padding: '6px 10px',
-                      borderRadius: '5px',
+                      borderRadius: 'var(--vl-radius-sm, 6px)',
                       border: '0',
                       backgroundColor: customCadenceKind === 'custom-interval' ? 'rgba(92, 143, 255, 0.2)' : 'transparent',
                       color: customCadenceKind === 'custom-interval' ? 'var(--accent, #5c8fff)' : 'var(--text-secondary, #9da2b4)',
@@ -705,7 +707,7 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                         <button
                           key={p.id}
                           type="button"
-                          className="chrome-button"
+                          className="routine-triage-btn"
                           onClick={() => setCronExpr(p.expr)}
                         >
                           {p.label}
@@ -915,22 +917,22 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                   </strong>
                   Fires automatically when matching workspace, Kite Task, teammate, or chained routine events occur.
                 </div>
-                <label className="routine-form__field">
+                <div className="routine-form__field">
                   <span className="routine-form__label">Event Kind</span>
-                  <select
-                    aria-label="Routine Event Kind"
-                    value={eventKind}
-                    disabled={busy}
-                    onChange={(e) => setEventKind(e.currentTarget.value as RoutineEventKind)}
-                    className="ui-field"
-                  >
-                    {ROUTINE_EVENT_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                  <div className="routine-form__select">
+                    <SelectMenu
+                      label="Routine Event Kind"
+                      variant="field"
+                      value={eventKind}
+                      disabled={busy}
+                      onSelect={(val) => setEventKind(val as RoutineEventKind)}
+                      rows={ROUTINE_EVENT_OPTIONS.map((opt) => ({
+                        id: opt.value,
+                        title: opt.label,
+                      }))}
+                    />
+                  </div>
+                </div>
                 <label className="routine-form__field">
                   <span className="routine-form__label">Debounce / Cooldown (seconds)</span>
                   <input
@@ -958,21 +960,24 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
                 gap: '10px',
               }}
             >
-              <label className="routine-form__field">
+              <div className="routine-form__field">
                 <span className="routine-form__label">Max Retries (exponential backoff)</span>
-                <select
-                  aria-label="Max Retries"
-                  value={maxRetries}
-                  disabled={busy}
-                  onChange={(e) => setMaxRetries(Number(e.currentTarget.value))}
-                  className="ui-field"
-                >
-                  <option value={0}>0 (No retries)</option>
-                  <option value={1}>1 retry (15s)</option>
-                  <option value={2}>2 retries (15s, 60s)</option>
-                  <option value={3}>3 retries (15s, 60s, 240s)</option>
-                </select>
-              </label>
+                <div className="routine-form__select">
+                  <SelectMenu
+                    label="Max Retries"
+                    variant="field"
+                    value={String(maxRetries)}
+                    disabled={busy}
+                    onSelect={(val) => setMaxRetries(Number(val))}
+                    rows={[
+                      { id: '0', title: '0 (No retries)' },
+                      { id: '1', title: '1 retry (15s)' },
+                      { id: '2', title: '2 retries (15s, 60s)' },
+                      { id: '3', title: '3 retries (15s, 60s, 240s)' },
+                    ]}
+                  />
+                </div>
+              </div>
 
               <div>
                 <span className="routine-form__label" style={{ display: 'block', marginBottom: '6px' }}>
@@ -997,23 +1002,26 @@ export const RoutineEditorDrawer: React.FC<RoutineEditorDrawerProps> = ({
               </div>
 
               {outputActions.includes('notify_teammate') && agents.length > 0 && (
-                <label className="routine-form__field">
+                <div className="routine-form__field">
                   <span className="routine-form__label">Notify Teammate Agent</span>
-                  <select
-                    aria-label="Notify Teammate Agent"
-                    value={notifyTeammateId}
-                    disabled={busy}
-                    onChange={(e) => setNotifyTeammateId(e.currentTarget.value)}
-                    className="ui-field"
-                  >
-                    <option value="">Select teammate...</option>
-                    {agents.map((ag) => (
-                      <option key={ag.id} value={ag.id}>
-                        {ag.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                  <div className="routine-form__select">
+                    <SelectMenu
+                      label="Notify Teammate Agent"
+                      variant="field"
+                      value={notifyTeammateId}
+                      disabled={busy}
+                      onSelect={(val) => setNotifyTeammateId(val)}
+                      rows={[
+                        { id: '', title: 'Select teammate...' },
+                        ...agents.map((ag) => ({
+                          id: ag.id,
+                          title: ag.name,
+                          engine: ag.engine,
+                        })),
+                      ]}
+                    />
+                  </div>
+                </div>
               )}
             </div>
 

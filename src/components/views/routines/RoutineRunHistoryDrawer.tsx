@@ -2,6 +2,16 @@ import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { RoutineItem, RoutineRunRecord } from './types';
 import { Clock, ExternalLink, Loader2, RefreshCw, X } from './routineIcons';
+import '../notifications.css';
+
+function formatDrawerError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null && 'message' in err) {
+    const msg = (err as { message?: unknown }).message;
+    if (typeof msg === 'string' && msg.trim()) return msg;
+  }
+  return 'Failed to load routine runs';
+}
 
 export interface RoutineRunHistoryDrawerProps {
   routine: RoutineItem | null;
@@ -31,6 +41,7 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
   const [runs, setRuns] = useState<RoutineRunRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [actionableOnly, setActionableOnly] = useState(true);
 
   const loadRuns = async () => {
     if (!routine) return;
@@ -42,7 +53,7 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
       });
       setRuns(res?.runs ?? []);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load routine runs');
+      setError(formatDrawerError(err));
     } finally {
       setLoading(false);
     }
@@ -57,7 +68,23 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
     }
   }, [routine?.id]);
 
+  useEffect(() => {
+    if (!routine) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [routine, onClose]);
+
   if (!routine) return null;
+
+  const quietCount = runs.filter((r) => r.status === 'quiet').length;
+  const visibleRuns = actionableOnly ? runs.filter((r) => r.status !== 'quiet') : runs;
 
   return (
     <div
@@ -102,6 +129,8 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
+            gap: '12px',
+            flexWrap: 'wrap',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -115,21 +144,24 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
               </p>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <div className="routine-triage-bar">
+            <span className="routine-quiet-summary">
+              {quietCount} quiet ticks auto-archived
+            </span>
             <button
               type="button"
-              className="chrome-button"
+              className="routine-triage-btn"
+              aria-pressed={actionableOnly}
+              onClick={() => setActionableOnly((prev) => !prev)}
+            >
+              Actionable only
+            </button>
+            <button
+              type="button"
+              className="secondary-button routine-drawer__refresh-btn"
               onClick={() => void loadRuns()}
               disabled={loading}
               aria-label="Refresh run history"
-              style={{
-                height: 'var(--vl-control-sm, 28px)',
-                padding: '0 8px',
-                borderRadius: 'var(--control-radius, 8px)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px',
-              }}
             >
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
               <span>Refresh</span>
@@ -138,15 +170,7 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
               type="button"
               onClick={onClose}
               aria-label="Close run history"
-              style={{
-                background: 'none',
-                border: 0,
-                padding: '6px',
-                color: 'var(--text-secondary, #9da2b4)',
-                cursor: 'pointer',
-                borderRadius: 'var(--control-radius, 8px)',
-                display: 'inline-flex',
-              }}
+              className="chrome-button"
             >
               <X size={15} />
             </button>
@@ -163,13 +187,24 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
               <Loader2 size={14} className="animate-spin" />
               <span>Loading execution history...</span>
             </div>
-          ) : runs.length === 0 ? (
+          ) : visibleRuns.length === 0 ? (
             <p style={{ color: 'var(--text-secondary, #9da2b4)', fontSize: '13px', margin: 0 }}>
-              No recorded runs yet for this routine.
+              {quietCount > 0 && actionableOnly
+                ? `${quietCount} quiet ticks auto-archived (HEARTBEAT_OK). Toggle "Actionable only" to inspect them.`
+                : 'No recorded runs yet for this routine.'}
             </p>
           ) : (
             <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {runs.map((run) => (
+              {visibleRuns.map((run) => {
+                const badgeClass =
+                  run.status === 'quiet'
+                    ? 'routine-run-badge routine-run-badge--quiet'
+                    : run.status === 'failed'
+                      ? 'routine-run-badge routine-run-badge--failed'
+                      : run.status === 'succeeded'
+                        ? 'routine-run-badge routine-run-badge--succeeded'
+                        : 'routine-run-badge';
+                return (
                 <li
                   key={run.runId}
                   className="ui-card"
@@ -183,7 +218,9 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
                 >
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <strong style={{ fontSize: '12px', textTransform: 'uppercase' }}>{run.status}</strong>
+                      <strong className={badgeClass}>
+                        {run.status === 'quiet' ? 'quiet · HEARTBEAT_OK' : run.status}
+                      </strong>
                       <span style={{ fontSize: '11px', color: 'var(--text-secondary, #9da2b4)' }}>
                         Trigger: {run.triggerKind}
                       </span>
@@ -229,7 +266,8 @@ export const RoutineRunHistoryDrawer: React.FC<RoutineRunHistoryDrawerProps> = (
                     </div>
                   ) : null}
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
         </div>

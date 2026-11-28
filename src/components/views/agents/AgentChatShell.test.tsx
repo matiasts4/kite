@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MotionProvider } from '../../../motion/standard/context';
 import { toast } from '../../../lib/toast';
-import { AgentChatSurface } from './AgentChatShell';
+import { AgentChatSurface, INITIAL_VISIBLE_AGENT_ROWS } from './AgentChatShell';
 import type { ExtendedChatThread } from '../chat/types';
 
 vi.mock('../../../lib/toast', () => ({ toast: { error: vi.fn() } }));
@@ -545,7 +545,7 @@ describe('AgentChatSurface teammate inbox deep-links', () => {
       )
     );
 
-    const summary = screen.getByText('Teammate inbox');
+    const summary = await screen.findByText(/Teammate inbox/i);
     fireEvent.click(summary);
 
     await waitFor(() => {
@@ -566,6 +566,61 @@ describe('AgentChatSurface teammate inbox deep-links', () => {
     expect(screen.queryByRole('button', { name: /Legacy Bot/i })).not.toBeInTheDocument();
 
     window.removeEventListener('kite:select-thread', selectThreadListener);
+  });
+
+  it('auto-hides Teammate inbox strip when the agent has zero messages', async () => {
+    const ipc = await import('../../../lib/ipc');
+    vi.mocked(ipc.invokeCommand).mockImplementation(async (cmd: string) => {
+      if (cmd === 'agent_message_inbox') {
+        return { schemaVersion: 1, profileId: 'agent-1', messages: [], nextCursor: null };
+      }
+      if (cmd === 'agent_messaging_preference') {
+        return { schemaVersion: 1, enabled: true, readOnly: false, revision: '1' };
+      }
+      return null;
+    });
+
+    const t1 = createAgentThread('agent-empty-inbox-t1', 'First Tab');
+    render(
+      createElement(
+        MotionProvider,
+        null,
+        createElement(AgentChatSurface, {
+          agentId: 'agent-1',
+          agentName: 'Builder',
+          engineLabel: 'Antigravity',
+          workspaceId: 'ws-1',
+          workspaceName: 'Workspace',
+          workspaces: [{ id: 'ws-1', name: 'Workspace' }],
+          activeThread: t1,
+          tabs: [{ id: t1.id, title: t1.title }],
+          selectedId: t1.id,
+          isDraft: false,
+          running: false,
+          prompt: '',
+          attachments: [],
+          totalTokens: 0,
+          dynamicModels: [],
+          onNew: vi.fn(),
+          onSelect: vi.fn(),
+          onRename: vi.fn(),
+          onArchive: vi.fn(),
+          onChangePrompt: vi.fn(),
+          onSend: vi.fn(),
+          onStop: vi.fn(),
+          onPickAttachments: vi.fn(),
+          onStageFiles: vi.fn(),
+          onStagePaths: vi.fn(),
+          onRemoveAttachment: vi.fn(),
+          onUpdateConfig: vi.fn(),
+        })
+      )
+    );
+
+    await waitFor(() => {
+      expect(ipc.invokeCommand).toHaveBeenCalledWith('agent_message_inbox', expect.anything());
+    });
+    expect(screen.queryByText(/Teammate inbox/i)).not.toBeInTheDocument();
   });
 
   it('renders voice turns in AgentChatSurface and exits draft hero (T20)', async () => {
@@ -667,7 +722,235 @@ describe('AgentChatSurface teammate inbox deep-links', () => {
       )
     );
 
-    expect(screen.getByText('Thread Autonomy')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Auto$/i })).toBeInTheDocument();
+    expect(screen.queryByText('Thread Autonomy')).not.toBeInTheDocument();
+    const autoBtn = screen.getByRole('button', { name: /^Auto$/i });
+    expect(autoBtn).toBeInTheDocument();
+    expect(autoBtn.closest('.agent-rail__trailing')).not.toBeNull();
+  });
+
+  it('mounts AgentReflectionCard in transcript, resets dismissal across threads, and opens thread via header action', async () => {
+    const t1: ExtendedChatThread = {
+      ...createAgentThread('agent-reflect-t1', 'Reflect One'),
+      reflectionCandidate: {
+        agentId: 'agent-1',
+        note: 'Always run cargo check before pushing.',
+        summary: 'Pre-push cargo check rule',
+      },
+    };
+    const t2: ExtendedChatThread = {
+      ...createAgentThread('agent-reflect-t2', 'Reflect Two'),
+      reflectionCandidate: {
+        agentId: 'agent-1',
+        note: 'Always run cargo check before pushing.',
+        summary: 'Pre-push cargo check rule',
+      },
+    };
+    const sharedProps = {
+      agentId: 'agent-1',
+      agentName: 'Builder',
+      engineLabel: 'Antigravity',
+      workspaceId: 'ws-1',
+      workspaceName: 'Workspace',
+      workspaces: [{ id: 'ws-1', name: 'Workspace' }],
+      tabs: [
+        { id: t1.id, title: t1.title },
+        { id: t2.id, title: t2.title },
+      ],
+      isDraft: false,
+      running: false,
+      prompt: '',
+      attachments: [],
+      totalTokens: 0,
+      dynamicModels: [],
+      onNew: vi.fn(),
+      onSelect: vi.fn(),
+      onRename: vi.fn(),
+      onArchive: vi.fn(),
+      onChangePrompt: vi.fn(),
+      onSend: vi.fn(),
+      onStop: vi.fn(),
+      onPickAttachments: vi.fn(),
+      onStageFiles: vi.fn(),
+      onStagePaths: vi.fn(),
+      onRemoveAttachment: vi.fn(),
+      onUpdateConfig: vi.fn(),
+    };
+
+    const selectThreadListener = vi.fn();
+    window.addEventListener('kite:select-thread', selectThreadListener);
+
+    try {
+      const { rerender } = render(
+        createElement(
+          MotionProvider,
+          null,
+          createElement(AgentChatSurface, {
+            ...sharedProps,
+            selectedId: t1.id,
+            activeThread: t1,
+          })
+        )
+      );
+
+      expect(screen.getByRole('region', { name: 'Memory reflection suggestion' })).toBeInTheDocument();
+      expect(screen.getByText('Pre-push cargo check rule')).toBeInTheDocument();
+
+      const openThreadBtn = screen.getByRole('button', { name: 'Open in Thread' });
+      expect(openThreadBtn).toHaveClass('agent-chat-open-thread-btn');
+      expect(openThreadBtn).not.toHaveClass('chrome-button');
+
+      const fsSpecifier = ['node', 'fs'].join(':');
+      const fsMod = (await import(/* @vite-ignore */ fsSpecifier)) as {
+        readFileSync: (filePath: string, encoding: 'utf8') => string;
+      };
+      const surfaceCss = fsMod.readFileSync(
+        'src/components/views/agents/agent-surface.css',
+        'utf8'
+      );
+      expect(surfaceCss).toMatch(/\.agent-rail__trailing\s*\{[^}]*display:\s*inline-flex/s);
+      expect(surfaceCss).toMatch(/\.agent-chat-open-thread-btn[^{]*\{[^}]*white-space:\s*nowrap/s);
+      expect(surfaceCss).toMatch(/\.agent-chat-open-thread-btn[^{]*\{[^}]*width:\s*auto/s);
+      expect(surfaceCss).toMatch(
+        /\.pane\.agent-pane[^{]*\{[^}]*backdrop-filter:\s*none/s
+      );
+      expect(surfaceCss).not.toMatch(/\.pane\.agent-pane[^{]*\{[^}]*backdrop-filter:\s*var\(--glass-blur\)/s);
+
+      fireEvent.click(openThreadBtn);
+      expect(selectThreadListener).toHaveBeenCalledTimes(1);
+      expect((selectThreadListener.mock.calls[0][0] as CustomEvent).detail).toEqual({
+        threadId: t1.id,
+        mode: 'chat',
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByRole('region', { name: 'Memory reflection suggestion' })).not.toBeInTheDocument();
+
+      // Switching tabs resets dismissal
+      rerender(
+        createElement(
+          MotionProvider,
+          null,
+          createElement(AgentChatSurface, {
+            ...sharedProps,
+            selectedId: t2.id,
+            activeThread: t2,
+          })
+        )
+      );
+      expect(screen.getByRole('region', { name: 'Memory reflection suggestion' })).toBeInTheDocument();
+    } finally {
+      window.removeEventListener('kite:select-thread', selectThreadListener);
+    }
+  });
+
+  it('windows long agent transcripts to INITIAL_VISIBLE_AGENT_ROWS and expands on Show earlier messages', () => {
+    expect(INITIAL_VISIBLE_AGENT_ROWS).toBe(48);
+
+    const buildLongAgentThread = (id: string, totalMessages: number): ExtendedChatThread => {
+      const items = Array.from({ length: totalMessages }, (_, idx) => {
+        const n = idx + 1;
+        return {
+          id: `${id}-msg-${n}`,
+          kind: (n % 2 === 1 ? 'user' : 'assistant') as 'user' | 'assistant',
+          text: `${id} entry #${n}`,
+          title: null,
+          detail: null,
+          status: null,
+          streaming: false,
+          exitCode: null,
+          createdAtUnixMs: 1000 + n,
+          attachments: [],
+        };
+      });
+      return {
+        ...createAgentThread(id, `Thread ${id}`),
+        items,
+      };
+    };
+
+    const longThreadA = buildLongAgentThread('long-a', 120);
+    const longThreadB = buildLongAgentThread('long-b', 100);
+    const sharedProps = {
+      agentId: 'agent-1',
+      agentName: 'Builder',
+      engineLabel: 'Claude',
+      workspaceId: 'ws-1',
+      workspaceName: 'Workspace',
+      workspaces: [{ id: 'ws-1', name: 'Workspace' }],
+      tabs: [
+        { id: longThreadA.id, title: longThreadA.title },
+        { id: longThreadB.id, title: longThreadB.title },
+      ],
+      isDraft: false,
+      running: false,
+      prompt: '',
+      attachments: [],
+      totalTokens: 0,
+      dynamicModels: [],
+      onNew: vi.fn(),
+      onSelect: vi.fn(),
+      onRename: vi.fn(),
+      onArchive: vi.fn(),
+      onChangePrompt: vi.fn(),
+      onSend: vi.fn(),
+      onStop: vi.fn(),
+      onPickAttachments: vi.fn(),
+      onStageFiles: vi.fn(),
+      onStagePaths: vi.fn(),
+      onRemoveAttachment: vi.fn(),
+      onUpdateConfig: vi.fn(),
+    };
+
+    const { rerender } = render(
+      createElement(
+        MotionProvider,
+        null,
+        createElement(AgentChatSurface, {
+          ...sharedProps,
+          selectedId: longThreadA.id,
+          activeThread: longThreadA,
+        })
+      )
+    );
+
+    // Only tail 48 rows are rendered initially
+    expect(screen.queryByText('long-a entry #1')).not.toBeInTheDocument();
+    expect(screen.queryByText('long-a entry #72')).not.toBeInTheDocument();
+    expect(screen.getByText('long-a entry #73')).toBeInTheDocument();
+    expect(screen.getByText('long-a entry #120')).toBeInTheDocument();
+
+    const showEarlierBtn = screen.getByRole('button', {
+      name: 'Show earlier messages (48 of 120 shown)',
+    });
+    expect(showEarlierBtn).toHaveClass('rounded-control');
+    expect(showEarlierBtn.style.borderRadius).toBe('var(--control-radius)');
+    expect(showEarlierBtn.style.height).toBe('var(--control-row)');
+
+    fireEvent.click(showEarlierBtn);
+
+    expect(screen.getByText('long-a entry #1')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Show earlier messages/i })
+    ).not.toBeInTheDocument();
+
+    // Switching to another long thread resets the visible window back to 48 rows
+    rerender(
+      createElement(
+        MotionProvider,
+        null,
+        createElement(AgentChatSurface, {
+          ...sharedProps,
+          selectedId: longThreadB.id,
+          activeThread: longThreadB,
+        })
+      )
+    );
+
+    expect(screen.queryByText('long-b entry #1')).not.toBeInTheDocument();
+    expect(screen.getByText('long-b entry #53')).toBeInTheDocument();
+    expect(screen.getByText('long-b entry #100')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Show earlier messages (48 of 100 shown)' })
+    ).toBeInTheDocument();
   });
 });

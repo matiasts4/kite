@@ -18,6 +18,8 @@ import { TurnActivityStatus } from '../chat/TurnActivityStatus';
 import { QueuedRunsControl, type QueuedRunRow } from '../chat/QueuedRunsControl';
 import { ChatComposer } from '../chat/ChatComposer';
 import { ConsultativeDraftCard } from '../chat/ConsultativeDraftCard';
+import { AgentReflectionCard } from '../chat/AgentReflectionCard';
+import type { ApprovalDecision } from '../chat/ChatApprovalCard';
 import { buildComposerChangedFilesProps } from '../chat/pane/threadTurnHelpers';
 import { SessionLifecycleBar } from '../chat/SessionLifecycleBar';
 import { declarationFromCatalog } from '../chat/driverDeclaration';
@@ -55,6 +57,36 @@ import type {
   ChatMode,
 } from '../chat/types';
 
+export const INITIAL_VISIBLE_AGENT_ROWS = 48;
+export const INITIAL_VISIBLE_AGENT_UNDERLYING_ITEMS = 150;
+
+export function sliceAgentTranscriptRows(
+  transcriptRows: ReturnType<typeof groupTranscriptRows>,
+  visibleLimit: number
+): ReturnType<typeof groupTranscriptRows> {
+  const totalRows = transcriptRows.length;
+  if (totalRows === 0 || visibleLimit > totalRows) {
+    return transcriptRows;
+  }
+  const scaledItemBudget = Math.max(
+    INITIAL_VISIBLE_AGENT_UNDERLYING_ITEMS,
+    Math.round((visibleLimit / INITIAL_VISIBLE_AGENT_ROWS) * INITIAL_VISIBLE_AGENT_UNDERLYING_ITEMS)
+  );
+  let rowCount = 0;
+  let itemCount = 0;
+  let startIdx = totalRows;
+  for (let i = totalRows - 1; i >= 0; i -= 1) {
+    const row = transcriptRows[i]!;
+    const weight = row.kind === 'work' || row.kind === 'subagentGroup' ? row.items.length : 1;
+    if (rowCount >= visibleLimit) break;
+    if (rowCount > 0 && itemCount + weight > scaledItemBudget) break;
+    rowCount += 1;
+    itemCount += weight;
+    startIdx = i;
+  }
+  return startIdx <= 0 ? transcriptRows : transcriptRows.slice(startIdx);
+}
+
 export interface AgentChatTab {
   id: string;
   title: string;
@@ -81,6 +113,7 @@ export interface AgentChatSurfaceProps {
   engineLabel: string;
   workspaceId?: string | null;
   workspaces?: any[];
+  agents?: Array<{ id: string; name?: string; engine?: string }>;
   workspaceName?: string;
   defaultProvider?: ChatProvider;
   /** Draft config used by the composer only while no thread exists yet. */
@@ -135,7 +168,7 @@ export interface AgentChatSurfaceProps {
     connectionId?: string | null;
     workspaceId?: string | null;
   }) => void;
-  onApprovalDecision?: (decision: 'allowOnce' | 'allowForSession' | 'deny' | 'denyAndStop', reqId: string) => void;
+  onApprovalDecision?(decision: ApprovalDecision, reqId: string): void;
 }
 
 function formatRelativeTime(timestamp?: number): string {
@@ -224,6 +257,8 @@ interface AgentChatTranscriptContentProps {
   effectiveWsId: string | null;
   activeItems: ExtendedChatThread['items'];
   transcriptRows: ReturnType<typeof groupTranscriptRows>;
+  totalRows: number;
+  onShowEarlier: () => void;
   liveAt: number;
   running: boolean;
   pendingApproval: ExtendedChatThread['pendingApproval'];
@@ -232,6 +267,9 @@ interface AgentChatTranscriptContentProps {
   durationSeconds?: number | null;
   subagentRuns: ExtendedChatThread['subagentRuns'];
   quotaHandoffOffer: ExtendedChatThread['quotaHandoffOffer'];
+  reflectionCandidate?: ExtendedChatThread['reflectionCandidate'];
+  dismissedReflectionNote: string | null;
+  onDismissReflection: (note: string | null) => void;
   enterFor: (id: string) => boolean;
   onEditUserMessage: (text: string) => void;
 }
@@ -241,6 +279,8 @@ const AgentChatTranscriptContent = React.memo(function AgentChatTranscriptConten
   effectiveWsId,
   activeItems,
   transcriptRows,
+  totalRows,
+  onShowEarlier,
   liveAt,
   running,
   pendingApproval,
@@ -249,11 +289,39 @@ const AgentChatTranscriptContent = React.memo(function AgentChatTranscriptConten
   durationSeconds,
   subagentRuns,
   quotaHandoffOffer,
+  reflectionCandidate,
+  dismissedReflectionNote,
+  onDismissReflection,
   enterFor,
   onEditUserMessage,
 }: AgentChatTranscriptContentProps) {
   return (
     <div className="chat-transcript__column">
+      {transcriptRows.length < totalRows && (
+        <div
+          className="chat-transcript__earlier"
+          style={{
+            display: 'flex',
+            justifyContent: 'center',
+            paddingBlock: 'var(--space-3)',
+          }}
+        >
+          <button
+            type="button"
+            className="secondary-button chat-transcript__earlier-btn rounded-control"
+            onClick={onShowEarlier}
+            style={{
+              height: 'var(--control-row)',
+              minHeight: 'var(--control-row)',
+              borderRadius: 'var(--control-radius)',
+              paddingInline: 'var(--space-3)',
+              fontSize: 'var(--text-row)',
+            }}
+          >
+            Show earlier messages ({transcriptRows.length} of {totalRows} shown)
+          </button>
+        </div>
+      )}
       {transcriptRows.map((row, index, rows) => {
         const rowKey =
           row.kind === 'work' || row.kind === 'subagentGroup' ? row.id : row.item.id;
@@ -317,6 +385,14 @@ const AgentChatTranscriptContent = React.memo(function AgentChatTranscriptConten
           threadId={threadId}
         />
       )}
+
+      {/* Memory Reflection Confirmation Card */}
+      {reflectionCandidate && dismissedReflectionNote !== reflectionCandidate.note && (
+        <AgentReflectionCard
+          candidate={reflectionCandidate}
+          onDismiss={() => onDismissReflection(reflectionCandidate?.note ?? null)}
+        />
+      )}
     </div>
   );
 });
@@ -327,6 +403,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   engineLabel,
   workspaceId,
   workspaces,
+  agents = [],
   workspaceName,
   defaultProvider,
   draftProvider,
@@ -470,6 +547,8 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState<string>('');
   const [archivedModalOpen, setArchivedModalOpen] = useState(false);
+  const [dismissedReflectionNote, setDismissedReflectionNote] = useState<string | null>(null);
+  const [visibleLimit, setVisibleLimit] = useState<number>(INITIAL_VISIBLE_AGENT_ROWS);
 
   const [queuedRuns, setQueuedRuns] = useState<QueuedRunRow[]>(activeThread?.queuedRuns ?? []);
   const [queueExpanded, setQueueExpanded] = useState(false);
@@ -478,6 +557,8 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
 
   useEffect(() => {
     setEditingQueuedId(null);
+    setDismissedReflectionNote(null);
+    setVisibleLimit(INITIAL_VISIBLE_AGENT_ROWS);
     savedDraftBeforeEditRef.current = null;
   }, [activeThread?.id]);
 
@@ -624,10 +705,12 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   const [deliveryPaused, setDeliveryPaused] = useState(false);
   const inboxRunRef = useRef(0);
 
-  const fetchInbox = useCallback(async (beforeSequence: string | null = null) => {
+  const fetchInbox = useCallback(async (beforeSequence: string | null = null, silent = false) => {
     if (!agentId) return;
     const runId = ++inboxRunRef.current;
-    setInboxLoading(true);
+    if (!silent) {
+      setInboxLoading(true);
+    }
     setInboxError(false);
     try {
       const [res, pref] = await Promise.all([
@@ -637,11 +720,11 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
         invokeCommand<{ schemaVersion: number; enabled: boolean; readOnly: boolean; revision: string }>('agent_messaging_preference'),
       ]);
       if (runId === inboxRunRef.current) {
-        setInboxData(res);
-        setDeliveryPaused(!pref?.enabled);
+        setInboxData(res && Array.isArray(res.messages) ? res : null);
+        setDeliveryPaused(pref?.enabled === false);
       }
     } catch {
-      if (runId === inboxRunRef.current) {
+      if (runId === inboxRunRef.current && !silent) {
         setInboxError(true);
       }
     } finally {
@@ -652,7 +735,11 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
   }, [agentId]);
 
   useEffect(() => {
-    const handleMessagingChanged = () => void fetchInbox();
+    void fetchInbox(null, true);
+  }, [fetchInbox]);
+
+  useEffect(() => {
+    const handleMessagingChanged = () => void fetchInbox(null, true);
     window.addEventListener('kite:agent-messaging-changed', handleMessagingChanged);
     return () => {
       inboxRunRef.current += 1;
@@ -837,10 +924,29 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
     () => groupTranscriptRows(timelineItems),
     [timelineItems],
   );
-  const activeLiveAt = React.useMemo(
-    () => (running || Boolean(liveVoiceTurn) ? liveActivityRowIndex(activeTranscriptRows) : -1),
-    [running, liveVoiceTurn, activeTranscriptRows],
+  const displayedTranscriptRows = React.useMemo(
+    () => sliceAgentTranscriptRows(activeTranscriptRows, visibleLimit),
+    [activeTranscriptRows, visibleLimit],
   );
+  const activeLiveAt = React.useMemo(
+    () => (running || Boolean(liveVoiceTurn) ? liveActivityRowIndex(displayedTranscriptRows) : -1),
+    [running, liveVoiceTurn, displayedTranscriptRows],
+  );
+  const handleShowEarlier = useCallback(() => {
+    const el = transcriptRef.current;
+    if (!el) {
+      setVisibleLimit((prev) => prev + 200);
+      return;
+    }
+    const prevScrollHeight = el.scrollHeight;
+    setVisibleLimit((prev) => prev + 200);
+    requestAnimationFrame(() => {
+      if (transcriptRef.current) {
+        const diff = transcriptRef.current.scrollHeight - prevScrollHeight;
+        transcriptRef.current.scrollTop += diff;
+      }
+    });
+  }, []);
   const composerChangedFilesProps = React.useMemo(
     () => buildComposerChangedFilesProps(timelineItems, effectiveWsId, effectiveWorkspaceName),
     [timelineItems, effectiveWsId, effectiveWorkspaceName],
@@ -853,9 +959,9 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
     () =>
       buildTranscriptScrollKeys(
         timelineItems,
-        `${running ? 1 : 0}:${Boolean(activeThread?.pendingApproval)}:${Boolean(activeThread?.quotaHandoffOffer)}:${liveVoiceTurn?.stage ?? ''}:${liveVoiceTurn?.detail ?? ''}`,
+        `${displayedTranscriptRows.length}:${running ? 1 : 0}:${Boolean(activeThread?.pendingApproval)}:${Boolean(activeThread?.quotaHandoffOffer)}:${Boolean(activeThread?.reflectionCandidate)}:${liveVoiceTurn?.stage ?? ''}:${liveVoiceTurn?.detail ?? ''}`,
       ),
-    [timelineItems, running, activeThread?.pendingApproval, activeThread?.quotaHandoffOffer, liveVoiceTurn?.stage, liveVoiceTurn?.detail],
+    [timelineItems, displayedTranscriptRows.length, running, activeThread?.pendingApproval, activeThread?.quotaHandoffOffer, activeThread?.reflectionCandidate, liveVoiceTurn?.stage, liveVoiceTurn?.detail],
   );
   const { handleScroll: handleTranscriptScroll, syncLiveEdge } = useTranscriptLiveEdge(
     transcriptRef,
@@ -1077,13 +1183,25 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
         >
           <ArchiveIcon size={12} />
         </button>
-      </aside>
 
-      {/* Main agent chat body */}
-      <section aria-label={`${agentName} chat`} className="_body_85ff1_45">
-        {/* 1. Thread AutoPilot & Collapsible Teammate inbox strip */}
-        <div className="agent-chat-autopilot-bar">
-          <span className="agent-chat-autopilot-bar__label">Thread Autonomy</span>
+        <div className="agent-rail__trailing">
+          {activeThread?.id && (
+            <button
+              type="button"
+              className="agent-chat-open-thread-btn"
+              title="Open this conversation in Thread mode"
+              aria-label="Open in Thread"
+              onClick={() => {
+                window.dispatchEvent(
+                  new CustomEvent('kite:select-thread', {
+                    detail: { threadId: activeThread.id, mode: 'chat' },
+                  })
+                );
+              }}
+            >
+              Open in Thread
+            </button>
+          )}
           <AgentAutoPilot
             surface="thread"
             profile={{ id: agentId, name: agentName, engine: effectiveProvider }}
@@ -1113,8 +1231,14 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             }}
           />
         </div>
+      </aside>
+
+      {/* Main agent chat body */}
+      <section aria-label={`${agentName} chat`} className="_body_85ff1_45">
+        {/* 1. Collapsible Teammate inbox strip (shown only when non-empty or on load error) */}
+        {((inboxData?.messages?.length ?? 0) > 0 || inboxError) && (
         <details className="agent-inbox-strip" onToggle={(e) => e.currentTarget.open && void fetchInbox()}>
-          <summary>Teammate inbox</summary>
+          <summary>Teammate inbox ({inboxData?.messages?.length ?? 0})</summary>
           <section aria-label="Teammate inbox" className="agent-inbox">
             {deliveryPaused && (
               <p className="agent-inbox__note">Delivery paused. Accepted messages are kept here.</p>
@@ -1218,6 +1342,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
             </div>
           </section>
         </details>
+        )}
 
         {/* 2. Notice if created by routine */}
         {(activeThread as any)?.routineId ? (
@@ -1241,7 +1366,9 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                     threadId={effectiveThreadId}
                     effectiveWsId={effectiveWsId ?? null}
                     activeItems={timelineItems}
-                    transcriptRows={activeTranscriptRows}
+                    transcriptRows={displayedTranscriptRows}
+                    totalRows={activeTranscriptRows.length}
+                    onShowEarlier={handleShowEarlier}
                     liveAt={activeLiveAt}
                     running={running}
                     pendingApproval={activeThread?.pendingApproval}
@@ -1250,6 +1377,9 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
                     durationSeconds={activeThread?.usage?.durationSeconds}
                     subagentRuns={activeThread?.subagentRuns}
                     quotaHandoffOffer={activeThread?.quotaHandoffOffer}
+                    reflectionCandidate={activeThread?.reflectionCandidate}
+                    dismissedReflectionNote={dismissedReflectionNote}
+                    onDismissReflection={(note) => setDismissedReflectionNote(note)}
                     enterFor={enterFor}
                     onEditUserMessage={handleEditUserMessage}
                   />
@@ -1266,7 +1396,11 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               transition={reducedMotion ? tweens.instant : tweens.fade}
               className="chat-draft-hero agent-chat-hero scroll-quiet"
             >
-              <ThemeHeroFigure variant="hero" />
+              <ThemeHeroFigure
+                mood={prompt.trim().length > 0 ? 'curious' : 'idle'}
+                triggerKey={effectiveThreadId ?? agentId}
+                variant="hero"
+              />
               <h1>What should we build?</h1>
               <p>Pick a thread above or start typing below to hand real work to {agentName}.</p>
             </motion.div>
@@ -1299,7 +1433,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               {...composerChangedFilesProps}
               agentName={agentName}
               engineLabel={engineLabel}
-              threadMode={activeThread ? activeThread.mode : draftMode ?? 'acceptEdits'}
+              threadMode={activeThread ? activeThread.mode : draftMode ?? 'fullAccess'}
               threadProvider={effectiveProvider}
               threadModel={effectiveModel}
               threadEffort={activeThread ? activeThread.effort || null : draftEffort ?? null}
@@ -1310,6 +1444,7 @@ export const AgentChatSurface: React.FC<AgentChatSurfaceProps> = ({
               threadWorkspaceId={effectiveWsId ?? null}
               threadWorkspaceName={effectiveWorkspaceName || 'Local'}
               workspaces={composerWorkspaces}
+              agents={agents}
               onSwitchBranch={handleSwitchBranch}
               onCreateBranch={handleCreateBranch}
               onSelectWorkspace={handleSelectWorkspace}

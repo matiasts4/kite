@@ -1,14 +1,17 @@
-use crate::agent_mind::skills::{is_skill_enabled, read_skill_source, read_skills, read_skills_meta};
+use crate::agent_mind::skills::{
+    check_skill_eligibility, is_skill_enabled, parse_skill_frontmatter,
+    read_linked_skill_content_in_roots, read_skill_source, read_skills, read_skills_meta,
+};
 use crate::agent_mind::types::{
     AgentMindError, TextRecord, MEMORY_BYTE_LIMIT, MEMORY_CHAR_BUDGET, USER_CHAR_BUDGET,
 };
 use crate::agent_mind::utils::{
-    agents_root, empty_revision, ensure_agent_id, get_agent_home_dir, has_disallowed_control,
-    issue, prepare_file, read_regular, read_text_record, require_confirmation,
-    require_known_agent, sha256_hex,
+    agents_root, empty_revision, ensure_agent_id, get_agent_home_dir,
+    prepare_file, read_regular, read_text_record, sha256_hex,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -62,12 +65,14 @@ pub fn load_agent_mind_at(root: &Path, agent_id: &str) -> Result<Value, AgentMin
     }
     read_issues.truncate(515);
     let memory_meta = load_memory_meta_map(root, agent_id);
+    let linked_skill_refs = crate::persist::get_agent_linked_skill_refs(agent_id);
     Ok(json!({
         "schemaVersion": 1,
         "agentId": agent_id,
         "memory": memory.text,
         "user": user.text,
         "skills": skills,
+        "linkedSkillRefs": linked_skill_refs,
         "memoryUpdatedAtUnixMs": memory.updated_at,
         "userUpdatedAtUnixMs": user.updated_at,
         "memoryRevision": memory.revision,
@@ -334,6 +339,7 @@ pub(crate) struct InstructionSkill<'a> {
     pub(crate) name: Option<&'a str>,
     pub(crate) description: &'a str,
     pub(crate) body: Option<&'a str>,
+    pub(crate) context_mode: Option<&'a str>,
 }
 
 /// The recipe fields an instruction document is built from.
@@ -393,6 +399,9 @@ pub(crate) fn instruction_document(source: &InstructionSource<'_>) -> String {
             match skill.name {
                 Some(name) => {
                     doc.push_str(&format!("### {name} (`{}`)\n", skill.id));
+                    if skill.context_mode == Some("fork") {
+                        doc.push_str("Context: `fork` (run in an isolated subagent context).\n\n");
+                    }
                     if !skill.description.is_empty() {
                         doc.push_str(&format!("{}\n\n", skill.description));
                     }
@@ -409,18 +418,98 @@ pub(crate) fn instruction_document(source: &InstructionSource<'_>) -> String {
     doc
 }
 
-/// A skill summary plus the body read from the agent home.
+/// A skill summary plus the body read from the agent home or linked skill root.
 struct SkillRecord {
     id: String,
     name: String,
     description: String,
     body: Option<String>,
+    context_mode: String,
+}
+
+/// A manual-only skill listed as a lightweight catalog entry without injecting its body.
+struct ManualSkillCatalogEntry {
+    ref_or_id: String,
+    name: String,
+    description: String,
+    path: String,
+    context_mode: String,
+}
+
+fn push_unique_dir(roots: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if candidate.is_dir() && !roots.iter().any(|existing| existing == &candidate) {
+        roots.push(candidate);
+    }
+}
+
+pub(crate) fn resolve_agent_workspace_roots(
+    agent_opt: Option<&crate::persist::AgentProfile>,
+    agent_id: &str,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let workspaces = crate::persist::workspaces()
+        .lock()
+        .map(|w| w.clone())
+        .unwrap_or_default();
+
+    if let Some(agent) = agent_opt {
+        for raw in &agent.place_display_names {
+            let place = raw.trim();
+            if place.is_empty() {
+                continue;
+            }
+            if let Some(ws) = workspaces
+                .iter()
+                .find(|w| w.display_name.eq_ignore_ascii_case(place) || w.id == place)
+            {
+                if let Some(path) = crate::persist::workspace_path(&ws.id) {
+                    push_unique_dir(&mut roots, PathBuf::from(path));
+                }
+            } else {
+                push_unique_dir(&mut roots, PathBuf::from(place));
+            }
+        }
+    }
+
+    let thread_ws_ids: Vec<String> = crate::persist::threads()
+        .lock()
+        .map(|list| {
+            let mut entries: Vec<(i64, String)> = list
+                .iter()
+                .filter(|t| t.get("profileId").and_then(Value::as_str) == Some(agent_id))
+                .filter_map(|t| {
+                    let ws_id = t.get("workspaceId").and_then(Value::as_str)?.trim();
+                    if ws_id.is_empty() {
+                        return None;
+                    }
+                    let updated = t.get("updatedAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
+                    Some((updated, ws_id.to_string()))
+                })
+                .collect();
+            entries.sort_by(|a, b| b.0.cmp(&a.0));
+            entries.into_iter().map(|(_, id)| id).collect()
+        })
+        .unwrap_or_default();
+    for ws_id in thread_ws_ids {
+        if let Some(path) = crate::persist::workspace_path(&ws_id) {
+            push_unique_dir(&mut roots, PathBuf::from(path));
+        }
+    }
+
+    let mut sorted_ws = workspaces;
+    sorted_ws.sort_by(|a, b| b.last_opened_at_unix_ms.cmp(&a.last_opened_at_unix_ms));
+    for ws in sorted_ws {
+        if let Some(path) = crate::persist::workspace_path(&ws.id) {
+            push_unique_dir(&mut roots, PathBuf::from(path));
+        }
+    }
+
+    roots
 }
 
 /// Compiles agent instructions preserving snapshot isolation: `role`, `memory`, and `user`
 /// are taken directly from the caller's arguments (e.g. from the frozen `RecipeSnapshot`),
-/// while `skills` are enriched with full names, descriptions, and markdown bodies from the
-/// specified `root` directory when available.
+/// while local and linked skills are checked for eligibility and separated by `manual_only`.
 pub fn compile_snapshot_instructions_at(
     root: &Path,
     agent_id: &str,
@@ -429,6 +518,37 @@ pub fn compile_snapshot_instructions_at(
     user: &str,
     skill_ids: &[String],
 ) -> String {
+    let agent_opt = {
+        let items = crate::persist::agents().lock().unwrap();
+        items.iter().find(|a| a.id == agent_id).cloned()
+    };
+    let linked_refs = crate::persist::get_agent_linked_skill_refs(agent_id);
+    let workspace_roots = resolve_agent_workspace_roots(agent_opt.as_ref(), agent_id);
+    let home = crate::chat::utils::user_home_dir();
+    compile_snapshot_instructions_with_context_at(
+        root,
+        agent_id,
+        role,
+        memory,
+        user,
+        skill_ids,
+        &linked_refs,
+        &workspace_roots,
+        &home,
+    )
+}
+
+pub fn compile_snapshot_instructions_with_context_at(
+    root: &Path,
+    agent_id: &str,
+    role: &str,
+    memory: &str,
+    user: &str,
+    skill_ids: &[String],
+    linked_skill_refs: &[String],
+    workspace_roots: &[PathBuf],
+    home: &Path,
+) -> String {
     let dir = root.join(agent_id);
     let agent_opt = {
         let items = crate::persist::agents().lock().unwrap();
@@ -436,43 +556,93 @@ pub fn compile_snapshot_instructions_at(
     };
 
     let skills_meta = read_skills_meta(&dir);
-    let skill_records: Vec<SkillRecord> = skill_ids
-        .iter()
-        .filter(|id| is_skill_enabled(&skills_meta, id))
-        .map(|id| {
-            let skill_file = dir.join("skills").join(format!("{id}.md"));
-            let (name, description, body) = if let Ok(Some(src)) = read_skill_source(&skill_file) {
-                let parts: Vec<&str> = src.split("---").collect();
-                let body = if parts.len() >= 3 {
-                    parts[2].trim().to_string()
-                } else {
-                    src.trim().to_string()
-                };
-                let body_opt = if !body.is_empty() { Some(body) } else { None };
-                let mut name = id.to_string();
-                let mut desc = String::new();
-                if parts.len() >= 3 {
-                    for line in parts[1].lines() {
-                        let line = line.trim();
-                        if let Some(rest) = line.strip_prefix("name:") {
-                            name = rest.trim().to_string();
-                        } else if let Some(rest) = line.strip_prefix("description:") {
-                            desc = rest.trim().to_string();
-                        }
-                    }
-                }
-                (name, desc, body_opt)
+    let mut skill_records: Vec<SkillRecord> = Vec::new();
+    let mut manual_skills: Vec<ManualSkillCatalogEntry> = Vec::new();
+    let mut seen_local = HashSet::new();
+
+    for id in skill_ids {
+        if !seen_local.insert(id.as_str()) || !is_skill_enabled(&skills_meta, id) {
+            continue;
+        }
+        let skill_file = dir.join("skills").join(format!("{id}.md"));
+        if let Ok(Some(src)) = read_skill_source(&skill_file) {
+            let (fm, body) = parse_skill_frontmatter(&src);
+            let (eligible, _) = check_skill_eligibility(&fm);
+            if !eligible {
+                continue;
+            }
+            let name = fm
+                .name
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| id.to_string());
+            let description = fm.description.unwrap_or_default();
+            if fm.manual_only {
+                manual_skills.push(ManualSkillCatalogEntry {
+                    ref_or_id: id.to_string(),
+                    name,
+                    description,
+                    path: skill_file.to_string_lossy().to_string(),
+                    context_mode: fm.context_mode,
+                });
             } else {
-                (id.to_string(), String::new(), None)
-            };
-            SkillRecord {
+                let body_opt = (!body.is_empty()).then_some(body);
+                skill_records.push(SkillRecord {
+                    id: id.to_string(),
+                    name,
+                    description,
+                    body: body_opt,
+                    context_mode: fm.context_mode,
+                });
+            }
+        } else {
+            skill_records.push(SkillRecord {
                 id: id.to_string(),
+                name: id.to_string(),
+                description: String::new(),
+                body: None,
+                context_mode: "inline".to_string(),
+            });
+        }
+    }
+
+    let mut seen_refs = HashSet::new();
+    for raw_ref in linked_skill_refs {
+        let ref_key = raw_ref.trim();
+        if ref_key.is_empty() || !seen_refs.insert(ref_key.to_string()) {
+            continue;
+        }
+        let Ok(loaded) = read_linked_skill_content_in_roots(ref_key, workspace_roots, home) else {
+            continue;
+        };
+        let (eligible, _) = check_skill_eligibility(&loaded.frontmatter);
+        if !eligible {
+            continue;
+        }
+        let name = loaded
+            .frontmatter
+            .name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| loaded.id.clone());
+        let description = loaded.frontmatter.description.unwrap_or_default();
+        if loaded.frontmatter.manual_only {
+            manual_skills.push(ManualSkillCatalogEntry {
+                ref_or_id: loaded.ref_key,
                 name,
                 description,
-                body,
-            }
-        })
-        .collect();
+                path: loaded.path,
+                context_mode: loaded.frontmatter.context_mode,
+            });
+        } else {
+            let body_opt = (!loaded.body.is_empty()).then_some(loaded.body);
+            skill_records.push(SkillRecord {
+                id: loaded.ref_key,
+                name,
+                description,
+                body: body_opt,
+                context_mode: loaded.frontmatter.context_mode,
+            });
+        }
+    }
 
     let instruction_skills: Vec<InstructionSkill<'_>> = skill_records
         .iter()
@@ -481,6 +651,7 @@ pub fn compile_snapshot_instructions_at(
             name: Some(&skill.name),
             description: &skill.description,
             body: skill.body.as_deref(),
+            context_mode: Some(skill.context_mode.as_str()),
         })
         .collect();
 
@@ -498,6 +669,28 @@ pub fn compile_snapshot_instructions_at(
         user,
         skills: &instruction_skills,
     });
+
+    if !manual_skills.is_empty() {
+        doc.push_str("## Manual-Trigger Skills (Explicit User Request Only)\n\n");
+        doc.push_str("These skills require an explicit user command before running. Never auto-invoke them unprompted:\n\n");
+        for entry in &manual_skills {
+            let trigger = if entry.description.trim().is_empty() {
+                "Explicit user trigger required".to_string()
+            } else {
+                entry.description.trim().to_string()
+            };
+            let fork_badge = if entry.context_mode == "fork" {
+                " [context: fork]"
+            } else {
+                ""
+            };
+            doc.push_str(&format!(
+                "- **{}** (`{}`){} — {} (`{}`)\n",
+                entry.name, entry.ref_or_id, fork_badge, trigger, entry.path
+            ));
+        }
+        doc.push('\n');
+    }
 
     let allow_msg = agent_opt
         .as_ref()
@@ -708,6 +901,7 @@ pub(crate) fn write_recipe_instructions(
             name: None,
             description: "",
             body: None,
+            context_mode: None,
         })
         .collect();
     let doc = instruction_document(&InstructionSource {

@@ -3,10 +3,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
 };
+use std::time::{Duration, Instant};
 use tauri::Emitter;
 use uuid::Uuid;
 
@@ -74,6 +76,7 @@ struct RunRequest {
 static RUN_REQUESTS: Mutex<Vec<RunRequest>> = Mutex::new(Vec::new());
 static IN_FLIGHT_ROUTINES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static LAST_EVENT_TRIGGER_MS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+static GIT_WORKSPACE_SNAPSHOTS: OnceLock<Mutex<HashMap<String, (String, String)>>> = OnceLock::new();
 static SCHEDULER_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn in_flight_routines() -> &'static Mutex<HashSet<String>> {
@@ -82,6 +85,24 @@ fn in_flight_routines() -> &'static Mutex<HashSet<String>> {
 
 fn last_event_trigger_map() -> &'static Mutex<HashMap<String, i64>> {
     LAST_EVENT_TRIGGER_MS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn git_workspace_snapshots() -> &'static Mutex<HashMap<String, (String, String)>> {
+    GIT_WORKSPACE_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn is_heartbeat_ok(output: &str) -> bool {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if let Some(rest) = upper.strip_prefix("HEARTBEAT_OK") {
+        rest.chars()
+            .all(|ch| ch.is_whitespace() || ch.is_ascii_punctuation())
+    } else {
+        false
+    }
 }
 
 pub const SUPPORTED_EVENT_KINDS: [&str; 5] = [
@@ -124,6 +145,30 @@ pub struct CronSchedule {
     pub days: Vec<u32>,
     pub months: Vec<u32>,
     pub weekdays: Vec<u32>,
+}
+
+impl CronSchedule {
+    fn matches_calendar_day(&self, day: i64) -> bool {
+        let (_year, month, dom) = civil_from_days(day);
+        // 1970-01-01 was Thursday (dow=4)
+        let dow = (day + 4).rem_euclid(7) as u32;
+        self.months.contains(&month)
+            && self.days.contains(&dom)
+            && self.weekdays.contains(&dow)
+    }
+
+    /// Returns true if `unix_ms` falls within a UTC minute matching this schedule.
+    pub fn matches_unix_ms(&self, unix_ms: i64) -> bool {
+        let min_epoch = unix_ms.div_euclid(MS_PER_MINUTE);
+        let day = min_epoch.div_euclid(1440);
+        if !self.matches_calendar_day(day) {
+            return false;
+        }
+        let minute_of_day = min_epoch.rem_euclid(1440) as u32;
+        let hour = minute_of_day / 60;
+        let minute = minute_of_day % 60;
+        self.hours.contains(&hour) && self.minutes.contains(&minute)
+    }
 }
 
 fn parse_cron_field(field: &str, min: u32, max: u32, map_seven_to_zero: bool) -> RoutineResult<Vec<u32>> {
@@ -218,13 +263,7 @@ pub fn next_cron_after(expr: &str, from_ms: i64) -> i64 {
     let start_day = start_min_epoch.div_euclid(1440);
     for day_offset in 0..=400 {
         let day = start_day + day_offset;
-        let (_year, month, dom) = civil_from_days(day);
-        // 1970-01-01 was Thursday (dow=4)
-        let dow = (day + 4).rem_euclid(7) as u32;
-        if !schedule.months.contains(&month)
-            || !schedule.days.contains(&dom)
-            || !schedule.weekdays.contains(&dow)
-        {
+        if !schedule.matches_calendar_day(day) {
             continue;
         }
         for &hour in &schedule.hours {
@@ -678,6 +717,489 @@ fn release_run_request(request_id: &str) {
     requests.retain(|item| !(item.id == request_id && item.thread_id.is_none()));
 }
 
+struct InFlightRoutineGuard(String);
+
+impl Drop for InFlightRoutineGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = in_flight_routines().lock() {
+            set.remove(&self.0);
+        }
+    }
+}
+
+fn await_routine_turn_settlement(
+    thread_id: &str,
+    run_id: &str,
+    timeout: Duration,
+) -> (bool, bool, String, Option<String>) {
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    {
+        let Ok(mut live) = crate::chat::runtime::live_turns().lock() else {
+            return (false, false, String::new(), Some("live_turns lock poisoned".to_string()));
+        };
+        loop {
+            let finished = match live.runs.get(run_id) {
+                Some(run) => run.finished,
+                None => true,
+            };
+            if finished {
+                break;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                timed_out = true;
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let Ok((guard, wait_res)) = crate::chat::runtime::live_cv().wait_timeout(live, remaining) else {
+                return (false, false, String::new(), Some("live_cv wait failed".to_string()));
+            };
+            live = guard;
+            if wait_res.timed_out()
+                && Instant::now() >= deadline
+                && live.runs.get(run_id).is_some_and(|r| !r.finished)
+            {
+                timed_out = true;
+                break;
+            }
+        }
+    }
+
+    if timed_out {
+        crate::chat::cancel_turn(thread_id);
+        let msg = format!("Routine turn timed out after {}s.", timeout.as_secs());
+        return (false, true, String::new(), Some(msg));
+    }
+
+    let (status, failure_msg) = {
+        let Ok(all) = crate::persist::threads().lock() else {
+            return (false, false, String::new(), Some("threads lock poisoned".to_string()));
+        };
+        let thread = all
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id));
+        let status = thread
+            .and_then(|t| t.get("status").and_then(Value::as_str))
+            .unwrap_or("idle")
+            .to_string();
+        let failure_msg = thread
+            .and_then(|t| t.pointer("/turnFailure/message").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        (status, failure_msg)
+    };
+
+    let assistant_text = crate::chat::subagents::extract_final_assistant_text(thread_id);
+    if status == "waiting" {
+        return (
+            false,
+            false,
+            assistant_text,
+            Some("Routine turn paused waiting for approval or user input.".to_string()),
+        );
+    }
+    if status == "error" {
+        let err = failure_msg.or_else(|| {
+            let tail = crate::dispatch_wire::protocol::thread_tail(thread_id);
+            (!tail.trim().is_empty()).then_some(tail)
+        });
+        return (false, false, assistant_text, err.or_else(|| Some("Routine turn failed.".to_string())));
+    }
+
+    (true, false, assistant_text, None)
+}
+
+fn archive_quiet_routine_thread(thread_id: &str, now: i64) {
+    let mut updated = false;
+    if let Ok(mut list) = crate::persist::threads().lock() {
+        if let Some(thread) = list
+            .iter_mut()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+        {
+            thread["archivedAtUnixMs"] = json!(now);
+            crate::chat::threads::touch(thread);
+            updated = true;
+        }
+    }
+    if updated {
+        persist();
+    }
+}
+
+fn launch_routine_chat_turn(
+    agent_id: &str,
+    routine_id: &str,
+    routine: &Value,
+    provider: &str,
+    name: &str,
+    prompt: &str,
+    workspace: Option<&str>,
+    permission_mode: &str,
+    agent_profile: Option<&crate::persist::AgentProfile>,
+) -> RoutineResult<(String, String)> {
+    let thread = crate::chat::create_thread(
+        Some(agent_id),
+        &format!("Routine: {name}"),
+        provider,
+        workspace,
+    );
+    let thread_id = thread
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if thread_id.is_empty() {
+        return Err(RoutineCommandError::new(
+            "routine_run_failed",
+            "The routine could not create a chat thread.",
+        ));
+    }
+
+    let mut patch = json!({ "provider": provider, "mode": permission_mode });
+    if let Some(ag) = agent_profile {
+        if let Some(model) = ag.default_model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            patch["model"] = json!(model);
+        }
+        if !ag.default_provider_options.is_empty() {
+            patch["providerOptions"] = json!(ag.default_provider_options);
+            if let Some(effort) = ag
+                .default_provider_options
+                .iter()
+                .find(|o| o.get("id").and_then(Value::as_str) == Some("effort"))
+                .and_then(|o| o.get("value").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                patch["effort"] = json!(effort);
+            }
+        }
+    }
+    crate::chat::configure_thread(&thread_id, &patch);
+
+    let started = crate::chat::start_turn(
+        &thread_id,
+        Some(agent_id),
+        prompt,
+        Vec::new(),
+        Some(routine_id),
+    );
+    let run_id = started
+        .get("runId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if run_id.is_empty() {
+        return Err(RoutineCommandError::new(
+            "routine_run_failed",
+            "The routine could not start a chat run.",
+        ));
+    }
+    let _ = routine;
+    Ok((thread_id, run_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_routine_turn_outcome_with<R, A, O>(
+    agent_id: &str,
+    routine_id: &str,
+    routine: &Value,
+    trigger_kind: &str,
+    run_id: &str,
+    thread_id: &str,
+    started_at_unix_ms: i64,
+    retry_attempt: i64,
+    ok: bool,
+    assistant_text: &str,
+    failure_msg: Option<&str>,
+    mut record_run: R,
+    mut archive_thread: A,
+    mut emit_actions: O,
+) -> bool
+where
+    R: FnMut(&RoutineRunRecord),
+    A: FnMut(&str, i64),
+    O: FnMut(&str, bool),
+{
+    let name = routine
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Routine");
+    let now = now_ms();
+
+    if ok && is_heartbeat_ok(assistant_text) {
+        record_run(&RoutineRunRecord {
+            run_id: run_id.to_string(),
+            routine_id: routine_id.to_string(),
+            agent_id: agent_id.to_string(),
+            trigger_kind: trigger_kind.to_string(),
+            status: "quiet".to_string(),
+            started_at_unix_ms,
+            finished_at_unix_ms: Some(now),
+            thread_id: Some(thread_id.to_string()),
+            summary: Some("HEARTBEAT_OK".to_string()),
+            changed_files_count: 0,
+            retry_attempt,
+            error: None,
+        });
+        archive_thread(thread_id, now);
+        return true;
+    }
+
+    if ok {
+        let trimmed = assistant_text.trim();
+        let summary_text = if !trimmed.is_empty() {
+            trimmed.chars().take(2000).collect::<String>()
+        } else {
+            format!("Routine '{name}' completed ({trigger_kind}).")
+        };
+        record_run(&RoutineRunRecord {
+            run_id: run_id.to_string(),
+            routine_id: routine_id.to_string(),
+            agent_id: agent_id.to_string(),
+            trigger_kind: trigger_kind.to_string(),
+            status: "succeeded".to_string(),
+            started_at_unix_ms,
+            finished_at_unix_ms: Some(now),
+            thread_id: Some(thread_id.to_string()),
+            summary: Some(summary_text.clone()),
+            changed_files_count: 0,
+            retry_attempt,
+            error: None,
+        });
+        emit_actions(&summary_text, false);
+        true
+    } else {
+        let err_msg = failure_msg
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let t = assistant_text.trim();
+                (!t.is_empty()).then(|| t.chars().take(1000).collect())
+            })
+            .unwrap_or_else(|| format!("Routine '{name}' failed ({trigger_kind})."));
+        record_run(&RoutineRunRecord {
+            run_id: run_id.to_string(),
+            routine_id: routine_id.to_string(),
+            agent_id: agent_id.to_string(),
+            trigger_kind: trigger_kind.to_string(),
+            status: "failed".to_string(),
+            started_at_unix_ms,
+            finished_at_unix_ms: Some(now),
+            thread_id: Some(thread_id.to_string()),
+            summary: Some(err_msg.clone()),
+            changed_files_count: 0,
+            retry_attempt,
+            error: Some(err_msg.clone()),
+        });
+        {
+            let mut list = routines().lock().unwrap();
+            if let Some(item) = list
+                .iter_mut()
+                .find(|item| is_routine(item, agent_id, routine_id))
+            {
+                item["lastError"] = json!(err_msg);
+            }
+        }
+        persist();
+        false
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_routine_settlement_waiter(
+    agent_id: String,
+    routine_id: String,
+    routine: Value,
+    provider: &'static str,
+    agent_profile: Option<crate::persist::AgentProfile>,
+    trigger_kind: String,
+    initial_thread_id: String,
+    initial_run_id: String,
+    initial_started_at: i64,
+    initial_retry_attempt: i64,
+) {
+    let max_retries = routine
+        .get("maxRetries")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .min(3) as i64;
+    let timeout_secs = crate::agents::load_agent_autonomy_config(&agent_id)
+        .max_duration_secs
+        .unwrap_or(1800)
+        .clamp(30, 7200);
+    let timeout = Duration::from_secs(timeout_secs);
+    let name = routine
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Routine")
+        .to_string();
+    let prompt = routine
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let workspace = routine
+        .get("workspaceId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let permission_mode = validate_permission_mode(routine.get("permissionMode"))
+        .unwrap_or_else(|_| DEFAULT_PERMISSION_MODE.to_string());
+
+    std::thread::spawn(move || {
+        let _guard = InFlightRoutineGuard(routine_id.clone());
+        let mut cur_thread_id = initial_thread_id;
+        let mut cur_run_id = initial_run_id;
+        let mut cur_started_at = initial_started_at;
+        let mut cur_attempt = initial_retry_attempt;
+
+        loop {
+            let (ok, _timed_out, assistant_text, failure_msg) =
+                await_routine_turn_settlement(&cur_thread_id, &cur_run_id, timeout);
+
+            let settled_clean = finalize_routine_turn_outcome_with(
+                &agent_id,
+                &routine_id,
+                &routine,
+                &trigger_kind,
+                &cur_run_id,
+                &cur_thread_id,
+                cur_started_at,
+                cur_attempt,
+                ok,
+                &assistant_text,
+                failure_msg.as_deref(),
+                |rec| {
+                    let _ = record_routine_run(rec);
+                },
+                archive_quiet_routine_thread,
+                |summary_text, failed| {
+                    dispatch_output_actions(
+                        &agent_id,
+                        &routine_id,
+                        &routine,
+                        Some(&cur_thread_id),
+                        summary_text,
+                        failed,
+                        0,
+                    );
+                },
+            );
+
+            if settled_clean {
+                break;
+            }
+
+            if cur_attempt >= max_retries {
+                let err_summary = failure_msg
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let t = assistant_text.trim();
+                        (!t.is_empty()).then(|| t.chars().take(1000).collect())
+                    })
+                    .unwrap_or_else(|| format!("Routine '{name}' failed ({trigger_kind})."));
+                dispatch_output_actions(
+                    &agent_id,
+                    &routine_id,
+                    &routine,
+                    Some(&cur_thread_id),
+                    &err_summary,
+                    true,
+                    0,
+                );
+                break;
+            }
+
+            let next_attempt = cur_attempt + 1;
+            let delay_secs = retry_backoff_secs(next_attempt as u32);
+            if delay_secs > 0 {
+                std::thread::sleep(Duration::from_secs(delay_secs));
+            }
+
+            let retry_now = now_ms();
+            match launch_routine_chat_turn(
+                &agent_id,
+                &routine_id,
+                &routine,
+                provider,
+                &name,
+                &prompt,
+                workspace.as_deref(),
+                &permission_mode,
+                agent_profile.as_ref(),
+            ) {
+                Ok((next_tid, next_rid)) => {
+                    cur_thread_id = next_tid;
+                    cur_run_id = next_rid;
+                    cur_started_at = retry_now;
+                    cur_attempt = next_attempt;
+
+                    let _ = record_routine_run(&RoutineRunRecord {
+                        run_id: cur_run_id.clone(),
+                        routine_id: routine_id.clone(),
+                        agent_id: agent_id.clone(),
+                        trigger_kind: trigger_kind.clone(),
+                        status: "running".to_string(),
+                        started_at_unix_ms: cur_started_at,
+                        finished_at_unix_ms: None,
+                        thread_id: Some(cur_thread_id.clone()),
+                        summary: Some(format!(
+                            "Routine '{name}' retrying (attempt {next_attempt}) on {trigger_kind}."
+                        )),
+                        changed_files_count: 0,
+                        retry_attempt: cur_attempt,
+                        error: None,
+                    });
+                    {
+                        let mut list = routines().lock().unwrap();
+                        if let Some(record) = list
+                            .iter_mut()
+                            .find(|record| is_routine(record, &agent_id, &routine_id))
+                        {
+                            record["lastRunAtUnixMs"] = json!(retry_now);
+                            record["lastRunThreadId"] = json!(cur_thread_id);
+                            record["lastError"] = Value::Null;
+                        }
+                    }
+                    persist();
+                }
+                Err(err) => {
+                    let _ = record_routine_run(&RoutineRunRecord {
+                        run_id: Uuid::new_v4().to_string(),
+                        routine_id: routine_id.clone(),
+                        agent_id: agent_id.clone(),
+                        trigger_kind: trigger_kind.clone(),
+                        status: "failed".to_string(),
+                        started_at_unix_ms: retry_now,
+                        finished_at_unix_ms: Some(retry_now),
+                        thread_id: Some(cur_thread_id.clone()),
+                        summary: Some(err.message.clone()),
+                        changed_files_count: 0,
+                        retry_attempt: next_attempt,
+                        error: Some(err.message.clone()),
+                    });
+                    dispatch_output_actions(
+                        &agent_id,
+                        &routine_id,
+                        &routine,
+                        Some(&cur_thread_id),
+                        &err.message,
+                        true,
+                        0,
+                    );
+                    break;
+                }
+            }
+        }
+    });
+}
+
 fn execute_routine_record(
     agent_id: &str,
     routine_id: &str,
@@ -713,15 +1235,12 @@ fn execute_routine_record_with_meta(
         .map(str::to_string);
     let permission_mode = validate_permission_mode(routine.get("permissionMode"))
         .unwrap_or_else(|_| DEFAULT_PERMISSION_MODE.to_string());
-    let engine = {
+    let agent_profile = {
         let roster = agents().lock().unwrap();
-        let found = roster
-            .iter()
-            .find(|agent| agent.id == agent_id)
-            .map(|agent| agent.engine.clone());
-        found.ok_or_else(agent_not_found)?
-    };
-    let provider = match chat_provider_for_engine(&engine) {
+        roster.iter().find(|agent| agent.id == agent_id).cloned()
+    }
+    .ok_or_else(agent_not_found)?;
+    let provider = match chat_provider_for_engine(&agent_profile.engine) {
         Some(p) => p,
         None => {
             let err = RoutineCommandError::new(
@@ -747,47 +1266,40 @@ fn execute_routine_record_with_meta(
         }
     };
 
-    let thread = crate::chat::create_thread(
-        Some(agent_id),
-        &format!("Routine: {name}"),
-        provider,
-        workspace.as_deref(),
-    );
-    let thread_id = thread
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    crate::chat::configure_thread(
-        &thread_id,
-        &json!({ "provider": provider, "mode": permission_mode }),
-    );
-    let started = crate::chat::start_turn(&thread_id, Some(agent_id), &prompt, Vec::new(), Some(routine_id));
-    let run_id = started
-        .get("runId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
     let now = now_ms();
-    if thread_id.is_empty() || run_id.is_empty() {
-        let _ = record_routine_run(&RoutineRunRecord {
-            run_id: Uuid::new_v4().to_string(),
-            routine_id: routine_id.to_string(),
-            agent_id: agent_id.to_string(),
-            trigger_kind: trigger_kind.to_string(),
-            status: "failed".to_string(),
-            started_at_unix_ms: now,
-            finished_at_unix_ms: Some(now),
-            thread_id: None,
-            summary: Some(format!("Routine '{name}' could not start chat turn.")),
-            changed_files_count: 0,
-            retry_attempt,
-            error: Some("The routine could not start a chat run.".to_string()),
-        });
-        return Err(RoutineCommandError::new(
-            "routine_run_failed",
-            "The routine could not start a chat run.",
-        ));
+    let (thread_id, run_id) = match launch_routine_chat_turn(
+        agent_id,
+        routine_id,
+        routine,
+        provider,
+        &name,
+        &prompt,
+        workspace.as_deref(),
+        &permission_mode,
+        Some(&agent_profile),
+    ) {
+        Ok(pair) => pair,
+        Err(err) => {
+            let _ = record_routine_run(&RoutineRunRecord {
+                run_id: Uuid::new_v4().to_string(),
+                routine_id: routine_id.to_string(),
+                agent_id: agent_id.to_string(),
+                trigger_kind: trigger_kind.to_string(),
+                status: "failed".to_string(),
+                started_at_unix_ms: now,
+                finished_at_unix_ms: Some(now),
+                thread_id: None,
+                summary: Some(format!("Routine '{name}' could not start chat turn.")),
+                changed_files_count: 0,
+                retry_attempt,
+                error: Some(err.message.clone()),
+            });
+            return Err(err);
+        }
+    };
+
+    if let Ok(mut in_flight) = in_flight_routines().lock() {
+        in_flight.insert(routine_id.to_string());
     }
 
     let _ = record_routine_run(&RoutineRunRecord {
@@ -795,11 +1307,11 @@ fn execute_routine_record_with_meta(
         routine_id: routine_id.to_string(),
         agent_id: agent_id.to_string(),
         trigger_kind: trigger_kind.to_string(),
-        status: "succeeded".to_string(),
+        status: "running".to_string(),
         started_at_unix_ms: now,
-        finished_at_unix_ms: Some(now),
+        finished_at_unix_ms: None,
         thread_id: Some(thread_id.clone()),
-        summary: Some(format!("Routine '{name}' triggered on {trigger_kind}.")),
+        summary: Some(format!("Routine '{name}' running ({trigger_kind}).")),
         changed_files_count: 0,
         retry_attempt,
         error: None,
@@ -821,15 +1333,20 @@ fn execute_routine_record_with_meta(
         }
     }
     persist();
-    dispatch_output_actions(
-        agent_id,
-        routine_id,
-        routine,
-        Some(&thread_id),
-        &format!("Routine '{name}' started thread {thread_id} ({trigger_kind})."),
-        false,
-        0,
+
+    spawn_routine_settlement_waiter(
+        agent_id.to_string(),
+        routine_id.to_string(),
+        routine.clone(),
+        provider,
+        Some(agent_profile),
+        trigger_kind.to_string(),
+        thread_id.clone(),
+        run_id.clone(),
+        now,
+        retry_attempt,
     );
+
     Ok((thread_id, run_id))
 }
 
@@ -972,36 +1489,102 @@ pub fn dispatch_output_actions(
     for action in &actions {
         match action.as_str() {
             "notify_desktop" => {
+                let agent_name = agents()
+                    .lock()
+                    .ok()
+                    .and_then(|list| list.iter().find(|a| a.id == agent_id).map(|a| a.name.clone()))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| routine_name.to_string());
+                let workspace_id = routine
+                    .get("workspaceId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let tid = thread_id.map(str::trim).filter(|s| !s.is_empty())?;
+                        crate::notifications::resolve_notification_context(
+                            Some(tid),
+                            Some(agent_id),
+                            None,
+                        )
+                        .workspace_id
+                    });
+                let clean_thread_id = thread_id.map(str::trim).filter(|s| !s.is_empty());
+                let target_id = clean_thread_id.unwrap_or(routine_id);
+                let outcome = if failed { "failed" } else { "completed" };
+                let title = if failed {
+                    format!("Routine failed: {routine_name}")
+                } else {
+                    format!("Routine: {routine_name}")
+                };
+                let profile_val = if agent_id.trim().is_empty() {
+                    Value::Null
+                } else {
+                    json!(agent_id)
+                };
+                let notice = json!({
+                    "id": Uuid::new_v4().to_string(),
+                    "runId": Value::Null,
+                    "target": { "source": "agentChat", "id": target_id },
+                    "profileId": profile_val,
+                    "routineId": routine_id,
+                    "actorName": agent_name,
+                    "threadTitle": routine_name,
+                    "workspaceId": workspace_id,
+                    "module": "agent",
+                    "kind": { "kind": "settled", "outcome": outcome },
+                    "title": title,
+                    "body": summary,
+                    "resolution": "runSettled",
+                    "createdAtUnixMs": now_ms(),
+                    "isRead": false,
+                    "isWaitingForInput": false,
+                });
                 if let Ok(mut list) = notifications().lock() {
-                    list.insert(
-                        0,
-                        json!({
-                            "id": Uuid::new_v4().to_string(),
-                            "title": format!("Routine: {routine_name}"),
-                            "body": summary,
-                            "agentId": agent_id,
-                            "routineId": routine_id,
-                            "threadId": thread_id,
-                            "createdAtUnixMs": now_ms(),
-                            "isRead": false,
-                            "isWaitingForInput": false,
-                        }),
-                    );
+                    list.retain(|item| {
+                        !(item.get("routineId").and_then(Value::as_str) == Some(routine_id)
+                            && item.pointer("/target/id").and_then(Value::as_str) == Some(target_id))
+                    });
+                    list.insert(0, notice);
+                    if list.len() > 100 {
+                        list.truncate(100);
+                    }
                 }
                 persist();
+                crate::notifications::emit_notifications_updated();
             }
             "announce_via_argos" => {
                 if let Some(app) = crate::get_app_handle() {
+                    let agent_name = agents()
+                        .lock()
+                        .ok()
+                        .and_then(|list| list.iter().find(|a| a.id == agent_id).map(|a| a.name.clone()))
+                        .filter(|s| !s.trim().is_empty())
+                        .unwrap_or_else(|| routine_name.to_string());
+                    let status = if failed { "failed" } else { "succeeded" };
+                    let message = if failed {
+                        format!("Routine '{routine_name}' failed: {summary}")
+                    } else {
+                        format!("Routine '{routine_name}': {summary}")
+                    };
+                    let already_persisted =
+                        thread_id.is_some() || actions.iter().any(|a| a == "notify_desktop");
                     let _ = app.emit(
                         "kite:agent-announce",
                         json!({
                             "source": "routine",
                             "agentId": agent_id,
+                            "agentName": agent_name,
                             "routineId": routine_id,
                             "routineName": routine_name,
                             "threadId": thread_id,
+                            "status": status,
+                            "message": message,
                             "summary": summary,
                             "failed": failed,
+                            "alreadyPersisted": already_persisted,
                         }),
                     );
                 }
@@ -1055,12 +1638,20 @@ pub fn dispatch_output_actions(
     }
 }
 
-pub fn dispatch_routine_event_internal(
+fn dispatch_routine_event_with<E, S, R>(
     event_kind: &str,
     payload: &Value,
     now: i64,
     chain_depth: u8,
-) -> RoutineResult<Value> {
+    mut execute_fn: E,
+    mut sleep_secs_fn: S,
+    mut record_skipped_fn: R,
+) -> RoutineResult<Value>
+where
+    E: FnMut(&str, &str, &Value, &str, i64) -> RoutineResult<(String, String)>,
+    S: FnMut(u64),
+    R: FnMut(&RoutineRunRecord),
+{
     if !SUPPORTED_EVENT_KINDS.contains(&event_kind) {
         return Err(invalid("Unsupported routine eventKind."));
     }
@@ -1116,7 +1707,7 @@ pub fn dispatch_routine_event_internal(
         };
 
         if debounced {
-            let _ = record_routine_run(&RoutineRunRecord {
+            record_skipped_fn(&RoutineRunRecord {
                 run_id: Uuid::new_v4().to_string(),
                 routine_id: routine_id.clone(),
                 agent_id: agent_id.clone(),
@@ -1142,7 +1733,7 @@ pub fn dispatch_routine_event_internal(
         let mut last_err = None;
         let mut succeeded_thread = None;
         for attempt in 0..=max_retries {
-            match execute_routine_record_with_meta(
+            match execute_fn(
                 &agent_id,
                 &routine_id,
                 &record,
@@ -1155,10 +1746,14 @@ pub fn dispatch_routine_event_internal(
                     break;
                 }
                 Err(err) => {
+                    let is_unavailable = err.code.as_str() == "routine_runtime_unavailable";
                     last_err = Some(err);
-                    // Only sleep backoff between retries for transient errors outside runtime_unavailable
-                    if attempt < max_retries && last_err.as_ref().map(|e| e.code.as_str()) != Some("routine_runtime_unavailable") {
-                        let _delay = retry_backoff_secs((attempt + 1) as u32);
+                    // Sleep backoff between retries for transient errors outside runtime_unavailable
+                    if attempt < max_retries && !is_unavailable {
+                        let delay = retry_backoff_secs((attempt + 1) as u32);
+                        if delay > 0 {
+                            sleep_secs_fn(delay);
+                        }
                     } else {
                         break;
                     }
@@ -1187,6 +1782,44 @@ pub fn dispatch_routine_event_internal(
         "triggered": triggered,
         "skipped": skipped,
     }))
+}
+
+pub fn dispatch_routine_event_internal(
+    event_kind: &str,
+    payload: &Value,
+    now: i64,
+    chain_depth: u8,
+) -> RoutineResult<Value> {
+    dispatch_routine_event_with(
+        event_kind,
+        payload,
+        now,
+        chain_depth,
+        execute_routine_record_with_meta,
+        |secs| std::thread::sleep(Duration::from_secs(secs)),
+        |rec| {
+            let _ = record_routine_run(rec);
+        },
+    )
+}
+
+pub fn dispatch_routine_event_async(event_kind: &str, payload: Value) {
+    #[cfg(test)]
+    if !crate::persist::stores_initialized() {
+        return;
+    }
+    let kind = event_kind.trim().to_string();
+    if !SUPPORTED_EVENT_KINDS.contains(&kind.as_str()) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if matches!(kind.as_str(), "on_git_commit" | "on_branch_change") {
+            if let Some(dir_str) = payload.get("path").and_then(Value::as_str) {
+                sync_git_snapshot_for_dir(Path::new(dir_str));
+            }
+        }
+        let _ = dispatch_routine_event_internal(&kind, &payload, now_ms(), 0);
+    });
 }
 
 #[tauri::command]
@@ -1621,14 +2254,15 @@ pub fn tick_due_routines_at(now: i64) -> usize {
     let mut triggered = 0usize;
     for (agent_id, routine_id, record) in due {
         let outcome = execute_routine_record(&agent_id, &routine_id, &record);
-        if let Ok(mut in_flight) = in_flight_routines().lock() {
-            in_flight.remove(&routine_id);
-        }
         match outcome {
             Ok(_) => {
+                // Background settlement waiter owns releasing `in_flight_routines` once settled.
                 triggered += 1;
             }
             Err(err) => {
+                if let Ok(mut in_flight) = in_flight_routines().lock() {
+                    in_flight.remove(&routine_id);
+                }
                 {
                     let mut list = routines().lock().unwrap();
                     if let Some(item) = list
@@ -1645,6 +2279,141 @@ pub fn tick_due_routines_at(now: i64) -> usize {
     triggered
 }
 
+fn read_git_head_and_branch(dir: &Path) -> Option<(String, String)> {
+    let out = crate::git::run_git(dir, &["rev-parse", "HEAD", "--abbrev-ref", "HEAD"]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines().map(str::trim).filter(|s| !s.is_empty());
+    let head = lines.next()?.to_string();
+    let branch = lines.next().unwrap_or("HEAD").to_string();
+    Some((head, branch))
+}
+
+fn sync_git_snapshot_for_dir(dir: &Path) {
+    let Some(state) = read_git_head_and_branch(dir) else {
+        return;
+    };
+    let canon_target = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let workspaces = crate::persist::list_workspaces_snapshot();
+    let mut matched_ids = Vec::new();
+    for ws in workspaces {
+        if let Some(p) = crate::persist::workspace_path(&ws.id) {
+            let pb = PathBuf::from(p);
+            let canon_ws = pb.canonicalize().unwrap_or(pb);
+            if canon_ws == canon_target {
+                matched_ids.push(ws.id);
+            }
+        }
+    }
+    if matched_ids.is_empty() {
+        return;
+    }
+    if let Ok(mut snapshots) = git_workspace_snapshots().lock() {
+        for id in matched_ids {
+            snapshots.insert(id, state.clone());
+        }
+    }
+}
+
+fn evaluate_git_snapshot_transitions(
+    snapshots: &mut HashMap<String, (String, String)>,
+    observed: Vec<(String, PathBuf, String, String)>,
+) -> Vec<(&'static str, Value)> {
+    let mut events = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for (ws_id, dir, head, branch) in observed {
+        seen_ids.insert(ws_id.clone());
+        match snapshots.get(&ws_id).cloned() {
+            None => {
+                // Skip initial baseline on first observation so startup never emits catch-up events.
+                snapshots.insert(ws_id, (head, branch));
+            }
+            Some((prev_head, prev_branch)) => {
+                if prev_branch != branch {
+                    snapshots.insert(ws_id.clone(), (head.clone(), branch.clone()));
+                    events.push((
+                        "on_branch_change",
+                        json!({
+                            "workspaceId": ws_id,
+                            "path": dir.to_string_lossy(),
+                            "branch": branch,
+                            "previousBranch": prev_branch,
+                            "head": head,
+                        }),
+                    ));
+                } else if prev_head != head {
+                    snapshots.insert(ws_id.clone(), (head.clone(), branch.clone()));
+                    events.push((
+                        "on_git_commit",
+                        json!({
+                            "workspaceId": ws_id,
+                            "path": dir.to_string_lossy(),
+                            "branch": branch,
+                            "head": head,
+                            "previousHead": prev_head,
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+    snapshots.retain(|id, _| seen_ids.contains(id));
+    events
+}
+
+fn has_enabled_git_event_routines() -> bool {
+    let Ok(list) = routines().lock() else {
+        return false;
+    };
+    list.iter().any(|rec| {
+        if rec.get("enabled").and_then(Value::as_bool) != Some(true) {
+            return false;
+        }
+        let Some(cad) = rec.get("cadence") else {
+            return false;
+        };
+        cad.get("kind").and_then(Value::as_str) == Some("event")
+            && matches!(
+                cad.get("eventKind").and_then(Value::as_str),
+                Some("on_git_commit" | "on_branch_change")
+            )
+    })
+}
+
+pub fn poll_workspace_git_events(now: i64) {
+    if !has_enabled_git_event_routines() {
+        if let Ok(mut snaps) = git_workspace_snapshots().lock() {
+            snaps.clear();
+        }
+        return;
+    }
+    let workspaces = crate::persist::list_workspaces_snapshot();
+    let mut observed = Vec::new();
+    for ws in workspaces {
+        let Some(path_str) = crate::persist::workspace_path(&ws.id) else {
+            continue;
+        };
+        let dir = PathBuf::from(path_str);
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Some((head, branch)) = read_git_head_and_branch(&dir) {
+            observed.push((ws.id, dir, head, branch));
+        }
+    }
+    let events = {
+        let Ok(mut snaps) = git_workspace_snapshots().lock() else {
+            return;
+        };
+        evaluate_git_snapshot_transitions(&mut snaps, observed)
+    };
+    for (kind, payload) in events {
+        let _ = dispatch_routine_event_internal(kind, &payload, now, 0);
+    }
+}
+
 pub fn start_routine_scheduler() {
     if SCHEDULER_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -1659,7 +2428,13 @@ pub fn start_routine_scheduler() {
         loop {
             interval.tick().await;
             let now = now_ms();
-            let _ = tokio::task::spawn_blocking(move || tick_due_routines_at(now)).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                let count = tick_due_routines_at(now);
+                poll_workspace_git_events(now);
+                let _ = crate::plugin_runtime::scheduler::tick_scheduled_sidecars_at(now);
+                count
+            })
+            .await;
         }
     });
 }
@@ -1994,6 +2769,13 @@ mod tests {
         // Next at */30 minutes
         let next_half = next_cron_after("*/30 * * * *", friday_0900);
         assert_eq!(next_half, friday_0900 + 30 * 60_000);
+
+        // matches_unix_ms checks exact UTC minute match and ignores seconds offset
+        assert!(!sched.matches_unix_ms(friday_0900));
+        assert!(sched.matches_unix_ms(friday_0900 + 15 * 60_000));
+        assert!(sched.matches_unix_ms(friday_0900 + 15 * 60_000 + 42_000));
+        // Saturday 09:15 UTC (dow=6) must not match 1-5
+        assert!(!sched.matches_unix_ms(friday_0900 + MS_PER_DAY + 15 * 60_000));
     }
 
     #[test]
@@ -2054,5 +2836,250 @@ mod tests {
             "eventKind": "unsupported_event"
         })))
         .is_err());
+    }
+
+    #[test]
+    fn heartbeat_ok_marks_quiet_archives_thread_and_skips_notifications() {
+        assert!(is_heartbeat_ok("HEARTBEAT_OK"));
+        assert!(is_heartbeat_ok("  heartbeat_ok.\n"));
+        assert!(is_heartbeat_ok("HEARTBEAT_OK -"));
+        assert!(!is_heartbeat_ok("HEARTBEAT_OK: 2 failing tests"));
+        assert!(!is_heartbeat_ok("Found error before HEARTBEAT_OK"));
+        assert!(!is_heartbeat_ok("   "));
+
+        let routine = json!({
+            "id": "r-hb-1",
+            "agentId": "a-hb-1",
+            "name": "Nightly Health",
+            "outputActions": ["notify_desktop", "announce_via_argos"],
+        });
+        let mut recorded: Vec<RoutineRunRecord> = Vec::new();
+        let mut archived: Vec<(String, i64)> = Vec::new();
+        let mut actions_called = 0usize;
+
+        let clean = finalize_routine_turn_outcome_with(
+            "a-hb-1",
+            "r-hb-1",
+            &routine,
+            "schedule",
+            "run-hb-1",
+            "th-hb-1",
+            1_000,
+            0,
+            true,
+            "  heartbeat_ok! ",
+            None,
+            |rec| recorded.push(rec.clone()),
+            |tid, ts| archived.push((tid.to_string(), ts)),
+            |_summary, _failed| actions_called += 1,
+        );
+        assert!(clean);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].status, "quiet");
+        assert_eq!(recorded[0].summary.as_deref(), Some("HEARTBEAT_OK"));
+        assert!(recorded[0].finished_at_unix_ms.is_some());
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].0, "th-hb-1");
+        assert_eq!(actions_called, 0, "HEARTBEAT_OK must suppress output actions and notifications");
+
+        // Non-heartbeat success records "succeeded" and fires output actions
+        let mut recorded_ok: Vec<RoutineRunRecord> = Vec::new();
+        let mut archived_ok = 0usize;
+        let mut action_summaries: Vec<(String, bool)> = Vec::new();
+        let ok_res = finalize_routine_turn_outcome_with(
+            "a-hb-1",
+            "r-hb-1",
+            &routine,
+            "on_git_commit",
+            "run-ok-1",
+            "th-ok-1",
+            2_000,
+            0,
+            true,
+            "Detected unused export in src/app.ts.",
+            None,
+            |rec| recorded_ok.push(rec.clone()),
+            |_, _| archived_ok += 1,
+            |summary, failed| action_summaries.push((summary.to_string(), failed)),
+        );
+        assert!(ok_res);
+        assert_eq!(recorded_ok[0].status, "succeeded");
+        assert_eq!(recorded_ok[0].summary.as_deref(), Some("Detected unused export in src/app.ts."));
+        assert_eq!(archived_ok, 0);
+        assert_eq!(action_summaries, vec![("Detected unused export in src/app.ts.".to_string(), false)]);
+    }
+
+    #[test]
+    fn event_trigger_filtering_and_retry_backoff_schedule_work() {
+        let rid_commit = format!("r-evt-commit-{}", Uuid::new_v4());
+        let rid_branch = format!("r-evt-branch-{}", Uuid::new_v4());
+        let aid = format!("a-evt-{}", Uuid::new_v4());
+        {
+            let mut roster = agents().lock().unwrap();
+            roster.push(crate::persist::AgentProfile {
+                id: aid.clone(),
+                name: "Guard".into(),
+                engine: "antigravity".into(),
+                purpose: "Test".into(),
+                brief: "Test".into(),
+                avatar: None,
+                created_at_unix_ms: 1,
+                pinned: false,
+                order: 99,
+                memory_budget: None,
+                reflection_mode: None,
+                allow_agent_scheduling: Some(true),
+                allow_agent_messaging: Some(true),
+                default_mode: None,
+                default_plan: None,
+                default_model: None,
+                default_provider_options: vec![],
+                place_display_names: vec![],
+                disabled_plugin_ids: vec![],
+            });
+            let mut list = routines().lock().unwrap();
+            list.push(json!({
+                "id": rid_commit,
+                "agentId": aid,
+                "name": "Commit Watcher",
+                "prompt": "Check commit",
+                "cadence": { "kind": "event", "eventKind": "on_git_commit", "debounceSecs": 30 },
+                "maxRetries": 2,
+                "enabled": true,
+            }));
+            list.push(json!({
+                "id": rid_branch,
+                "agentId": aid,
+                "name": "Branch Watcher",
+                "prompt": "Check branch",
+                "cadence": { "kind": "event", "eventKind": "on_branch_change", "debounceSecs": 30 },
+                "maxRetries": 0,
+                "enabled": true,
+            }));
+        }
+
+        let mut sleeps: Vec<u64> = Vec::new();
+        let mut attempts: Vec<i64> = Vec::new();
+        let res = dispatch_routine_event_with(
+            "on_git_commit",
+            &json!({ "workspaceId": "ws-1" }),
+            50_000,
+            0,
+            |_aid, rid, _rec, kind, attempt| {
+                assert_eq!(rid, rid_commit);
+                assert_eq!(kind, "on_git_commit");
+                attempts.push(attempt);
+                if attempt < 2 {
+                    Err(RoutineCommandError::new("routine_run_failed", "transient"))
+                } else {
+                    Ok(("th-retried".into(), "run-retried".into()))
+                }
+            },
+            |secs| sleeps.push(secs),
+            |_| {},
+        )
+        .expect("event dispatch should succeed");
+
+        assert_eq!(attempts, vec![0, 1, 2]);
+        assert_eq!(sleeps, vec![15, 60]);
+        assert_eq!(res["triggered"].as_array().unwrap().len(), 1);
+        assert_eq!(res["triggered"][0]["routineId"], rid_commit);
+
+        // Within debounce window (50_000 + 10_000 < 50_000 + 30_000), same event is skipped
+        let mut skipped_records = 0usize;
+        let debounced_res = dispatch_routine_event_with(
+            "on_git_commit",
+            &json!({ "workspaceId": "ws-1" }),
+            60_000,
+            0,
+            |_, _, _, _, _| panic!("debounced routine should not execute"),
+            |_| {},
+            |_| skipped_records += 1,
+        )
+        .unwrap();
+        assert_eq!(skipped_records, 1);
+        assert_eq!(debounced_res["skipped"], json!([rid_commit]));
+
+        // Cleanup test fixtures
+        routines().lock().unwrap().retain(|r| {
+            let id = r.get("id").and_then(Value::as_str);
+            id != Some(rid_commit.as_str()) && id != Some(rid_branch.as_str())
+        });
+        agents().lock().unwrap().retain(|a| a.id != aid);
+    }
+
+    #[test]
+    fn git_snapshot_poller_skips_initial_baseline_and_emits_commit_or_branch_changes() {
+        let mut snaps = HashMap::new();
+        let ws_dir = PathBuf::from("C:/repo-a");
+        let initial = evaluate_git_snapshot_transitions(
+            &mut snaps,
+            vec![("ws-1".into(), ws_dir.clone(), "abc111".into(), "main".into())],
+        );
+        assert!(initial.is_empty(), "initial baseline must not emit events");
+
+        let commit_events = evaluate_git_snapshot_transitions(
+            &mut snaps,
+            vec![("ws-1".into(), ws_dir.clone(), "def222".into(), "main".into())],
+        );
+        assert_eq!(commit_events.len(), 1);
+        assert_eq!(commit_events[0].0, "on_git_commit");
+        assert_eq!(commit_events[0].1["head"], "def222");
+
+        let branch_events = evaluate_git_snapshot_transitions(
+            &mut snaps,
+            vec![("ws-1".into(), ws_dir, "ghi333".into(), "feat/next".into())],
+        );
+        assert_eq!(branch_events.len(), 1);
+        assert_eq!(branch_events[0].0, "on_branch_change");
+        assert_eq!(branch_events[0].1["branch"], "feat/next");
+    }
+
+    #[test]
+    fn toggle_seeded_routine_succeeds_even_when_owner_agent_is_absent() {
+        crate::persist::initial_state();
+        let seeded_id = crate::persist::SEEDED_HEALTH_CHECK_ROUTINE_ID.to_string();
+        let owner_agent_id = Uuid::new_v4().to_string();
+
+        {
+            let mut list = routines().lock().unwrap();
+            list.push(json!({
+                "id": seeded_id,
+                "agentId": owner_agent_id,
+                "name": "Orphaned Owner Toggle Check",
+                "prompt": "Check health",
+                "cadence": { "kind": "interval", "seconds": 86400 },
+                "enabled": true,
+                "author": "builder",
+                "workspaceId": Value::Null,
+                "createdAtUnixMs": 1_700_000_000_000i64,
+                "nextRunAtUnixMs": 1_700_086_400_000i64,
+            }));
+        }
+
+        let snapshot = list_routines(None);
+        let rev = revision_of(&snapshot, &owner_agent_id);
+        let paused = set_routine_enabled(Some(json!({
+            "request": {
+                "agentId": owner_agent_id,
+                "routineId": seeded_id,
+                "expectedRevision": rev,
+                "enabled": false
+            }
+        })))
+        .expect("seeded routine UUID must toggle cleanly even if owner agent was deleted");
+
+        let found = paused["routines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == seeded_id.as_str() && item["agentId"] == owner_agent_id.as_str())
+            .expect("toggled routine must exist in snapshot");
+        assert_eq!(found["enabled"], json!(false));
+
+        routines()
+            .lock()
+            .unwrap()
+            .retain(|item| !(item["id"] == seeded_id.as_str() && item["agentId"] == owner_agent_id.as_str()));
     }
 }

@@ -134,4 +134,136 @@ describe('AgentPlaybooksTab (T5 Multi-Agent Playbooks & Live Graph)', () => {
       expect(screen.getByRole('button', { name: 'Retry stage' })).toBeInTheDocument();
     });
   });
+
+  it('supports full stage fields, editing/deleting playbooks, open thread, and 2.5s active-run poll', async () => {
+    const existingPb = {
+      id: 'pb-existing',
+      name: 'Release Pipeline',
+      description: 'Verify and release',
+      stages: [
+        {
+          stageId: 'audit',
+          title: 'Audit',
+          agentProfileId: 'ag-1',
+          promptTemplate: 'Check diff {{input}}',
+          dependsOn: [],
+          workspaceMode: 'inherit',
+          handoffKeys: ['audit-summary'],
+        },
+      ],
+      createdAtUnixMs: 10,
+      updatedAtUnixMs: 10,
+    };
+
+    let pollCount = 0;
+    let deleted = false;
+
+    mockInvoke.mockImplementation(async (cmd: string, payload?: any) => {
+      if (cmd === 'list_agent_playbooks') {
+        return { playbooks: deleted ? [] : [existingPb] };
+      }
+      if (cmd === 'list_playbook_runs') {
+        pollCount += 1;
+        return {
+          runs: [
+            {
+              runId: 'pbrun-active',
+              playbookId: 'pb-existing',
+              playbookName: 'Release Pipeline',
+              status: pollCount >= 2 ? 'succeeded' : 'running',
+              startedAtUnixMs: Date.now() - 2000,
+              finishedAtUnixMs: pollCount >= 2 ? Date.now() : null,
+              workspaceId: null,
+              stages: [
+                {
+                  stageId: 'audit',
+                  title: 'Audit',
+                  agentProfileId: 'ag-1',
+                  provider: 'grok',
+                  model: null,
+                  status: pollCount >= 2 ? 'succeeded' : 'running',
+                  threadId: 'thread-stage-1',
+                  startedAtUnixMs: Date.now() - 2000,
+                  finishedAtUnixMs: pollCount >= 2 ? Date.now() : null,
+                  handoffKeys: ['audit-summary'],
+                  summary: 'Checked',
+                  error: null,
+                },
+              ],
+            },
+          ],
+        };
+      }
+      if (cmd === 'save_agent_playbook') {
+        return {
+          playbooks: [
+            {
+              ...existingPb,
+              name: payload?.request?.playbook?.name || existingPb.name,
+              stages: payload?.request?.playbook?.stages || existingPb.stages,
+            },
+          ],
+        };
+      }
+      if (cmd === 'delete_agent_playbook') {
+        deleted = true;
+        return { playbooks: [] };
+      }
+      return null;
+    });
+
+    const onOpenThread = vi.fn();
+    render(<AgentPlaybooksTab agentId="ag-1" agents={agents} onOpenThread={onOpenThread} />);
+
+    expect(
+      await screen.findByRole('button', { name: 'Edit playbook Release Pipeline' })
+    ).toBeInTheDocument();
+    expect(screen.getAllByText('Release Pipeline').length).toBeGreaterThanOrEqual(1);
+
+    // Open thread button on running stage
+    fireEvent.click(screen.getByRole('button', { name: 'Open thread' }));
+    expect(onOpenThread).toHaveBeenCalledWith('thread-stage-1');
+
+    // Edit existing playbook + stage metadata + reorder
+    fireEvent.click(screen.getByRole('button', { name: 'Edit playbook Release Pipeline' }));
+    expect(screen.getByRole('button', { name: 'Update Playbook' })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Stage 1 ID'), { target: { value: 'explore-root' } });
+    fireEvent.change(screen.getByLabelText('Stage 1 depends on'), { target: { value: 'prep' } });
+    fireEvent.change(screen.getByLabelText('Stage 1 handoff keys'), { target: { value: 'map-out' } });
+    fireEvent.click(screen.getByRole('button', { name: '+ Add Stage' }));
+    expect(screen.getByLabelText('Stage 2 ID')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Move stage 2 up' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove stage 2' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Update Playbook' }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('save_agent_playbook', {
+        request: {
+          playbook: expect.objectContaining({
+            id: 'pb-existing',
+            name: 'Release Pipeline',
+          }),
+        },
+      });
+    });
+
+    // Active run poll after 2.5s flips running -> succeeded
+    await waitFor(
+      () => {
+        expect(pollCount).toBeGreaterThanOrEqual(2);
+        expect(screen.getAllByText('succeeded').length).toBeGreaterThanOrEqual(1);
+      },
+      { timeout: 4000 }
+    );
+
+    // Delete playbook updates state cleanly even when backend returns []
+    fireEvent.click(screen.getByRole('button', { name: 'Delete playbook Release Pipeline' }));
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith('delete_agent_playbook', {
+        request: { playbookId: 'pb-existing' },
+      });
+      expect(screen.getByText(/No Playbooks created yet/i)).toBeInTheDocument();
+    });
+  });
 });

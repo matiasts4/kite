@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { AgentProfile } from '../../../types';
+import { SelectMenu } from '../../ui/SelectMenu';
 import type { PlaybookDefinition, PlaybookRunRecord, PlaybookStage } from './types';
 
 export interface AgentPlaybooksTabProps {
@@ -18,22 +19,8 @@ function formatElapsed(start?: number | null, end?: number | null): string {
   return secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
 }
 
-export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
-  agentId,
-  agents,
-  workspaceId = null,
-  onOpenThread,
-}) => {
-  const [playbooks, setPlaybooks] = useState<PlaybookDefinition[]>([]);
-  const [runs, setRuns] = useState<PlaybookRunRecord[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [runInputPrompt, setRunInputPrompt] = useState('');
-
-  // Draft Playbook editor state
-  const [draftName, setDraftName] = useState('');
-  const [draftDescription, setDraftDescription] = useState('');
-  const [stages, setStages] = useState<PlaybookStage[]>([
+function makeDefaultStages(agentId: string, agents: AgentProfile[]): PlaybookStage[] {
+  return [
     {
       stageId: 'explore',
       title: 'Explore & Map',
@@ -52,7 +39,26 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
       workspaceMode: 'share',
       handoffKeys: ['patch-summary'],
     },
-  ]);
+  ];
+}
+
+export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
+  agentId,
+  agents,
+  workspaceId = null,
+  onOpenThread,
+}) => {
+  const [playbooks, setPlaybooks] = useState<PlaybookDefinition[]>([]);
+  const [runs, setRuns] = useState<PlaybookRunRecord[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [runInputPrompt, setRunInputPrompt] = useState('');
+
+  // Draft / Edit Playbook editor state
+  const [editingPlaybookId, setEditingPlaybookId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState('');
+  const [draftDescription, setDraftDescription] = useState('');
+  const [stages, setStages] = useState<PlaybookStage[]>(() => makeDefaultStages(agentId, agents));
 
   const loadData = useCallback(async () => {
     try {
@@ -61,10 +67,10 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
         invoke<{ runs?: PlaybookRunRecord[] }>('list_playbook_runs', { request: {} }),
       ]);
       if (pbRes?.playbooks) {
-        setPlaybooks((prev) => (prev.length > 0 ? prev : pbRes.playbooks!));
+        setPlaybooks(pbRes.playbooks);
       }
       if (runsRes?.runs) {
-        setRuns((prev) => (prev.length > 0 ? prev : runsRes.runs!));
+        setRuns(runsRes.runs);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : '';
@@ -75,6 +81,15 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  const hasRunningRun = runs.some((r) => r.status === 'running');
+  useEffect(() => {
+    if (!hasRunningRun) return;
+    const timer = setInterval(() => {
+      void loadData();
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [hasRunningRun, loadData]);
 
   useEffect(() => {
     let disposed = false;
@@ -100,7 +115,9 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
             unlistenFn = fn;
           }
         })
-        .catch(() => {});
+        .catch((err) => {
+          console.warn('[AgentPlaybooksTab] Failed to subscribe to playbook updates:', err);
+        });
     } catch {
       // Non-Tauri test environment
     }
@@ -109,6 +126,13 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
       unlistenFn?.();
     };
   }, []);
+
+  const resetDraft = useCallback(() => {
+    setEditingPlaybookId(null);
+    setDraftName('');
+    setDraftDescription('');
+    setStages(makeDefaultStages(agentId, agents));
+  }, [agentId, agents]);
 
   const handleAddStage = () => {
     const idx = stages.length + 1;
@@ -127,27 +151,92 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
     ]);
   };
 
+  const handleRemoveStage = (idx: number) => {
+    if (stages.length <= 1) return;
+    const removedId = stages[idx]?.stageId;
+    setStages((prev) =>
+      prev
+        .filter((_, i) => i !== idx)
+        .map((st) => ({
+          ...st,
+          dependsOn: st.dependsOn.filter((dep) => dep !== removedId),
+        }))
+    );
+  };
+
+  const handleMoveStage = (idx: number, delta: -1 | 1) => {
+    const target = idx + delta;
+    if (target < 0 || target >= stages.length) return;
+    setStages((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(idx, 1);
+      next.splice(target, 0, moved);
+      return next;
+    });
+  };
+
+  const handleEditPlaybook = (pb: PlaybookDefinition) => {
+    setEditingPlaybookId(pb.id);
+    setDraftName(pb.name);
+    setDraftDescription(pb.description || '');
+    setStages(
+      pb.stages.length > 0
+        ? pb.stages.map((st) => ({
+            ...st,
+            dependsOn: [...(st.dependsOn ?? [])],
+            handoffKeys: [...(st.handoffKeys ?? [])],
+          }))
+        : makeDefaultStages(agentId, agents)
+    );
+    setError(null);
+  };
+
+  const handleDeletePlaybook = async (playbookId: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await invoke<{ deleted?: boolean; playbooks?: PlaybookDefinition[] }>(
+        'delete_agent_playbook',
+        { request: { playbookId } }
+      );
+      if (res?.playbooks) {
+        setPlaybooks(res.playbooks);
+      } else {
+        setPlaybooks((prev) => prev.filter((p) => p.id !== playbookId));
+      }
+      if (editingPlaybookId === playbookId) {
+        resetDraft();
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : typeof err === 'string' ? err : 'Failed to delete playbook');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleSavePlaybook = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!draftName.trim() || stages.length === 0) return;
     setBusy(true);
     setError(null);
     try {
+      const existing = editingPlaybookId
+        ? playbooks.find((p) => p.id === editingPlaybookId)
+        : undefined;
       const res = await invoke<{ playbooks?: PlaybookDefinition[] }>('save_agent_playbook', {
         request: {
           playbook: {
-            id: '',
+            id: editingPlaybookId ?? '',
             name: draftName.trim(),
             description: draftDescription.trim(),
             stages,
-            createdAtUnixMs: 0,
+            createdAtUnixMs: existing?.createdAtUnixMs ?? 0,
             updatedAtUnixMs: 0,
           },
         },
       });
       if (res?.playbooks) setPlaybooks(res.playbooks);
-      setDraftName('');
-      setDraftDescription('');
+      resetDraft();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : typeof err === 'string' ? err : 'Failed to save playbook');
     } finally {
@@ -233,48 +322,145 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
           </div>
 
           <div className="agent-playbooks__stages-draft">
-            {stages.map((st, idx) => (
-              <div key={st.stageId} className="agent-playbooks__stage-row">
-                <input
-                  type="text"
-                  className="ui-field"
-                  aria-label={`Stage ${idx + 1} title`}
-                  value={st.title}
-                  onChange={(e) => {
-                    const val = e.currentTarget.value;
-                    setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, title: val } : s)));
-                  }}
-                />
-                <select
-                  aria-label={`Stage ${idx + 1} agent`}
-                  className="ui-field"
-                  value={st.agentProfileId}
-                  onChange={(e) => {
-                    const val = e.currentTarget.value;
-                    setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, agentProfileId: val } : s)));
-                  }}
-                >
-                  {agents.map((ag) => (
-                    <option key={ag.id} value={ag.id}>
-                      {ag.name} ({ag.engine})
-                    </option>
-                  ))}
-                </select>
-                <select
-                  aria-label={`Stage ${idx + 1} workspace mode`}
-                  className="ui-field"
-                  value={st.workspaceMode}
-                  onChange={(e) => {
-                    const val = e.currentTarget.value as 'inherit' | 'share' | 'branch';
-                    setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, workspaceMode: val } : s)));
-                  }}
-                >
-                  <option value="inherit">inherit</option>
-                  <option value="share">share</option>
-                  <option value="branch">branch</option>
-                </select>
-              </div>
-            ))}
+            {stages.map((st, idx) => {
+              const selectedAgent = agents.find((ag) => ag.id === st.agentProfileId);
+              return (
+                <div key={`stage-editor-${idx}`} className="agent-playbooks__stage-card">
+                  <div className="agent-playbooks__stage-row">
+                    <input
+                      type="text"
+                      className="ui-field"
+                      aria-label={`Stage ${idx + 1} title`}
+                      value={st.title}
+                      onChange={(e) => {
+                        const val = e.currentTarget.value;
+                        setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, title: val } : s)));
+                      }}
+                    />
+                    <SelectMenu
+                      variant="field"
+                      label={`Stage ${idx + 1} agent`}
+                      value={st.agentProfileId}
+                      triggerLabel={
+                        selectedAgent ? `${selectedAgent.name} (${selectedAgent.engine})` : st.agentProfileId
+                      }
+                      rows={agents.map((ag) => ({
+                        id: ag.id,
+                        title: `${ag.name} (${ag.engine})`,
+                      }))}
+                      onSelect={(val) => {
+                        setStages((prev) =>
+                          prev.map((s, i) => (i === idx ? { ...s, agentProfileId: val } : s))
+                        );
+                      }}
+                    />
+                    <SelectMenu
+                      variant="field"
+                      label={`Stage ${idx + 1} workspace mode`}
+                      value={st.workspaceMode}
+                      triggerLabel={st.workspaceMode}
+                      rows={[
+                        { id: 'inherit', title: 'inherit', detail: 'Share active workspace directly' },
+                        { id: 'share', title: 'share', detail: 'Provision isolated git worktree' },
+                        { id: 'branch', title: 'branch', detail: 'Isolated branch worktree' },
+                      ]}
+                      onSelect={(val) => {
+                        const mode = val as 'inherit' | 'share' | 'branch';
+                        setStages((prev) =>
+                          prev.map((s, i) => (i === idx ? { ...s, workspaceMode: mode } : s))
+                        );
+                      }}
+                    />
+                  </div>
+
+                  <div className="agent-playbooks__stage-meta-grid">
+                    <input
+                      type="text"
+                      className="ui-field"
+                      aria-label={`Stage ${idx + 1} ID`}
+                      placeholder="Stage ID (e.g. explore)"
+                      value={st.stageId}
+                      onChange={(e) => {
+                        const val = e.currentTarget.value;
+                        setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, stageId: val } : s)));
+                      }}
+                    />
+                    <input
+                      type="text"
+                      className="ui-field"
+                      aria-label={`Stage ${idx + 1} depends on`}
+                      placeholder="Depends on (comma-separated stage IDs)"
+                      value={st.dependsOn.join(', ')}
+                      onChange={(e) => {
+                        const deps = e.currentTarget.value
+                          .split(',')
+                          .map((d) => d.trim())
+                          .filter(Boolean);
+                        setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, dependsOn: deps } : s)));
+                      }}
+                    />
+                    <input
+                      type="text"
+                      className="ui-field"
+                      aria-label={`Stage ${idx + 1} handoff keys`}
+                      placeholder="Handoff keys (comma-separated)"
+                      value={st.handoffKeys.join(', ')}
+                      onChange={(e) => {
+                        const keys = e.currentTarget.value
+                          .split(',')
+                          .map((k) => k.trim())
+                          .filter(Boolean);
+                        setStages((prev) => prev.map((s, i) => (i === idx ? { ...s, handoffKeys: keys } : s)));
+                      }}
+                    />
+                  </div>
+
+                  <textarea
+                    rows={2}
+                    className="ui-field ui-field--area"
+                    aria-label={`Stage ${idx + 1} prompt template`}
+                    placeholder="Stage prompt template..."
+                    value={st.promptTemplate}
+                    onChange={(e) => {
+                      const val = e.currentTarget.value;
+                      setStages((prev) =>
+                        prev.map((s, i) => (i === idx ? { ...s, promptTemplate: val } : s))
+                      );
+                    }}
+                  />
+
+                  <div className="agent-playbooks__stage-controls">
+                    <button
+                      type="button"
+                      className="chrome-button"
+                      aria-label={`Move stage ${idx + 1} up`}
+                      disabled={idx === 0}
+                      onClick={() => handleMoveStage(idx, -1)}
+                    >
+                      Move up
+                    </button>
+                    <button
+                      type="button"
+                      className="chrome-button"
+                      aria-label={`Move stage ${idx + 1} down`}
+                      disabled={idx === stages.length - 1}
+                      onClick={() => handleMoveStage(idx, 1)}
+                    >
+                      Move down
+                    </button>
+                    <button
+                      type="button"
+                      className="chrome-button"
+                      aria-label={`Remove stage ${idx + 1}`}
+                      disabled={stages.length <= 1}
+                      onClick={() => handleRemoveStage(idx)}
+                    >
+                      Remove stage
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
 
           <div className="agent-knowledge__actions">
@@ -282,8 +468,13 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
               + Add Stage
             </button>
             <button type="submit" className="primary-button" disabled={busy || !draftName.trim()}>
-              Save Playbook
+              {editingPlaybookId ? 'Update Playbook' : 'Save Playbook'}
             </button>
+            {editingPlaybookId ? (
+              <button type="button" className="secondary-button" disabled={busy} onClick={resetDraft}>
+                Cancel edit
+              </button>
+            ) : null}
           </div>
         </form>
 
@@ -313,14 +504,34 @@ export const AgentPlaybooksTab: React.FC<AgentPlaybooksTabProps> = ({
                       {pb.description || 'Multi-stage pipeline'} · {pb.stages.length} stage(s)
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    className="primary-button"
-                    disabled={busy}
-                    onClick={() => void handleRunPlaybook(pb.id)}
-                  >
-                    Run Playbook
-                  </button>
+                  <div className="agent-playbooks__card-actions">
+                    <button
+                      type="button"
+                      className="chrome-button"
+                      disabled={busy}
+                      aria-label={`Edit playbook ${pb.name}`}
+                      onClick={() => handleEditPlaybook(pb)}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      className="chrome-button"
+                      disabled={busy}
+                      aria-label={`Delete playbook ${pb.name}`}
+                      onClick={() => void handleDeletePlaybook(pb.id)}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={busy}
+                      onClick={() => void handleRunPlaybook(pb.id)}
+                    >
+                      Run Playbook
+                    </button>
+                  </div>
                 </div>
               </div>
             ))

@@ -24,7 +24,7 @@ export interface RoutineRunRecord {
   routineId: string;
   agentId: string;
   triggerKind: string;
-  status: 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled' | string;
+  status: 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled' | 'quiet' | string;
   startedAtUnixMs: number;
   finishedAtUnixMs: number | null;
   threadId: string | null;

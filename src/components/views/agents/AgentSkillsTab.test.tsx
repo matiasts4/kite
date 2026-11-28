@@ -240,4 +240,232 @@ describe('AgentSkillsTab - Single Starter Control & Empty State Parity', () => {
     );
     invokeSpy.mockRestore();
   });
+
+  it('renders Repo & Global Skills panel with scope/eligibility badges and 1-click link switch', async () => {
+    const user = userEvent.setup();
+    const ipcCoreModule = await import('../../../lib/ipc/core');
+    const updatedMind: AgentMindSnapshot = {
+      schemaVersion: 1,
+      agentId: 'agent-1',
+      memory: '',
+      user: '',
+      skills: [],
+      linkedSkillRefs: ['workspace:odd-workflow'],
+      memoryUpdatedAtUnixMs: null,
+      userUpdatedAtUnixMs: null,
+      memoryRevision: null,
+      userRevision: null,
+      readIssues: [],
+    };
+    const invokeSpy = vi.spyOn(ipcCoreModule, 'invokeCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_discoverable_skills') {
+        return {
+          workspaceRoot: 'C:\\repo\\kite',
+          linkedSkillRefs: [],
+          skills: [
+            {
+              id: 'odd-workflow',
+              refKey: 'workspace:odd-workflow',
+              name: 'ODD Workflow',
+              description: 'Execute Organic Driven Development specs',
+              scope: 'workspace',
+              path: 'C:\\repo\\kite\\.agents\\skills\\odd-workflow\\SKILL.md',
+              manualOnly: true,
+              contextMode: 'fork',
+              requiresBins: [],
+              requiresEnv: [],
+              eligible: true,
+              missingRequirements: [],
+            },
+            {
+              id: 'docker-qa',
+              refKey: 'global:docker-qa',
+              name: 'Docker QA',
+              description: 'Run containerized checks',
+              scope: 'global',
+              path: 'C:\\Users\\PC\\.gemini\\skills\\docker-qa\\SKILL.md',
+              manualOnly: false,
+              contextMode: null,
+              requiresBins: ['docker'],
+              requiresEnv: ['QA_TOKEN'],
+              eligible: false,
+              missingRequirements: ['binary: docker', 'env: QA_TOKEN'],
+            },
+          ],
+        };
+      }
+      if (cmd === 'set_agent_linked_skills') {
+        return updatedMind;
+      }
+      return null;
+    });
+
+    const onMindUpdated = vi.fn();
+    const mindWithBadges: AgentMindSnapshot = {
+      schemaVersion: 1,
+      agentId: 'agent-1',
+      memory: '',
+      user: '',
+      skills: [
+        {
+          id: 'manual-audit',
+          name: 'Manual Audit',
+          description: 'Run manual diff audit',
+          uses: 0,
+          updatedAtUnixMs: Date.now(),
+          revision: 'rev-m',
+          lastUsed: null,
+          lastOutcome: null,
+          manualOnly: true,
+          contextMode: 'fork',
+          eligible: false,
+          missingRequirements: ['binary: sg'],
+        },
+      ],
+      linkedSkillRefs: [],
+      memoryUpdatedAtUnixMs: null,
+      userUpdatedAtUnixMs: null,
+      memoryRevision: null,
+      userRevision: null,
+      readIssues: [],
+    };
+
+    render(
+      <AgentSkillsTab
+        agentId="agent-1"
+        agentName="Claude"
+        workspaceId="ws-1"
+        workspaces={[{ id: 'ws-1', displayName: 'Kite Repo', createdAtUnixMs: 1, lastOpenedAtUnixMs: 1, pinned: true, available: true }]}
+        mind={mindWithBadges}
+        selectedSkillId={null}
+        skillDocument={null}
+        skillLoading={false}
+        skillSaving={false}
+        onSelectSkill={vi.fn()}
+        onSaveSkill={vi.fn()}
+        onDeleteSkill={vi.fn()}
+        onClearSelectedSkill={vi.fn()}
+        starters={mockStarters}
+        onInstallStarter={vi.fn()}
+        onMindUpdated={onMindUpdated}
+      />
+    );
+
+    expect(await screen.findByText('ODD Workflow')).toBeInTheDocument();
+    expect(screen.getByText('workspace')).toBeInTheDocument();
+    expect(screen.getByText('global')).toBeInTheDocument();
+    expect(screen.getAllByText('manual-only').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('context: fork').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('ineligible').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText(/Missing: binary: docker, env: QA_TOKEN/i)).toBeInTheDocument();
+
+    const linkSwitch = screen.getByRole('switch', { name: 'Link ODD Workflow' });
+    expect(linkSwitch).toHaveAttribute('aria-checked', 'false');
+    await user.click(linkSwitch);
+
+    expect(invokeSpy).toHaveBeenCalledWith('set_agent_linked_skills', {
+      agentId: 'agent-1',
+      linkedSkillRefs: ['workspace:odd-workflow'],
+    });
+    expect(onMindUpdated).toHaveBeenCalledWith(updatedMind);
+    invokeSpy.mockRestore();
+  });
+
+  it('captures a skill from chat steps via capture_agent_skill_from_chat', async () => {
+    const user = userEvent.setup();
+    const ipcCoreModule = await import('../../../lib/ipc/core');
+    const capturedMind: AgentMindSnapshot & { capturedSkillId?: string } = {
+      schemaVersion: 1,
+      agentId: 'agent-1',
+      memory: '',
+      user: '',
+      skills: [
+        {
+          id: 'release-check',
+          name: 'Release Check',
+          description: 'Run before tagging',
+          uses: 0,
+          updatedAtUnixMs: Date.now(),
+          revision: 'rev-c',
+          lastUsed: null,
+          lastOutcome: null,
+          manualOnly: true,
+        },
+      ],
+      memoryUpdatedAtUnixMs: null,
+      userUpdatedAtUnixMs: null,
+      memoryRevision: null,
+      userRevision: null,
+      readIssues: [],
+      capturedSkillId: 'release-check',
+    };
+    const invokeSpy = vi.spyOn(ipcCoreModule, 'invokeCommand').mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_discoverable_skills') {
+        return { skills: [], linkedSkillRefs: [] };
+      }
+      if (cmd === 'list_agent_chat_summaries') {
+        return [];
+      }
+      if (cmd === 'capture_agent_skill_from_chat') {
+        return capturedMind;
+      }
+      return null;
+    });
+
+    const onMindUpdated = vi.fn();
+    const emptyMind: AgentMindSnapshot = {
+      schemaVersion: 1,
+      agentId: 'agent-1',
+      memory: '',
+      user: '',
+      skills: [],
+      memoryUpdatedAtUnixMs: null,
+      userUpdatedAtUnixMs: null,
+      memoryRevision: null,
+      userRevision: null,
+      readIssues: [],
+    };
+
+    render(
+      <AgentSkillsTab
+        agentId="agent-1"
+        agentName="Claude"
+        mind={emptyMind}
+        selectedSkillId={null}
+        skillDocument={null}
+        skillLoading={false}
+        skillSaving={false}
+        onSelectSkill={vi.fn()}
+        onSaveSkill={vi.fn()}
+        onDeleteSkill={vi.fn()}
+        onClearSelectedSkill={vi.fn()}
+        starters={mockStarters}
+        onInstallStarter={vi.fn()}
+        onMindUpdated={onMindUpdated}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Capture from Chat' }));
+    await user.type(screen.getByLabelText('Skill name'), 'Release Check');
+    await user.type(screen.getByLabelText('When it fires'), 'Run before tagging');
+    await user.type(
+      screen.getByLabelText('Conversation steps'),
+      'User: Verify release\nAssistant: Run verify:gate and sanitizer'
+    );
+    await user.click(screen.getByLabelText(/Manual-only/i));
+    await user.click(screen.getByRole('button', { name: 'Save captured skill' }));
+
+    expect(invokeSpy).toHaveBeenCalledWith('capture_agent_skill_from_chat', {
+      agentId: 'agent-1',
+      name: 'Release Check',
+      description: 'Run before tagging',
+      messages: [
+        { role: 'user', text: 'Verify release' },
+        { role: 'assistant', text: 'Run verify:gate and sanitizer' },
+      ],
+      manualOnly: true,
+    });
+    expect(onMindUpdated).toHaveBeenCalledWith(capturedMind);
+    invokeSpy.mockRestore();
+  });
 });

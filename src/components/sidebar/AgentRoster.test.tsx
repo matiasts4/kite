@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { AgentRoster } from './AgentRoster';
+import { formatAgentPurpose } from './types';
 import type { AgentProfile } from '../../types';
 
 const makeAgent = (overrides: Partial<AgentProfile> = {}): AgentProfile => ({
@@ -86,5 +87,19 @@ describe('AgentRoster live activity indicators', () => {
 
     expect(screen.getByTestId('agent-status-indicator')).toHaveAttribute('data-status', 'running');
     expect(screen.getByText('1')).toBeInTheDocument();
+  });
+
+  it('strips Operating Contract markdown headings like ## Job from agent sidebar subtitles', () => {
+    const shipGuard = makeAgent({
+      id: 'ship-guard',
+      name: 'Ship Guard',
+      engine: 'antigravity',
+      purpose:
+        '## Job\r\nPrepare safe, reviewable Conventional Commit slices and verify gates.\r\n\r\n## Sources\r\n- AGENTS.md',
+    });
+
+    expect(formatAgentPurpose(shipGuard)).toBe(
+      'Prepare safe, reviewable Conventional Commit slices and verify gates.'
+    );
   });
 });

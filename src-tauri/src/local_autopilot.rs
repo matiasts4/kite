@@ -94,6 +94,7 @@ pub(crate) struct AcceptedTurn {
     agent_name: String,
     surface: String,
     thread_id: Option<String>,
+    workspace_id: Option<String>,
     mode: String,
     task: String,
     engine: String,
@@ -263,6 +264,13 @@ fn parse_autopilot(value: &Value) -> Option<AcceptedTurn> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let workspace_id = obj
+        .get("workspaceId")
+        .or_else(|| obj.get("workspace_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let default_limit = if mode == "dream" {
         DEFAULT_DREAM_MAX_TURNS
@@ -319,6 +327,7 @@ fn parse_autopilot(value: &Value) -> Option<AcceptedTurn> {
         agent_name,
         surface,
         thread_id,
+        workspace_id,
         mode: mode.to_string(),
         task: task_text.to_string(),
         engine: engine.to_string(),
@@ -405,7 +414,7 @@ fn extract_json_object_str(raw: &str) -> Option<String> {
 }
 
 fn parse_llm_decision_json(raw: &str, remaining: i64) -> Option<Value> {
-    let mut try_parse = |text: &str| -> Option<Value> {
+    let try_parse = |text: &str| -> Option<Value> {
         let json_str = extract_json_object_str(text)?;
         let val = serde_json::from_str::<Value>(&json_str).ok()?;
         let action = val.get("action").and_then(Value::as_str)?.trim().to_ascii_lowercase();
@@ -454,12 +463,71 @@ fn parse_llm_decision_json(raw: &str, remaining: i64) -> Option<Value> {
         return Some(direct);
     }
 
-    // NDJSON stream fallback
+    // NDJSON stream fallback across Antigravity, Codex, Claude, and generic streams.
+    let mut claude_results: Vec<String> = Vec::new();
+    let mut codex_items: Vec<String> = Vec::new();
+    let mut agy_deltas = String::new();
+    let mut agy_snapshots: Vec<String> = Vec::new();
     let mut collected = String::new();
+
     for line in raw.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line.trim()) else {
             continue;
         };
+
+        // Claude stream-json final envelope: {"type":"result","result":...}
+        if val.get("type").and_then(Value::as_str) == Some("result") {
+            if let Some(res_val) = val.get("result") {
+                if let Some(res_str) = res_val.as_str() {
+                    claude_results.push(res_str.to_string());
+                } else if res_val.is_object() {
+                    claude_results.push(res_val.to_string());
+                }
+            }
+            continue;
+        }
+
+        // Codex JSONL completed item envelope: {"type":"item.completed","item":{"text":...}}
+        if val.get("type").and_then(Value::as_str) == Some("item.completed") {
+            if let Some(item) = val.get("item") {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    codex_items.push(text.to_string());
+                } else if let Some(arr) = item.get("content").and_then(Value::as_array) {
+                    let mut buf = String::new();
+                    for part in arr {
+                        if let Some(t) = part.get("text").and_then(Value::as_str) {
+                            buf.push_str(t);
+                        }
+                    }
+                    if !buf.is_empty() {
+                        codex_items.push(buf);
+                    }
+                } else if let Some(text) = item.get("content").and_then(Value::as_str) {
+                    codex_items.push(text.to_string());
+                }
+            }
+            continue;
+        }
+
+        // Antigravity stream-json step_update envelope
+        if val.get("event").and_then(Value::as_str) == Some("step_update") {
+            if let Some(su) = val.get("step_update") {
+                let step_type = su.get("step_type").and_then(Value::as_str).unwrap_or("");
+                if matches!(step_type, "agent_response" | "planner_response" | "") {
+                    if let Some(delta) = su.get("text_delta").and_then(Value::as_str) {
+                        agy_deltas.push_str(delta);
+                    } else if let Some(snapshot) = su
+                        .get("text")
+                        .or_else(|| su.get("content"))
+                        .and_then(Value::as_str)
+                    {
+                        agy_snapshots.push(snapshot.to_string());
+                    }
+                }
+            }
+            continue;
+        }
+
         if let Some(text) = val
             .get("text")
             .or_else(|| val.get("delta"))
@@ -479,17 +547,39 @@ fn parse_llm_decision_json(raw: &str, remaining: i64) -> Option<Value> {
             }
         }
     }
+
+    for cand in claude_results
+        .iter()
+        .rev()
+        .chain(codex_items.iter().rev())
+        .chain(agy_snapshots.iter().rev())
+    {
+        if let Some(parsed) = try_parse(cand) {
+            return Some(parsed);
+        }
+    }
+    if !agy_deltas.is_empty() {
+        if let Some(parsed) = try_parse(&agy_deltas) {
+            return Some(parsed);
+        }
+    }
     if !collected.is_empty() {
-        return try_parse(&collected);
+        if let Some(parsed) = try_parse(&collected) {
+            return Some(parsed);
+        }
     }
     None
 }
 
-fn run_provider_autopilot_prompt(provider: &str, prompt: &str) -> Result<String, String> {
+fn run_provider_autopilot_prompt(
+    provider: &str,
+    prompt: &str,
+    cwd: Option<&std::path::Path>,
+) -> Result<String, String> {
     use std::time::Duration;
 
     if cfg!(test) {
-        let _ = (provider, prompt);
+        let _ = (provider, prompt, cwd);
         return Err("live provider autopilot disabled in unit tests".to_string());
     }
 
@@ -503,7 +593,7 @@ fn run_provider_autopilot_prompt(provider: &str, prompt: &str) -> Result<String,
     };
     let plan = crate::chat::runtime::spawn::build_spawn(provider, "readOnly", &values, None, prompt)?;
     let args_refs: Vec<&str> = plan.args.iter().map(String::as_str).collect();
-    let output = crate::hidden_exec::run(&plan.program, &args_refs, Duration::from_secs(15))
+    let output = crate::hidden_exec::run_in_dir(&plan.program, &args_refs, cwd, Duration::from_secs(30))
         .map_err(|e| format!("spawn failed: {e}"))?;
     if output.timed_out {
         return Err("autopilot provider evaluation timed out".to_string());
@@ -855,6 +945,9 @@ fn emit_autopilot_terminal_notice(turn: &AcceptedTurn, decision: &Value) {
         "target": target,
         "profileId": turn.agent_id,
         "routineId": Value::Null,
+        "actorName": turn.agent_name,
+        "module": "agent",
+        "workspaceId": turn.workspace_id,
         "kind": { "kind": "settled", "outcome": outcome },
         "title": title,
         "body": reason,
@@ -870,6 +963,7 @@ fn emit_autopilot_terminal_notice(turn: &AcceptedTurn, decision: &Value) {
         }
     }
     crate::persist::persist();
+    crate::notifications::emit_notifications_updated();
 
     if turn.announce_via_argos {
         if let Some(app) = crate::get_app_handle() {
@@ -882,13 +976,39 @@ fn emit_autopilot_terminal_notice(turn: &AcceptedTurn, decision: &Value) {
                     "status": action,
                     "message": format!("{title}: {reason}"),
                     "threadId": turn.thread_id,
+                    "alreadyPersisted": true,
                 }),
             );
         }
     }
 }
 
-pub fn autopilot_next(request: Option<Value>) -> Value {
+fn resolve_autopilot_cwd(turn: &AcceptedTurn) -> Option<PathBuf> {
+    if let Some(dir) = resolve_gate_cwd(turn.workspace_id.as_deref()) {
+        return Some(dir);
+    }
+    let tid = turn.thread_id.as_deref()?;
+    let (direct_cwd, thread_ws) = {
+        let all = crate::persist::threads().lock().ok()?;
+        let t = all
+            .iter()
+            .find(|th| th.get("id").and_then(Value::as_str) == Some(tid))?;
+        let direct = t
+            .get("worktreePath")
+            .or_else(|| t.get("workingDirectory"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir());
+        let ws = t
+            .get("workspaceId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        (direct, ws)
+    };
+    direct_cwd.or_else(|| resolve_gate_cwd(thread_ws.as_deref()))
+}
+
+pub fn autopilot_next_sync(request: Option<Value>) -> Value {
     let value = request_value(&request);
     let Some(mut turn) = parse_autopilot(&value) else {
         return stuck_decision(0);
@@ -910,17 +1030,22 @@ pub fn autopilot_next(request: Option<Value>) -> Value {
         turn.transcript = resolve_turn_transcript(&turn.transcript, session_id);
     }
 
+    let cwd = resolve_autopilot_cwd(&turn);
     let decision = evaluate_autopilot_with_runner(
         &turn,
         remaining,
         now_unix_ms(),
-        run_provider_autopilot_prompt,
+        |provider, prompt| run_provider_autopilot_prompt(provider, prompt, cwd.as_deref()),
     );
     let action = decision.get("action").and_then(Value::as_str).unwrap_or("");
     let is_active = !matches!(action, "complete" | "stuck");
     mark_autopilot_agent_active(&turn.agent_id, is_active);
     emit_autopilot_terminal_notice(&turn, &decision);
     decision
+}
+
+pub fn autopilot_next(request: Option<Value>) -> Value {
+    autopilot_next_sync(request)
 }
 
 pub fn cancel_autopilot(request: Option<Value>) -> Value {
@@ -1041,8 +1166,7 @@ where
     }))
 }
 
-#[tauri::command]
-pub fn run_autopilot_verification_gates(request: Option<Value>) -> Result<Value, String> {
+pub fn run_autopilot_verification_gates_sync(request: Option<Value>) -> Result<Value, String> {
     let req = request
         .as_ref()
         .map(|v| v.get("request").unwrap_or(v))
@@ -1068,24 +1192,29 @@ pub fn run_autopilot_verification_gates(request: Option<Value>) -> Result<Value,
             let _ = (prog, args, dir);
             return Err("live gate execution disabled in unit tests".to_string());
         }
-        let mut cmd = std::process::Command::new(prog);
-        cmd.args(args);
-        if let Some(d) = dir {
-            cmd.current_dir(d);
+        let out = crate::hidden_exec::run_in_dir(
+            std::path::Path::new(prog),
+            args,
+            dir.map(PathBuf::as_path),
+            std::time::Duration::from_secs(120),
+        )
+        .map_err(|e| format!("Failed to run '{prog}': {e}"))?;
+        if out.timed_out {
+            return Ok((
+                false,
+                format!("Verification gate '{prog}' timed out after 120s."),
+            ));
         }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000);
-        }
-        let out = cmd.output().map_err(|e| format!("Failed to run '{prog}': {e}"))?;
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        Ok((out.status.success(), combined.trim().to_string()))
+        let combined = format!("{}\n{}", out.stdout_lossy(), out.stderr_lossy());
+        Ok((out.success(), combined.trim().to_string()))
     })
+}
+
+#[tauri::command]
+pub async fn run_autopilot_verification_gates(request: Option<Value>) -> Result<Value, String> {
+    tokio::task::spawn_blocking(move || run_autopilot_verification_gates_sync(request))
+        .await
+        .map_err(|e| format!("Verification gate task failed: {e}"))?
 }
 
 #[cfg(test)]
@@ -1098,6 +1227,7 @@ mod tests {
             agent_name: "Builder".to_string(),
             surface: "thread".to_string(),
             thread_id: Some("thread-1".to_string()),
+            workspace_id: None,
             mode: mode.to_string(),
             task: "Ship feature".to_string(),
             engine: "claude-code".to_string(),
@@ -1256,5 +1386,76 @@ mod tests {
     fn resolve_turn_transcript_uses_non_empty_input_or_terminal_fallback() {
         assert_eq!(resolve_turn_transcript("live output", ""), "live output");
         assert_eq!(resolve_turn_transcript("   ", ""), "");
+    }
+
+    #[test]
+    fn parse_llm_decision_json_unpacks_antigravity_codex_and_claude_envelopes() {
+        let agy_deltas = [
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"{\"action\":\"prompt\","}}"#,
+            r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"\"prompt\":\"Run cargo test\",\"reason\":\"Need verification\"}"}}"#,
+        ]
+        .join("\n");
+        let parsed_agy_deltas = parse_llm_decision_json(&agy_deltas, 9).expect("agy deltas should parse");
+        assert_eq!(parsed_agy_deltas["action"], "prompt");
+        assert_eq!(parsed_agy_deltas["prompt"], "Run cargo test");
+        assert_eq!(parsed_agy_deltas["turnsRemaining"], 9);
+
+        let agy_snapshot = r#"{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"{\"action\":\"complete\","}}
+{"event":"step_update","step_update":{"step_type":"agent_response","text":"{\"action\":\"complete\",\"reason\":\"All checks green\",\"objective\":\"Ship\"}"}}"#;
+        let parsed_agy_snap = parse_llm_decision_json(agy_snapshot, 5).expect("agy snapshot should parse cleanly");
+        assert_eq!(parsed_agy_snap["action"], "complete");
+        assert_eq!(parsed_agy_snap["reason"], "All checks green");
+
+        let agy_content = r#"{"event":"step_update","step_update":{"step_type":"agent_response","content":"{\"action\":\"wait\",\"reason\":\"Still compiling\"}"}}"#;
+        let parsed_agy_content = parse_llm_decision_json(agy_content, 4).expect("agy content should parse");
+        assert_eq!(parsed_agy_content["action"], "wait");
+
+        let codex_ndjson = [
+            r#"{"type":"thread.started","thread_id":"th-1"}"#,
+            r#"{"type":"item.completed","item":{"id":"it-1","type":"agent_message","text":"```json\n{\"action\":\"advance\",\"prompt\":\"Implement S2\",\"reason\":\"Ready\",\"objective\":\"S2\"}\n```"}}"#,
+        ]
+        .join("\n");
+        let parsed_codex = parse_llm_decision_json(&codex_ndjson, 7).expect("codex item.completed should parse");
+        assert_eq!(parsed_codex["action"], "advance");
+        assert_eq!(parsed_codex["prompt"], "Implement S2");
+
+        let claude_ndjson = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Working..."}]}}"#,
+            r#"{"type":"result","result":"{\"action\":\"complete\",\"reason\":\"Verified\",\"objective\":\"Done\"}"}"#,
+        ]
+        .join("\n");
+        let parsed_claude = parse_llm_decision_json(&claude_ndjson, 3).expect("claude result should parse");
+        assert_eq!(parsed_claude["action"], "complete");
+        assert_eq!(parsed_claude["reason"], "Verified");
+    }
+
+    #[test]
+    fn windows_cmd_gate_resolution_and_cwd_resolution_work() {
+        let temp_dir = std::env::temp_dir().join(format!("kite-ap-gate-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let resolved = resolve_gate_cwd(Some(&temp_dir.to_string_lossy())).expect("existing directory resolves");
+        assert_eq!(resolved, temp_dir);
+
+        let res = execute_verification_gates_with(
+            &["npx tsc --noEmit".to_string(), "npm test".to_string()],
+            Some(&temp_dir),
+            |prog, args, cwd| {
+                assert!(cwd.is_some());
+                assert!(matches!(prog, "npx" | "npm"));
+                #[cfg(windows)]
+                {
+                    assert!(matches!(
+                        std::path::Path::new(prog).file_name().and_then(|s| s.to_str()),
+                        Some("npx") | Some("npm")
+                    ));
+                }
+                Ok((true, format!("{prog} {} ok", args.join(" "))))
+            },
+        )
+        .expect("gates should execute");
+        assert_eq!(res["allPassed"], true);
+        assert_eq!(res["results"][0]["command"], "npx tsc --noEmit");
+        assert_eq!(res["results"][1]["command"], "npm test");
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

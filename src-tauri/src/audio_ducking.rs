@@ -12,7 +12,7 @@ use std::time::Duration;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 #[cfg(windows)]
 use windows::Win32::Media::Audio::{
-    eMultimedia, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+    eCapture, eMultimedia, eRender, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator,
 };
 #[cfg(windows)]
 use windows::Win32::System::Com::{
@@ -345,5 +345,134 @@ pub fn operator_play_cue_sound(start: bool) -> bool {
 pub fn operator_on_recording_state_change(recording: bool) -> bool {
     on_recording_state_change(recording);
     true
+}
+
+/// Diagnostic snapshot for Windows WASAPI microphone privacy and capture endpoint health.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MicrophoneAccessDiagnostic {
+    pub available: bool,
+    pub access_denied: bool,
+    pub hresult_hex: Option<String>,
+    pub message_es: String,
+}
+
+const HRESULT_S_OK: i32 = 0;
+const HRESULT_E_ACCESSDENIED: i32 = 0x8007_0005u32 as i32;
+const HRESULT_AUDCLNT_E_DEVICE_INVALIDATED: i32 = 0x8889_0004u32 as i32;
+
+/// Maps a Windows WASAPI capture HRESULT into a structured Spanish diagnostic.
+pub fn classify_wasapi_mic_hresult(hresult: i32) -> MicrophoneAccessDiagnostic {
+    match hresult {
+        HRESULT_S_OK => MicrophoneAccessDiagnostic {
+            available: true,
+            access_denied: false,
+            hresult_hex: None,
+            message_es: "Micrófono disponible y accesible.".to_string(),
+        },
+        HRESULT_E_ACCESSDENIED => MicrophoneAccessDiagnostic {
+            available: false,
+            access_denied: true,
+            hresult_hex: Some("0x80070005".to_string()),
+            message_es:
+                "Windows bloqueó el acceso al micrófono en Configuración de privacidad (0x80070005)."
+                    .to_string(),
+        },
+        HRESULT_AUDCLNT_E_DEVICE_INVALIDATED => MicrophoneAccessDiagnostic {
+            available: false,
+            access_denied: false,
+            hresult_hex: Some("0x88890004".to_string()),
+            message_es:
+                "El dispositivo de micrófono fue desconectado o invalidado por Windows (0x88890004)."
+                    .to_string(),
+        },
+        other => {
+            let hex = format!("0x{:08X}", other as u32);
+            MicrophoneAccessDiagnostic {
+                available: false,
+                access_denied: false,
+                hresult_hex: Some(hex.clone()),
+                message_es: format!("No se pudo inicializar el micrófono en Windows ({hex})."),
+            }
+        }
+    }
+}
+
+/// Probes the default WASAPI capture endpoint to detect Windows privacy blocks (`0x80070005`)
+/// or invalidated capture devices (`0x88890004`).
+#[tauri::command]
+pub fn probe_microphone_privacy_status() -> MicrophoneAccessDiagnostic {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let com_initialized = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+            let probe_res = (|| -> Result<(), i32> {
+                let enumerator: IMMDeviceEnumerator =
+                    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                        .map_err(|e| e.code().0)?;
+                let device = enumerator
+                    .GetDefaultAudioEndpoint(eCapture, eMultimedia)
+                    .map_err(|e| e.code().0)?;
+                let _audio_client: IAudioClient = device
+                    .Activate(CLSCTX_ALL, None)
+                    .map_err(|e| e.code().0)?;
+                Ok(())
+            })();
+            if com_initialized {
+                CoUninitialize();
+            }
+            match probe_res {
+                Ok(()) => classify_wasapi_mic_hresult(HRESULT_S_OK),
+                Err(hr) => classify_wasapi_mic_hresult(hr),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        classify_wasapi_mic_hresult(HRESULT_S_OK)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_s_ok_as_available() {
+        let diag = classify_wasapi_mic_hresult(0);
+        assert!(diag.available);
+        assert!(!diag.access_denied);
+        assert_eq!(diag.hresult_hex, None);
+        assert!(!diag.message_es.is_empty());
+    }
+
+    #[test]
+    fn classifies_e_accessdenied_0x80070005() {
+        let diag = classify_wasapi_mic_hresult(0x8007_0005u32 as i32);
+        assert!(!diag.available);
+        assert!(diag.access_denied);
+        assert_eq!(diag.hresult_hex.as_deref(), Some("0x80070005"));
+        assert_eq!(
+            diag.message_es,
+            "Windows bloqueó el acceso al micrófono en Configuración de privacidad (0x80070005)."
+        );
+    }
+
+    #[test]
+    fn classifies_device_invalidated_0x88890004() {
+        let diag = classify_wasapi_mic_hresult(0x8889_0004u32 as i32);
+        assert!(!diag.available);
+        assert!(!diag.access_denied);
+        assert_eq!(diag.hresult_hex.as_deref(), Some("0x88890004"));
+        assert!(diag.message_es.contains("0x88890004"));
+    }
+
+    #[test]
+    fn classifies_generic_hresult_with_hex_code() {
+        let diag = classify_wasapi_mic_hresult(0x8007_0490u32 as i32);
+        assert!(!diag.available);
+        assert!(!diag.access_denied);
+        assert_eq!(diag.hresult_hex.as_deref(), Some("0x80070490"));
+        assert!(diag.message_es.contains("0x80070490"));
+    }
 }
 

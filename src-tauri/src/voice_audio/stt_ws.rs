@@ -98,6 +98,16 @@ pub fn build_stt_http_url(base_url: &str) -> String {
     }
 }
 
+const OVERLAP_EDGE_PUNCT: &[char] = &[
+    '.', ',', ';', ':', '!', '?', '¡', '¿', '"', '\'', '“', '”', '‘', '’', '(', ')', '[', ']',
+    '…', '-', '—', '–',
+];
+
+fn normalize_overlap_word(word: &str) -> String {
+    word.trim_matches(|ch: char| ch.is_whitespace() || OVERLAP_EDGE_PUNCT.contains(&ch))
+        .to_lowercase()
+}
+
 /// Joins committed speech text with a new partial/final segment on word boundaries.
 pub fn join_speech_partial(stable: &str, interim: &str) -> String {
     let head = stable.trim();
@@ -113,6 +123,34 @@ pub fn join_speech_partial(stable: &str, interim: &str) -> String {
     }
     if head.ends_with(tail) {
         return head.to_string();
+    }
+
+    let head_words: Vec<&str> = head.split_whitespace().collect();
+    let tail_words: Vec<&str> = tail.split_whitespace().collect();
+    let head_norm: Vec<String> = head_words.iter().map(|w| normalize_overlap_word(w)).collect();
+    let tail_norm: Vec<String> = tail_words.iter().map(|w| normalize_overlap_word(w)).collect();
+
+    if !head_norm.is_empty()
+        && tail_norm.len() >= head_norm.len()
+        && head_norm.iter().all(|w| !w.is_empty())
+        && head_norm.as_slice() == &tail_norm[..head_norm.len()]
+    {
+        if tail_words.len() == head_words.len() {
+            return head.to_string();
+        }
+        return format!("{head} {}", tail_words[head_words.len()..].join(" "));
+    }
+
+    let max_words = head_words.len().min(tail_words.len());
+    for size in (1..=max_words).rev() {
+        let head_slice = &head_norm[head_words.len() - size..];
+        let tail_slice = &tail_norm[..size];
+        if head_slice == tail_slice && head_slice.iter().all(|w| !w.is_empty()) {
+            if tail_words.len() == size {
+                return head.to_string();
+            }
+            return format!("{head} {}", tail_words[size..].join(" "));
+        }
     }
 
     let head_chars: Vec<char> = head.chars().collect();
@@ -525,6 +563,14 @@ mod tests {
         assert_eq!(
             join_speech_partial("abre", "abre dos terminales"),
             "abre dos terminales"
+        );
+        assert_eq!(
+            join_speech_partial("Bueno, correcciones", "Bueno correcciones qué quiero"),
+            "Bueno, correcciones qué quiero"
+        );
+        assert_eq!(
+            join_speech_partial("Quiero continuar.", "quiero continuar con el modo voz"),
+            "Quiero continuar. con el modo voz"
         );
     }
 

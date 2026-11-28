@@ -83,6 +83,17 @@ impl SpeechTurnBuffer {
         }
     }
 
+    pub fn snapshot_speech_pcm(&self, min_ms: u32) -> Option<Vec<i16>> {
+        if !self.speech_open {
+            return None;
+        }
+        let min_samples = ((self.sample_rate as u64 * min_ms as u64) / 1000) as usize;
+        if self.speech_pcm.len() < min_samples.max(1) {
+            return None;
+        }
+        Some(self.speech_pcm.clone())
+    }
+
     pub fn finish_turn(
         &mut self,
         discard: bool,
@@ -163,14 +174,44 @@ pub fn list_input_devices() -> Vec<NativeAudioInputDevice> {
     out
 }
 
+fn strip_device_prefix(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    for prefix in [
+        "wasapi:",
+        "Default - ",
+        "default - ",
+        "Predeterminado - ",
+        "predeterminado - ",
+    ] {
+        if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return trimmed[prefix.len()..].trim();
+        }
+    }
+    trimmed
+}
+
+pub fn device_name_matches_preference(device_name: &str, preferred: &str) -> bool {
+    let dev_clean = strip_device_prefix(device_name).to_ascii_lowercase();
+    let pref_clean = strip_device_prefix(preferred).to_ascii_lowercase();
+    if dev_clean.is_empty() || pref_clean.is_empty() {
+        return false;
+    }
+    if dev_clean == pref_clean {
+        return true;
+    }
+    pref_clean.len() >= 3 && (dev_clean.contains(&pref_clean) || pref_clean.contains(&dev_clean))
+}
+
 fn select_cpal_input_device(preferred_id: Option<&str>) -> Result<cpal::Device, String> {
     let host = cpal::default_host();
-    if let Some(pref) = preferred_id.map(str::trim).filter(|s| !s.is_empty() && *s != "automatic" && *s != "default") {
-        let clean = pref.strip_prefix("wasapi:").unwrap_or(pref);
+    if let Some(pref) = preferred_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "automatic" && *s != "default")
+    {
         if let Ok(mut devices) = host.input_devices() {
             if let Some(found) = devices.find(|d| {
                 d.name()
-                    .map(|n| n == clean || n.eq_ignore_ascii_case(clean))
+                    .map(|n| device_name_matches_preference(&n, pref))
                     .unwrap_or(false)
             }) {
                 return Ok(found);
@@ -540,6 +581,17 @@ pub fn finish_capture_turn(keep_alive: bool, discard: bool, trim_trailing_ms: u3
     Some(encode_pcm16_wav(&samples, ctrl.target_sample_rate))
 }
 
+pub fn snapshot_capture_turn_wav(min_ms: u32) -> Option<Vec<u8>> {
+    let slot = capture_slot().lock().unwrap();
+    let ctrl = slot.as_ref()?;
+    let samples = ctrl
+        .turn_buffer
+        .lock()
+        .ok()
+        .and_then(|tb| tb.snapshot_speech_pcm(min_ms))?;
+    Some(encode_pcm16_wav(&samples, ctrl.target_sample_rate))
+}
+
 pub fn stop_capture_and_export_wav() -> Option<Vec<u8>> {
     finish_capture_turn(false, false, 0)
 }
@@ -622,5 +674,49 @@ mod tests {
         assert!(tb.finish_turn(true, 0, true).is_none());
         assert!(!tb.speech_open);
         assert!(tb.speech_pcm.is_empty());
+    }
+
+    #[test]
+    fn device_name_matches_browser_and_wasapi_labels() {
+        assert!(device_name_matches_preference(
+            "Micrófono (HyperX QuadCast)",
+            "Micrófono (HyperX QuadCast)"
+        ));
+        assert!(device_name_matches_preference(
+            "Micrófono (HyperX QuadCast)",
+            "wasapi:Micrófono (HyperX QuadCast)"
+        ));
+        assert!(device_name_matches_preference(
+            "Micrófono (HyperX QuadCast)",
+            "Predeterminado - Micrófono (HyperX QuadCast)"
+        ));
+        assert!(device_name_matches_preference(
+            "Microphone (Realtek Audio)",
+            "Default - Realtek Audio"
+        ));
+        assert!(!device_name_matches_preference(
+            "Microphone (Realtek Audio)",
+            "xy"
+        ));
+    }
+
+    #[test]
+    fn speech_turn_buffer_snapshot_is_non_destructive_and_respects_min_ms() {
+        let mut tb = SpeechTurnBuffer::new(16000);
+        assert!(tb.snapshot_speech_pcm(500).is_none());
+
+        tb.record_incoming(&vec![100i16; 4000], false);
+        let _ = tb.mark_speech_start(250); // 4000 samples (250ms)
+        assert!(tb.snapshot_speech_pcm(500).is_none());
+
+        tb.record_incoming(&vec![250i16; 8000], false); // +500ms => 12000 samples (750ms)
+        let snap = tb.snapshot_speech_pcm(500).expect("snapshot");
+        assert_eq!(snap.len(), 12000);
+        assert!(tb.speech_open);
+        assert_eq!(tb.speech_pcm.len(), 12000);
+
+        let finished = tb.finish_turn(false, 0, false).expect("final turn");
+        assert_eq!(finished.len(), 12000);
+        assert!(!tb.speech_open);
     }
 }

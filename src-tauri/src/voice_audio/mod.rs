@@ -7,8 +7,8 @@ pub mod stt_ws;
 
 use capture::{
     ensure_capture_started, finish_capture_turn, get_capture_status, list_input_devices,
-    mark_speech_start, set_capture_muted, subscribe_capture_frames, NativeAudioInputDevice,
-    NativeCaptureStatus,
+    mark_speech_start, set_capture_muted, snapshot_capture_turn_wav, subscribe_capture_frames,
+    NativeAudioInputDevice, NativeCaptureStatus,
 };
 use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
@@ -240,6 +240,31 @@ pub async fn voice_audio_stop_capture(
     })
     .await
     .unwrap_or_else(|e| json!({ "ok": false, "error": e.to_string() }))
+}
+
+#[tauri::command]
+pub async fn voice_audio_snapshot_wav(min_ms: Option<u32>) -> Value {
+    let min = min_ms.unwrap_or(500);
+    tauri::async_runtime::spawn_blocking(move || {
+        let wav = snapshot_capture_turn_wav(min);
+        match wav {
+            Some(bytes) => {
+                use base64::Engine;
+                let wav_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                json!({
+                    "ok": true,
+                    "wavBytes": bytes.len(),
+                    "wavBase64": wav_base64
+                })
+            }
+            None => json!({
+                "ok": true,
+                "wavBytes": 0
+            }),
+        }
+    })
+    .await
+    .unwrap_or_else(|e| json!({ "ok": false, "wavBytes": 0, "error": e.to_string() }))
 }
 
 #[tauri::command]

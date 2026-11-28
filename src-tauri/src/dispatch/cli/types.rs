@@ -163,6 +163,19 @@ pub enum AgentCommand {
         cursor: Option<usize>,
         limit: usize,
     },
+    ThreadLaunch {
+        title: Option<String>,
+        prompt: String,
+        workspace_id: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
+        mode: Option<String>,
+        effort: Option<String>,
+        worktree: bool,
+        odd_path: Option<String>,
+        open: bool,
+        orchestrate: bool,
+    },
     MemoryRead {
         target: String,
         agent_id: Option<String>,
@@ -276,6 +289,9 @@ pub enum AgentToolCommand {
         path: String,
         workspace_id: Option<String>,
         staged: bool,
+    },
+    Browser {
+        payload_json: String,
     },
 }
 

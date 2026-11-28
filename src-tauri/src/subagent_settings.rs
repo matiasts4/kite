@@ -551,11 +551,16 @@ pub fn sanitize_subagent_effort(
     parent_model: Option<&str>,
     requested_effort: Option<&str>,
 ) -> Option<String> {
-    let _ = provider;
     let raw = requested_effort
         .map(str::trim)
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("inherit"))?;
     let eff = normalize_effort(raw).unwrap_or_else(|| raw.to_ascii_lowercase());
+    let eff = crate::chat::models::resolve_effective_effort_for_provider(
+        provider,
+        None,
+        target_model,
+        Some(&eff),
+    )?;
     if matches!(eff.as_str(), "xhigh" | "max" | "ultra") {
         let should_clamp = match target_model.map(str::trim).filter(|s| !s.is_empty()) {
             Some(target) => {
@@ -706,12 +711,61 @@ fn scan_roles_in_dir(dir: &Path, scope: &str, out: &mut Vec<SubagentRoleRecord>)
     }
 }
 
+fn append_plugin_roles(
+    plugins: &[crate::plugin_runtime::types::DiscoveredPlugin],
+    out: &mut Vec<SubagentRoleRecord>,
+) {
+    for plugin in plugins {
+        if !plugin.enabled {
+            continue;
+        }
+        let scope = format!("plugin:{}", plugin.dir_id);
+        for agent in &plugin.agents {
+            let slug = agent.slug.trim();
+            if slug.is_empty()
+                || out
+                    .iter()
+                    .any(|existing| existing.slug.eq_ignore_ascii_case(slug))
+            {
+                continue;
+            }
+            out.push(SubagentRoleRecord {
+                slug: slug.to_string(),
+                scope: scope.clone(),
+                path: agent.path.to_string_lossy().to_string(),
+                command: "auto".to_string(),
+                description: agent.description.clone(),
+                provider: agent.provider.clone(),
+                model: agent.model.clone(),
+                effort: agent.effort.clone(),
+                workspace: agent.workspace.clone(),
+                body: agent.body.clone(),
+            });
+        }
+    }
+}
+
 pub fn list_roles_in_roots(config_dir: &Path, workspace_path: Option<&Path>) -> Vec<SubagentRoleRecord> {
     let mut out = Vec::new();
     if let Some(ws) = workspace_path {
         scan_roles_in_dir(&workspace_agents_dir(ws), "workspace", &mut out);
     }
     scan_roles_in_dir(&roles_dir(config_dir), "global", &mut out);
+    let plugins = if cfg!(test) {
+        let settings = crate::plugin_runtime::types::PluginRuntimeSettings {
+            enable_shared_system_roots: false,
+            ..Default::default()
+        };
+        crate::plugin_runtime::registry::discover_plugins_at(
+            config_dir,
+            None,
+            workspace_path,
+            &settings,
+        )
+    } else {
+        crate::plugin_runtime::registry::discover_plugins(workspace_path)
+    };
+    append_plugin_roles(&plugins, &mut out);
     out
 }
 
@@ -721,6 +775,17 @@ pub fn list_roles(workspace_path: Option<&Path>) -> Vec<SubagentRoleRecord> {
             .map(|ws| {
                 let mut out = Vec::new();
                 scan_roles_in_dir(&workspace_agents_dir(ws), "workspace", &mut out);
+                let settings = crate::plugin_runtime::types::PluginRuntimeSettings {
+                    enable_shared_system_roots: false,
+                    ..Default::default()
+                };
+                let plugins = crate::plugin_runtime::registry::discover_plugins_at(
+                    &roaming_app_dir(),
+                    None,
+                    Some(ws),
+                    &settings,
+                );
+                append_plugin_roles(&plugins, &mut out);
                 out
             })
             .unwrap_or_default();
@@ -1127,6 +1192,16 @@ mod tests {
                 Some(safe_eff)
             );
         }
+        assert_eq!(
+            sanitize_subagent_effort(
+                "antigravity",
+                Some("gemini-pro-orchestrator-neon"),
+                Some("gemini-4-neon"),
+                Some("high"),
+            ),
+            None,
+            "orchestrator models do not accept --effort"
+        );
 
         // Partial `--provider` stack resolution when `--model` is omitted
         let settings = normalize_settings(SubagentSettings {
@@ -1158,5 +1233,79 @@ mod tests {
         assert_eq!(prov.as_deref(), Some("grok"));
         assert_eq!(model.as_deref(), Some("grok-4.7-build-fast"));
         assert_eq!(effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn list_roles_appends_enabled_plugin_agents_without_overriding_higher_priority_slugs() {
+        let cfg = temp_root("plugin-roles-cfg");
+        let ws = temp_root("plugin-roles-ws");
+
+        save_role_in_roots(
+            &cfg,
+            Some(&ws),
+            SaveSubagentRoleInput {
+                scope: "workspace".to_string(),
+                slug: "reviewer".to_string(),
+                command: "auto".to_string(),
+                description: Some("Workspace reviewer".to_string()),
+                provider: None,
+                model: None,
+                effort: None,
+                workspace: Some("inherit".to_string()),
+                body: "Workspace reviewer body.".to_string(),
+            },
+        )
+        .unwrap();
+
+        let ws_plugin = ws.join(".agents").join("plugins").join("android-cli");
+        fs::create_dir_all(ws_plugin.join("agents")).unwrap();
+        fs::write(ws_plugin.join("plugin.json"), r#"{"name":"android-cli"}"#).unwrap();
+        fs::write(
+            ws_plugin.join("agents").join("reviewer.md"),
+            "---\ndescription: Plugin reviewer override attempt\n---\nPlugin reviewer body.\n",
+        )
+        .unwrap();
+        fs::write(
+            ws_plugin.join("agents").join("avd-specialist.md"),
+            "---\ndescription: Inspect AVD emulators\nprovider: gemini\nmodel: gemini-2.5-flash\neffort: low\nworkspace: inherit\n---\nRun emulator checks safely.\n",
+        )
+        .unwrap();
+
+        let disabled_plugin = cfg.join("plugins").join("disabled-ext");
+        fs::create_dir_all(disabled_plugin.join("agents")).unwrap();
+        fs::write(disabled_plugin.join("plugin.json"), r#"{"name":"disabled-ext"}"#).unwrap();
+        fs::write(
+            disabled_plugin.join("agents").join("hidden-role.md"),
+            "---\ndescription: Should be skipped\n---\nHidden.\n",
+        )
+        .unwrap();
+        crate::plugin_runtime::registry::set_plugin_enabled_at(&cfg, "disabled-ext", false)
+            .unwrap();
+
+        let listed = list_roles_in_roots(&cfg, Some(&ws));
+        assert_eq!(listed.len(), 2);
+
+        let reviewer = listed.iter().find(|r| r.slug == "reviewer").unwrap();
+        assert_eq!(reviewer.scope, "workspace");
+        assert_eq!(reviewer.body, "Workspace reviewer body.");
+
+        let avd = listed.iter().find(|r| r.slug == "avd-specialist").unwrap();
+        assert_eq!(avd.scope, "plugin:android-cli");
+        assert_eq!(avd.command, "auto");
+        assert_eq!(avd.description.as_deref(), Some("Inspect AVD emulators"));
+        assert_eq!(avd.provider.as_deref(), Some("gemini"));
+        assert_eq!(avd.model.as_deref(), Some("gemini-2.5-flash"));
+        assert_eq!(avd.effort.as_deref(), Some("low"));
+        assert_eq!(avd.workspace.as_deref(), Some("inherit"));
+        assert_eq!(avd.body, "Run emulator checks safely.");
+        assert!(!listed.iter().any(|r| r.slug == "hidden-role"));
+
+        let via_list_roles = list_roles(Some(&ws));
+        assert!(via_list_roles
+            .iter()
+            .any(|r| r.slug == "avd-specialist" && r.scope == "plugin:android-cli"));
+
+        let _ = fs::remove_dir_all(&cfg);
+        let _ = fs::remove_dir_all(&ws);
     }
 }

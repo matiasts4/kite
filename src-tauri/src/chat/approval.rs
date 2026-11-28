@@ -1,7 +1,7 @@
 //! Approval settlement mapping and approval normalization structures.
 //!
-//! The approval vocabulary is `allowOnce`, `allowForSession`, `deny`, and
-//! `denyAndStop`. [`map_approval`] reads a provider settlement frame and
+//! The approval vocabulary is `allowOnce`, `allowForSession`, `alwaysAllow`,
+//! `deny`, and `denyAndStop`. [`map_approval`] reads a provider settlement frame and
 //! returns the canonical decision or an explicit [`ApprovalMapping::Unsupported`].
 //! It is pure: it owns no state and performs no I/O, so an unknown or
 //! already-settled request cannot mutate a thread through this module.
@@ -93,11 +93,31 @@ pub fn normalized_token(token: &str) -> String {
         .collect()
 }
 
+pub fn parse_decision(token: &str) -> Option<ApprovalDecision> {
+    let normalized = normalized_token(token);
+    match normalized.as_str() {
+        "allowonce" | "allow" | "accept" | "accepted" | "approve" | "approved" => {
+            Some(ApprovalDecision::AllowOnce)
+        }
+        "allowforsession" | "acceptforsession" | "allowalways" => {
+            Some(ApprovalDecision::AllowForSession)
+        }
+        "alwaysallow" => Some(ApprovalDecision::AlwaysAllow),
+        "deny" | "reject" | "rejected" | "rejectonce" | "decline" | "declined" => {
+            Some(ApprovalDecision::Deny)
+        }
+        "denyandstop" | "rejectandstop" | "cancel" | "cancelled" | "canceled" | "abort"
+        | "interrupt" => Some(ApprovalDecision::DenyAndStop),
+        _ => None,
+    }
+}
+
 pub fn decision_from_token(provider: &str, token: &str) -> Option<ApprovalDecision> {
     let normalized = normalized_token(token);
     match normalized.as_str() {
         "allowonce" => Some(ApprovalDecision::AllowOnce),
         "allowforsession" => Some(ApprovalDecision::AllowForSession),
+        "alwaysallow" => Some(ApprovalDecision::AlwaysAllow),
         "deny" => Some(ApprovalDecision::Deny),
         "denyandstop" => Some(ApprovalDecision::DenyAndStop),
         _ if matches!(provider, "antigravity" | "acp") => match normalized.as_str() {

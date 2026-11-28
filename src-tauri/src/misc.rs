@@ -469,8 +469,20 @@ pub fn task_validate_selection(request: Option<Value>) -> Result<Value, TaskComm
 }
 
 #[tauri::command]
-pub fn autopilot_next(request: Option<Value>) -> Value {
-    crate::local_autopilot::autopilot_next(request)
+pub async fn autopilot_next(request: Option<Value>) -> Value {
+    tokio::task::spawn_blocking(move || crate::local_autopilot::autopilot_next_sync(request))
+        .await
+        .unwrap_or_else(|e| {
+            json!({
+                "action": "stuck",
+                "prompt": "",
+                "reason": format!("AutoPilot evaluation task failed: {e}"),
+                "objective": "",
+                "model": "",
+                "turnsRemaining": 0,
+                "objectivesRemaining": 0
+            })
+        })
 }
 
 #[tauri::command]

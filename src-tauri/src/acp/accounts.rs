@@ -54,6 +54,15 @@ pub fn list_provider_mcp_servers_impl(request: Option<Value>) -> Value {
 }
 
 pub fn list_provider_mcp_servers_with_home(home: &Path, request: Option<Value>) -> Value {
+    let plugin_servers = crate::plugin_runtime::mcp_bridge::list_active_plugin_mcp_servers(&[]);
+    list_provider_mcp_servers_with_home_and_plugins(home, request, plugin_servers)
+}
+
+fn list_provider_mcp_servers_with_home_and_plugins(
+    home: &Path,
+    request: Option<Value>,
+    plugin_servers: Vec<Value>,
+) -> Value {
     let filter_provider = request
         .as_ref()
         .and_then(|v| v.get("provider").or_else(|| v.get("engine")))
@@ -373,6 +382,32 @@ pub fn list_provider_mcp_servers_with_home(home: &Path, request: Option<Value>) 
         "servers": opencode_servers
     }));
 
+    // 8. Active Extension / Plugin MCP servers
+    let mut added_plugin_servers: Vec<Value> = Vec::new();
+    for srv in plugin_servers {
+        let Some(srv_id) = srv.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !all_servers
+            .iter()
+            .any(|existing| existing.get("id").and_then(Value::as_str) == Some(srv_id))
+        {
+            added_plugin_servers.push(srv.clone());
+            all_servers.push(srv);
+        }
+    }
+    if !added_plugin_servers.is_empty() {
+        providers.push(json!({
+            "provider": "plugins",
+            "label": "Extensions",
+            "configPath": crate::persist::roaming_app_dir()
+                .join("plugins")
+                .to_string_lossy()
+                .to_string(),
+            "servers": added_plugin_servers
+        }));
+    }
+
     let filtered_servers: Vec<Value> = if let Some(ref p) = filter_provider {
         all_servers
             .iter()
@@ -466,6 +501,76 @@ mod tests {
         let filtered = res["servers"].as_array().expect("filtered servers");
         assert!(filtered.iter().any(|s| s["id"] == "mcp:opencode:kite-tasks"));
         assert!(filtered.iter().any(|s| s["id"] == "mcp:kite:kite-tasks"));
+
+        let _ = std::fs::remove_dir_all(&temp_home);
+    }
+
+    #[test]
+    fn plugin_mcp_servers_merge_dedup_and_pass_provider_filter() {
+        let temp_home = std::env::temp_dir().join(format!(
+            "kite-plugin-mcp-acct-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_home).expect("create temp home");
+
+        let plugin_entries = vec![
+            json!({
+                "id": "mcp:kite:kite-tasks",
+                "name": "kite-tasks",
+                "provider": "kite",
+                "providerLabel": "Extension",
+                "transport": "stdio",
+                "status": "configured",
+                "builtin": false,
+                "pluginId": "dup",
+                "description": "Duplicate id should be skipped"
+            }),
+            json!({
+                "id": "android-cli_adb",
+                "name": "adb",
+                "provider": "kite",
+                "providerLabel": "Extension",
+                "transport": "stdio",
+                "status": "configured",
+                "builtin": false,
+                "pluginId": "android-cli",
+                "description": "Extension 'Android CLI' stdio MCP server (adb-mcp)"
+            }),
+        ];
+
+        let res = list_provider_mcp_servers_with_home_and_plugins(
+            &temp_home,
+            Some(json!({ "provider": "codex" })),
+            plugin_entries,
+        );
+        let providers = res["providers"].as_array().expect("providers array");
+        let plugins_prov = providers
+            .iter()
+            .find(|p| p.get("provider").and_then(|v| v.as_str()) == Some("plugins"))
+            .expect("plugins provider entry");
+        let prov_servers = plugins_prov["servers"].as_array().expect("plugins servers");
+        assert_eq!(prov_servers.len(), 1);
+        assert_eq!(prov_servers[0]["id"], "android-cli_adb");
+
+        let all_servers = res["allServers"].as_array().expect("allServers array");
+        assert_eq!(
+            all_servers
+                .iter()
+                .filter(|s| s["id"] == "mcp:kite:kite-tasks")
+                .count(),
+            1
+        );
+        assert!(all_servers.iter().any(|s| s["id"] == "android-cli_adb"));
+
+        let filtered = res["servers"].as_array().expect("filtered servers");
+        assert!(filtered.iter().any(|s| s["id"] == "android-cli_adb"));
+
+        // Without plugin servers, "plugins" provider entry is omitted.
+        let empty_res = list_provider_mcp_servers_with_home_and_plugins(&temp_home, None, vec![]);
+        let empty_providers = empty_res["providers"].as_array().unwrap();
+        assert!(!empty_providers
+            .iter()
+            .any(|p| p.get("provider").and_then(|v| v.as_str()) == Some("plugins")));
 
         let _ = std::fs::remove_dir_all(&temp_home);
     }

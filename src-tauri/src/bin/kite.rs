@@ -84,6 +84,14 @@ fn main() {
         let code = cli_wire::run_cli(&args[1..], None);
         std::process::exit(code);
     }
+    if args.get(1).map(String::as_str) == Some("browser") {
+        let mut forwarded = Vec::with_capacity(args.len() + 1);
+        forwarded.push("agent".to_string());
+        forwarded.push("browser".to_string());
+        forwarded.extend(args[2..].iter().cloned());
+        let code = cli_wire::run_cli(&forwarded, None);
+        std::process::exit(code);
+    }
     if args.get(1).map(String::as_str) == Some("ctx") {
         let code = ctx_cli::run_ctx_cli(&args[2..]);
         std::process::exit(code);
@@ -125,6 +133,6 @@ fn main() {
         }
     }
 
-    eprintln!("Usage: kite <dispatch|ctx|mcp> ...");
+    eprintln!("Usage: kite <dispatch|agent|browser|ctx|mcp> ...");
     std::process::exit(2);
 }

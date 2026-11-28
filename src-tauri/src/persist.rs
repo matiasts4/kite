@@ -1,8 +1,9 @@
 use crate::logger::log_trace;
+use base64::Engine as _;
 use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -11,6 +12,23 @@ use std::sync::Mutex;
 static PERSIST_CALLS: AtomicU64 = AtomicU64::new(0);
 static SQLITE_FLUSH_COUNT: AtomicU64 = AtomicU64::new(0);
 static STORES_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+pub const MAX_HYDRATED_THREADS: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_THREAD_TOUCHED_STORES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_test_thread_touched_stores() {
+    TEST_THREAD_TOUCHED_STORES.with(|flag| flag.set(false));
+}
+
+#[cfg(test)]
+pub(crate) fn test_thread_touched_stores() -> bool {
+    TEST_THREAD_TOUCHED_STORES.with(|flag| flag.get())
+}
 
 const WAL_CHECKPOINT_CADENCE: u64 = 32;
 const WAL_TRUNCATE_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
@@ -214,11 +232,14 @@ pub fn seed_paths() -> HashMap<String, String> {
     HashMap::new()
 }
 
+pub const SEEDED_HEALTH_CHECK_ROUTINE_ID: &str = "c1111111-1111-4111-8111-111111111111";
+const LEGACY_SEEDED_HEALTH_CHECK_ROUTINE_ID: &str = "r1111111-1111-4111-8111-111111111111";
+
 pub fn seed_routines() -> Vec<Value> {
     let now = 1791770226543i64;
     vec![
         json!({
-            "id": "r1111111-1111-4111-8111-111111111111",
+            "id": SEEDED_HEALTH_CHECK_ROUTINE_ID,
             "agentId": "c3333333-3333-4333-8333-333333333333",
             "name": "Daily Project Health Check",
             "prompt": "Inspect codebase health and verify repository status.",
@@ -301,7 +322,8 @@ CREATE TABLE IF NOT EXISTS agents (
     default_model TEXT,
     default_provider_options TEXT NOT NULL DEFAULT '[]',
     place_display_names TEXT NOT NULL DEFAULT '[]',
-    disabled_plugin_ids TEXT NOT NULL DEFAULT '[]'
+    disabled_plugin_ids TEXT NOT NULL DEFAULT '[]',
+    linked_skill_refs TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
@@ -428,6 +450,7 @@ fn open_connection() -> Connection {
         "memory_budget INTEGER", "reflection_mode TEXT", "allow_agent_scheduling INTEGER",
         "allow_agent_messaging INTEGER", "default_mode TEXT", "default_plan TEXT", "default_model TEXT",
         "brief TEXT", "default_provider_options TEXT", "place_display_names TEXT", "disabled_plugin_ids TEXT",
+        "linked_skill_refs TEXT NOT NULL DEFAULT '[]'",
     ] {
         let _ = conn.execute(&format!("ALTER TABLE agents ADD COLUMN {col}"), []);
     }
@@ -631,9 +654,116 @@ pub fn load_workspaces_direct() -> Vec<Workspace> {
         .unwrap_or_default()
 }
 
+pub fn list_workspaces_direct() -> Vec<Workspace> {
+    load_workspaces_direct()
+}
+
 pub fn load_workspace_path_direct(id: &str) -> Option<String> {
     let conn = db_connection().lock().unwrap();
     read_workspace_path_from_conn(&conn, id)
+}
+
+pub(crate) fn all_workspace_paths_from_conn(conn: &Connection) -> HashMap<String, String> {
+    let Ok(mut stmt) = conn.prepare("SELECT id, folder_path FROM workspaces") else {
+        return HashMap::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return HashMap::new();
+    };
+    let mut paths = HashMap::new();
+    for (id, folder_path) in rows.flatten() {
+        paths.insert(id, folder_path);
+    }
+    paths
+}
+
+pub fn all_workspace_paths_direct() -> HashMap<String, String> {
+    let Ok(conn) = db_connection().lock() else {
+        return HashMap::new();
+    };
+    all_workspace_paths_from_conn(&conn)
+}
+
+pub fn is_thread_stub(thread: &Value) -> bool {
+    thread.get("_kiteStub").and_then(Value::as_bool) == Some(true)
+}
+
+/// Converts a full thread JSON payload into a lightweight metadata stub with
+/// `items: []`, stripped `subagentRuns[].items`, `"_kiteStub": true`, and `"itemCount"`.
+pub fn to_thread_stub(thread: &Value) -> Value {
+    let Some(src) = thread.as_object() else {
+        return thread.clone();
+    };
+    let existing_count = if is_thread_stub(thread) {
+        src.get("itemCount").and_then(Value::as_u64).unwrap_or(0)
+    } else {
+        0
+    };
+    let cur_len = src
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| items.len() as u64)
+        .unwrap_or(0);
+    let item_count = existing_count.max(cur_len);
+
+    let mut stub = src.clone();
+    stub.insert("items".to_string(), json!([]));
+    stub.insert("_kiteStub".to_string(), json!(true));
+    stub.insert("itemCount".to_string(), json!(item_count));
+    if let Some(runs) = stub.get_mut("subagentRuns").and_then(Value::as_array_mut) {
+        for run in runs.iter_mut() {
+            if let Some(run_obj) = run.as_object_mut() {
+                if run_obj.contains_key("items") {
+                    run_obj.insert("items".to_string(), json!([]));
+                }
+            }
+        }
+    }
+    Value::Object(stub)
+}
+
+pub(crate) fn find_thread_from_conn(conn: &Connection, thread_id: &str) -> Option<Value> {
+    if thread_id.trim().is_empty() {
+        return None;
+    }
+    conn.query_row(
+        "SELECT data FROM threads WHERE id = ?1 LIMIT 1",
+        params![thread_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    .filter(|v| !v.is_null())
+}
+
+pub fn find_thread_direct(thread_id: &str) -> Option<Value> {
+    let conn = db_connection().lock().ok()?;
+    find_thread_from_conn(&conn, thread_id)
+}
+
+pub(crate) fn list_threads_summaries_from_conn(conn: &Connection) -> Vec<Value> {
+    let Ok(mut stmt) = conn.prepare("SELECT data FROM threads ORDER BY updated_at_unix_ms ASC") else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        let data: String = row.get(0)?;
+        Ok(serde_json::from_str::<Value>(&data).unwrap_or(Value::Null))
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .filter(|v| !v.is_null())
+        .map(|v| to_thread_stub(&v))
+        .collect()
+}
+
+pub fn list_threads_direct_summaries() -> Vec<Value> {
+    let Ok(conn) = db_connection().lock() else {
+        return Vec::new();
+    };
+    list_threads_summaries_from_conn(&conn)
 }
 
 pub fn find_agent_by_id(id: &str) -> Option<AgentProfile> {
@@ -657,18 +787,332 @@ pub fn list_workspaces_snapshot() -> Vec<Workspace> {
     workspaces().lock().map(|g| g.clone()).unwrap_or_default()
 }
 
-fn load_or_migrate_sqlite() -> DiskState {
-    let conn_guard = db_connection().lock().unwrap();
-    let conn = &*conn_guard;
+pub(crate) fn normalize_linked_skill_refs(refs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in refs {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !out.iter().any(|existing| existing == trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
 
-    let ws_count: i64 = conn
+pub fn get_agent_linked_skill_refs_in_conn(conn: &Connection, agent_id: &str) -> Vec<String> {
+    if agent_id.trim().is_empty() {
+        return Vec::new();
+    }
+    conn.query_row(
+        "SELECT linked_skill_refs FROM agents WHERE id = ?1 LIMIT 1",
+        params![agent_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+    .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+    .map(|items| normalize_linked_skill_refs(&items))
+    .unwrap_or_default()
+}
+
+pub fn set_agent_linked_skill_refs_in_conn(
+    conn: &Connection,
+    agent_id: &str,
+    refs: &[String],
+) -> Result<usize, String> {
+    if agent_id.trim().is_empty() {
+        return Err("agent_id is required".to_string());
+    }
+    let clean = normalize_linked_skill_refs(refs);
+    let payload = serde_json::to_string(&clean).map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agents SET linked_skill_refs = ?2 WHERE id = ?1",
+        params![agent_id, payload],
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn get_agent_linked_skill_refs(agent_id: &str) -> Vec<String> {
+    if agent_id.trim().is_empty() {
+        return Vec::new();
+    }
+    let Ok(conn) = db_connection().lock() else {
+        return Vec::new();
+    };
+    get_agent_linked_skill_refs_in_conn(&conn, agent_id)
+}
+
+pub fn set_agent_linked_skill_refs(agent_id: &str, refs: &[String]) -> Result<(), String> {
+    if agent_id.trim().is_empty() {
+        return Err("agent_id is required".to_string());
+    }
+    initial_state();
+    let updated = {
+        let conn = db_connection().lock().map_err(|e| e.to_string())?;
+        set_agent_linked_skill_refs_in_conn(&conn, agent_id, refs)?
+    };
+    if updated == 0 {
+        let exists_in_mem = agents()
+            .lock()
+            .map(|list| list.iter().any(|a| a.id == agent_id))
+            .unwrap_or(false);
+        if exists_in_mem {
+            persist();
+            let conn = db_connection().lock().map_err(|e| e.to_string())?;
+            let retry_updated = set_agent_linked_skill_refs_in_conn(&conn, agent_id, refs)?;
+            if retry_updated == 0 {
+                return Err(format!("Agent '{agent_id}' could not be updated in SQLite."));
+            }
+        } else {
+            return Err(format!("Agent '{agent_id}' does not exist."));
+        }
+    }
+    Ok(())
+}
+
+const LEGACY_BLOAT_COMPACTED_KEY: &str = "legacy_bloat_compacted_v1";
+const DISPATCH_AUDIT_RETENTION_ROWS: i64 = 2_000;
+const VACUUM_FREELIST_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
+
+fn sanitize_attachment_id(raw: Option<&str>) -> String {
+    if let Some(id) = raw {
+        let clean: String = id
+            .trim()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(80)
+            .collect();
+        if !clean.is_empty() {
+            return clean;
+        }
+    }
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn parse_image_data_url(url: &str) -> Option<(&'static str, Vec<u8>)> {
+    let comma_idx = url.find(',')?;
+    let header = url[..comma_idx].trim();
+    let payload = url[comma_idx + 1..].trim();
+    let header_lower = header.to_ascii_lowercase();
+    if !header_lower.starts_with("data:image/") || !header_lower.contains(";base64") {
+        return None;
+    }
+    let subtype = header_lower
+        .strip_prefix("data:image/")?
+        .split(';')
+        .next()
+        .unwrap_or("");
+    let ext = match subtype {
+        "png" => "png",
+        "jpeg" | "jpg" => "jpg",
+        "gif" => "gif",
+        "webp" => "webp",
+        "bmp" => "bmp",
+        "svg+xml" | "svg" => "svg",
+        "x-icon" | "vnd.microsoft.icon" => "ico",
+        _ => "img",
+    };
+    let clean_b64: String = payload.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if clean_b64.is_empty() {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&clean_b64)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&clean_b64))
+        .ok()?;
+    if decoded.is_empty() {
+        return None;
+    }
+    Some((ext, decoded))
+}
+
+fn compact_item_attachments(item: &mut Value, attachments_dir: &Path) -> bool {
+    let Some(attachments) = item.get_mut("attachments").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for att in attachments.iter_mut() {
+        let Some(att_obj) = att.as_object_mut() else {
+            continue;
+        };
+        let Some(preview) = att_obj
+            .get("previewDataUrl")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let existing_path_ok = att_obj
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .is_some_and(|p| Path::new(p).is_file());
+        if existing_path_ok {
+            att_obj.remove("previewDataUrl");
+            changed = true;
+            continue;
+        }
+        if preview.trim().is_empty() {
+            att_obj.remove("previewDataUrl");
+            changed = true;
+            continue;
+        }
+        if let Some((ext, bytes)) = parse_image_data_url(&preview) {
+            let id = sanitize_attachment_id(
+                att_obj
+                    .get("resourceId")
+                    .or_else(|| att_obj.get("id"))
+                    .and_then(Value::as_str),
+            );
+            if fs::create_dir_all(attachments_dir).is_ok() {
+                let dest = attachments_dir.join(format!("{id}.{ext}"));
+                let write_ok = if dest.is_file()
+                    && fs::metadata(&dest).ok().map(|m| m.len()) == Some(bytes.len() as u64)
+                {
+                    true
+                } else {
+                    fs::write(&dest, &bytes).is_ok()
+                };
+                if write_ok {
+                    att_obj.insert("path".to_string(), json!(plain_path(&dest)));
+                    att_obj.remove("previewDataUrl");
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn compact_thread_value(thread: &mut Value, attachments_dir: &Path) -> bool {
+    let mut changed = false;
+    if let Some(runs) = thread.get_mut("subagentRuns").and_then(Value::as_array_mut) {
+        for run in runs.iter_mut() {
+            let is_terminal = matches!(
+                run.get("status").and_then(Value::as_str),
+                Some("completed" | "failed" | "killed")
+            );
+            if is_terminal && crate::chat::subagents::strip_external_run_items(run) {
+                changed = true;
+            }
+        }
+    }
+    if let Some(items) = thread.get_mut("items").and_then(Value::as_array_mut) {
+        for item in items.iter_mut() {
+            if compact_item_attachments(item, attachments_dir) {
+                changed = true;
+            }
+        }
+    }
+    if let Some(runs) = thread.get_mut("subagentRuns").and_then(Value::as_array_mut) {
+        for run in runs.iter_mut() {
+            if let Some(items) = run.get_mut("items").and_then(Value::as_array_mut) {
+                for item in items.iter_mut() {
+                    if compact_item_attachments(item, attachments_dir) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+pub(crate) fn migrate_compact_legacy_sqlite_with_attachments_dir(
+    conn: &mut Connection,
+    attachments_dir: &Path,
+) -> Result<bool, rusqlite::Error> {
+    let already_compacted = conn
+        .query_row(
+            "SELECT value FROM app_state WHERE key = ?1",
+            params![LEGACY_BLOAT_COMPACTED_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .is_some_and(|v| v == "1");
+    if already_compacted {
+        return Ok(false);
+    }
+
+    let mut updates: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, data FROM threads")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let raw: String = row.get(1)?;
+            let Ok(mut thread) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if compact_thread_value(&mut thread, attachments_dir) {
+                if let Ok(serialized) = serde_json::to_string(&thread) {
+                    updates.push((id, serialized));
+                }
+            }
+        }
+    }
+
+    let tx = conn.transaction()?;
+    if !updates.is_empty() {
+        let mut update_stmt = tx.prepare("UPDATE threads SET data = ?2 WHERE id = ?1")?;
+        for (id, serialized) in &updates {
+            update_stmt.execute(params![id, serialized])?;
+        }
+    }
+
+    let has_dispatch_audit: bool = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'dispatch_audit' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if has_dispatch_audit {
+        tx.execute(
+            "DELETE FROM dispatch_audit
+             WHERE rowid NOT IN (
+                 SELECT rowid FROM dispatch_audit ORDER BY rowid DESC LIMIT ?1
+             )",
+            params![DISPATCH_AUDIT_RETENTION_ROWS],
+        )?;
+    }
+
+    tx.execute(
+        "INSERT INTO app_state (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![LEGACY_BLOAT_COMPACTED_KEY],
+    )?;
+    tx.commit()?;
+
+    let freelist_count: i64 = conn
+        .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        .unwrap_or(0);
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |r| r.get(0))
+        .unwrap_or(0);
+    if freelist_count.saturating_mul(page_size) > VACUUM_FREELIST_THRESHOLD_BYTES {
+        let _ = conn.execute_batch("VACUUM;");
+    }
+
+    Ok(true)
+}
+
+pub fn migrate_compact_legacy_sqlite(conn: &mut Connection) -> Result<bool, rusqlite::Error> {
+    let attachments_dir = roaming_app_dir().join("chat-attachments");
+    migrate_compact_legacy_sqlite_with_attachments_dir(conn, &attachments_dir)
+}
+
+fn load_or_migrate_sqlite() -> DiskState {
+    let mut conn_guard = db_connection().lock().unwrap();
+
+    let ws_count: i64 = conn_guard
         .query_row("SELECT COUNT(*) FROM workspaces", [], |row| row.get(0))
         .unwrap_or(0);
 
     if ws_count == 0 {
         // SQLite is empty, check if state.json exists for one-time migration
         log_trace("SQLite database empty, checking for state.json migration");
-        let initial_state = if let Some(legacy) = load_legacy_state_json() {
+        let mut initial_state = if let Some(legacy) = load_legacy_state_json() {
             log_trace("Migrating data from state.json into studio.sqlite");
             legacy
         } else {
@@ -677,8 +1121,28 @@ fn load_or_migrate_sqlite() -> DiskState {
         };
         drop(conn_guard);
         save_disk_to_sqlite(&initial_state);
+        if initial_state.threads.is_empty() {
+            app_state_set(LEGACY_BLOAT_COMPACTED_KEY, "1");
+        } else {
+            if let Ok(mut cg) = db_connection().lock() {
+                if let Err(error) = migrate_compact_legacy_sqlite(&mut cg) {
+                    log_trace(&format!("Legacy SQLite compaction failed: {error}"));
+                }
+            }
+            initial_state.threads = initial_state
+                .threads
+                .into_iter()
+                .map(|t| to_thread_stub(&t))
+                .collect();
+        }
         return initial_state;
     }
+
+    if let Err(error) = migrate_compact_legacy_sqlite(&mut conn_guard) {
+        log_trace(&format!("Legacy SQLite compaction failed: {error}"));
+    }
+
+    let conn = &*conn_guard;
 
     // Load state from SQLite
     let (workspaces, paths) =
@@ -742,8 +1206,10 @@ fn load_or_migrate_sqlite() -> DiskState {
     if seed_notifications_now {
         notifications = seed_notifications();
     }
+    let healed_routines =
+        heal_loaded_routines_in_conn(conn, &mut routines, &mut notifications);
 
-    let state = DiskState {
+    let mut state = DiskState {
         workspaces,
         paths,
         agents,
@@ -757,7 +1223,7 @@ fn load_or_migrate_sqlite() -> DiskState {
         notifications,
     };
     seed_persisted_thread_revs(&state.threads, &healed_thread_ids);
-    if seed_routines_now || seed_notifications_now || !healed_thread_ids.is_empty() {
+    if seed_routines_now || seed_notifications_now || !healed_thread_ids.is_empty() || healed_routines {
         drop(th_stmt);
         drop(app_stmt);
         drop(rt_stmt);
@@ -765,7 +1231,55 @@ fn load_or_migrate_sqlite() -> DiskState {
         drop(conn_guard);
         save_disk_to_sqlite(&state);
     }
+    state.threads = state.threads.into_iter().map(|t| to_thread_stub(&t)).collect();
     state
+}
+
+/// Migrates legacy non-UUID routine identifiers (such as earlier seeded `"r1111111-..."`) to valid UUIDv4s
+/// and updates linked `routine_runs` and `notifications` records without losing history.
+pub fn heal_loaded_routines_in_conn(
+    conn: &Connection,
+    routines: &mut [Value],
+    notifications: &mut [Value],
+) -> bool {
+    let mut remapped: Vec<(String, String)> = Vec::new();
+    for routine in routines.iter_mut() {
+        let Some(old_id) = routine.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        if uuid::Uuid::parse_str(&old_id).is_ok() {
+            continue;
+        }
+        let next_id = if old_id == LEGACY_SEEDED_HEALTH_CHECK_ROUTINE_ID {
+            SEEDED_HEALTH_CHECK_ROUTINE_ID.to_string()
+        } else {
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, old_id.as_bytes()).to_string()
+        };
+        if let Some(obj) = routine.as_object_mut() {
+            obj.insert("id".to_string(), json!(next_id));
+        }
+        remapped.push((old_id, next_id));
+    }
+
+    if remapped.is_empty() {
+        return false;
+    }
+
+    for (old_id, next_id) in &remapped {
+        for notif in notifications.iter_mut() {
+            if notif.get("routineId").and_then(Value::as_str) == Some(old_id.as_str()) {
+                if let Some(obj) = notif.as_object_mut() {
+                    obj.insert("routineId".to_string(), json!(next_id));
+                }
+            }
+        }
+        let _ = conn.execute(
+            "UPDATE routine_runs SET routine_id = ?1 WHERE routine_id = ?2",
+            params![next_id, old_id],
+        );
+    }
+
+    true
 }
 
 fn heal_loaded_threads(threads: &mut [Value]) -> std::collections::HashSet<String> {
@@ -1021,6 +1535,9 @@ pub(crate) fn collect_dirty_threads(
             continue;
         };
         live_ids.push(id.to_string());
+        if is_thread_stub(thread) {
+            continue;
+        }
         let is_clean = thread_sync_stamp(thread)
             .as_ref()
             .is_some_and(|stamp| known_revs.get(id) == Some(stamp));
@@ -1072,6 +1589,9 @@ fn upsert_threads_into_tx(
         if let Some(ids) = collected_ids.as_deref_mut() {
             ids.push(id.to_string());
         }
+        if is_thread_stub(thread) {
+            continue;
+        }
         let stamp = thread_sync_stamp(thread);
         if let (Some(cache), Some(stamp_val)) = (rev_cache.as_deref(), stamp.as_ref()) {
             if cache.get(id) == Some(stamp_val) {
@@ -1092,6 +1612,463 @@ fn upsert_threads_into_tx(
         }
     }
     Ok(serialized_count)
+}
+
+fn hydrated_lru() -> &'static Mutex<VecDeque<String>> {
+    static CELL: std::sync::OnceLock<Mutex<VecDeque<String>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn is_thread_active_status(thread: &Value) -> bool {
+    matches!(
+        thread.get("status").and_then(Value::as_str),
+        Some("running" | "waiting")
+    )
+}
+
+fn touch_hydrated_lru(lru: &mut VecDeque<String>, thread_id: &str) {
+    lru.retain(|id| id != thread_id);
+    lru.push_back(thread_id.to_string());
+}
+
+fn apply_loaded_thread_over_stub(mut loaded: Value, existing_stub: Option<&Value>) -> (Value, bool) {
+    if let Some(obj) = loaded.as_object_mut() {
+        obj.remove("_kiteStub");
+        obj.remove("itemCount");
+    }
+    let Some(stub) = existing_stub else {
+        return (loaded, false);
+    };
+    let stub_updated = stub.get("updatedAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
+    let loaded_updated = loaded.get("updatedAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
+    let stub_rev = stub.get("revision").and_then(Value::as_str);
+    let loaded_rev = loaded.get("revision").and_then(Value::as_str);
+    let stub_is_newer = stub_updated > loaded_updated
+        || (stub_updated == loaded_updated && stub_rev.is_some() && stub_rev != loaded_rev);
+    if stub_is_newer {
+        if let (Some(stub_obj), Some(loaded_obj)) = (stub.as_object(), loaded.as_object_mut()) {
+            for (k, v) in stub_obj {
+                if !matches!(k.as_str(), "items" | "subagentRuns" | "_kiteStub" | "itemCount") {
+                    loaded_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    (loaded, stub_is_newer)
+}
+
+fn flush_threads_to_conn(
+    conn: &mut Connection,
+    threads_to_flush: &[Value],
+    rev_cache: &mut ThreadRevCache,
+) -> Result<usize, rusqlite::Error> {
+    let mut staged = rev_cache.clone();
+    let tx = conn.transaction()?;
+    let count = upsert_threads_into_tx(&tx, threads_to_flush, Some(&mut staged), None)?;
+    tx.commit()?;
+    *rev_cache = staged;
+    Ok(count)
+}
+
+pub(crate) fn dehydrate_idle_threads_in_state(
+    conn: &mut Connection,
+    threads: &mut [Value],
+    lru: &mut VecDeque<String>,
+    rev_cache: &mut ThreadRevCache,
+    keep_ids: &[&str],
+) -> usize {
+    let keep_set: HashSet<&str> = keep_ids.iter().copied().collect();
+    let mut victim_indices: Vec<(String, usize)> = Vec::new();
+    for (idx, thread) in threads.iter().enumerate() {
+        let Some(id) = json_row_id(thread) else {
+            continue;
+        };
+        if is_thread_stub(thread) || is_thread_active_status(thread) || keep_set.contains(id) {
+            continue;
+        }
+        victim_indices.push((id.to_string(), idx));
+    }
+    if victim_indices.is_empty() {
+        return 0;
+    }
+    let to_flush: Vec<Value> = victim_indices
+        .iter()
+        .filter_map(|(id, idx)| {
+            let thread = &threads[*idx];
+            let is_clean = thread_sync_stamp(thread)
+                .as_ref()
+                .is_some_and(|stamp| rev_cache.get(id) == Some(stamp));
+            if is_clean {
+                None
+            } else {
+                Some(thread.clone())
+            }
+        })
+        .collect();
+    if !to_flush.is_empty() {
+        if let Err(error) = flush_threads_to_conn(conn, &to_flush, rev_cache) {
+            log_trace(&format!("Failed to flush idle threads before dehydration: {error}"));
+            return 0;
+        }
+    }
+    let mut dehydrated_ids = HashSet::new();
+    for (id, idx) in victim_indices {
+        threads[idx] = to_thread_stub(&threads[idx]);
+        dehydrated_ids.insert(id);
+    }
+    let count = dehydrated_ids.len();
+    lru.retain(|id| !dehydrated_ids.contains(id));
+    count
+}
+
+fn evict_excess_hydrated_in_state(
+    conn: &mut Connection,
+    threads: &mut [Value],
+    lru: &mut VecDeque<String>,
+    rev_cache: &mut ThreadRevCache,
+    keep_ids: &[&str],
+) -> usize {
+    let keep_set: HashSet<&str> = keep_ids.iter().copied().collect();
+    lru.retain(|id| {
+        threads
+            .iter()
+            .find(|t| json_row_id(t) == Some(id.as_str()))
+            .is_some_and(|t| !is_thread_stub(t))
+    });
+    if lru.len() <= MAX_HYDRATED_THREADS {
+        return 0;
+    }
+    let target_evictions = lru.len() - MAX_HYDRATED_THREADS;
+    let mut victim_indices: Vec<(String, usize)> = Vec::new();
+    for id in lru.iter() {
+        if victim_indices.len() >= target_evictions {
+            break;
+        }
+        if keep_set.contains(id.as_str()) {
+            continue;
+        }
+        if let Some(idx) = threads.iter().position(|t| json_row_id(t) == Some(id.as_str())) {
+            let thread = &threads[idx];
+            if !is_thread_stub(thread) && !is_thread_active_status(thread) {
+                victim_indices.push((id.clone(), idx));
+            }
+        }
+    }
+    if victim_indices.is_empty() {
+        return 0;
+    }
+    let to_flush: Vec<Value> = victim_indices
+        .iter()
+        .filter_map(|(id, idx)| {
+            let thread = &threads[*idx];
+            let is_clean = thread_sync_stamp(thread)
+                .as_ref()
+                .is_some_and(|stamp| rev_cache.get(id) == Some(stamp));
+            if is_clean {
+                None
+            } else {
+                Some(thread.clone())
+            }
+        })
+        .collect();
+    if !to_flush.is_empty() {
+        if let Err(error) = flush_threads_to_conn(conn, &to_flush, rev_cache) {
+            log_trace(&format!("Failed to flush hydrated threads before eviction: {error}"));
+            return 0;
+        }
+    }
+    let mut evicted_ids = HashSet::new();
+    for (id, idx) in victim_indices {
+        threads[idx] = to_thread_stub(&threads[idx]);
+        evicted_ids.insert(id);
+    }
+    let count = evicted_ids.len();
+    lru.retain(|id| !evicted_ids.contains(id));
+    count
+}
+
+pub(crate) fn hydrate_thread_in_state(
+    conn: &mut Connection,
+    threads: &mut Vec<Value>,
+    lru: &mut VecDeque<String>,
+    rev_cache: &mut ThreadRevCache,
+    thread_id: &str,
+) -> bool {
+    if thread_id.trim().is_empty() {
+        return false;
+    }
+    if let Some(existing) = threads.iter().find(|t| json_row_id(t) == Some(thread_id)) {
+        if !is_thread_stub(existing) {
+            touch_hydrated_lru(lru, thread_id);
+            evict_excess_hydrated_in_state(conn, threads, lru, rev_cache, &[thread_id]);
+            return true;
+        }
+    }
+    let Some(loaded) = find_thread_from_conn(conn, thread_id) else {
+        return false;
+    };
+    let pos = threads.iter().position(|t| json_row_id(t) == Some(thread_id));
+    let (merged, stub_was_newer) = match pos {
+        Some(idx) => apply_loaded_thread_over_stub(loaded, Some(&threads[idx])),
+        None => apply_loaded_thread_over_stub(loaded, None),
+    };
+    if !stub_was_newer {
+        if let Some(stamp) = thread_sync_stamp(&merged) {
+            rev_cache.insert(thread_id.to_string(), stamp);
+        }
+    }
+    match pos {
+        Some(idx) => threads[idx] = merged,
+        None => threads.push(merged),
+    }
+    touch_hydrated_lru(lru, thread_id);
+    evict_excess_hydrated_in_state(conn, threads, lru, rev_cache, &[thread_id]);
+    true
+}
+
+struct DehydrateCandidate {
+    id: String,
+    snapshot: Value,
+    stamp: Option<(String, i64)>,
+}
+
+fn flush_and_dehydrate_candidates(candidates: Vec<DehydrateCandidate>, keep_ids: &[&str]) -> usize {
+    if candidates.is_empty() {
+        return 0;
+    }
+    let to_flush: Vec<Value> = {
+        let Ok(known_revs) = persisted_thread_revs().lock() else {
+            return 0;
+        };
+        candidates
+            .iter()
+            .filter_map(|cand| {
+                let is_clean = cand
+                    .stamp
+                    .as_ref()
+                    .is_some_and(|s| known_revs.get(&cand.id) == Some(s));
+                if is_clean {
+                    None
+                } else {
+                    Some(cand.snapshot.clone())
+                }
+            })
+            .collect()
+    };
+
+    if !to_flush.is_empty() {
+        let Ok(mut conn_guard) = db_connection().lock() else {
+            return 0;
+        };
+        let Ok(mut rev_guard) = persisted_thread_revs().lock() else {
+            return 0;
+        };
+        if let Err(error) = flush_threads_to_conn(&mut conn_guard, &to_flush, &mut rev_guard) {
+            log_trace(&format!("Failed to flush threads before dehydration: {error}"));
+            return 0;
+        }
+    }
+
+    let keep_set: HashSet<&str> = keep_ids.iter().copied().collect();
+    let mut dehydrated_ids = Vec::new();
+    {
+        let Ok(mut threads_guard) = threads().lock() else {
+            return 0;
+        };
+        for cand in &candidates {
+            if keep_set.contains(cand.id.as_str()) {
+                continue;
+            }
+            if let Some(t) = threads_guard
+                .iter_mut()
+                .find(|t| json_row_id(t) == Some(cand.id.as_str()))
+            {
+                if is_thread_stub(t) || is_thread_active_status(t) {
+                    continue;
+                }
+                let unchanged = match &cand.stamp {
+                    Some(s) => thread_sync_stamp(t).as_ref() == Some(s),
+                    None => *t == cand.snapshot,
+                };
+                if unchanged {
+                    *t = to_thread_stub(t);
+                    dehydrated_ids.push(cand.id.clone());
+                }
+            }
+        }
+    }
+
+    if !dehydrated_ids.is_empty() {
+        if let Ok(mut lru) = hydrated_lru().lock() {
+            lru.retain(|id| !dehydrated_ids.iter().any(|d| d == id));
+        }
+    }
+    dehydrated_ids.len()
+}
+
+fn evict_excess_hydrated_threads(keep_ids: &[&str]) -> usize {
+    let lru_order: Vec<String> = {
+        let Ok(lru) = hydrated_lru().lock() else {
+            return 0;
+        };
+        lru.iter().cloned().collect()
+    };
+    if lru_order.len() <= MAX_HYDRATED_THREADS {
+        return 0;
+    }
+
+    let keep_set: HashSet<&str> = keep_ids.iter().copied().collect();
+    let mut stale_ids: Vec<String> = Vec::new();
+    let mut valid_ids: Vec<String> = Vec::with_capacity(lru_order.len());
+    let candidates: Vec<DehydrateCandidate> = {
+        let Ok(threads_guard) = threads().lock() else {
+            return 0;
+        };
+        for id in &lru_order {
+            let is_hydrated = threads_guard
+                .iter()
+                .find(|t| json_row_id(t) == Some(id.as_str()))
+                .is_some_and(|t| !is_thread_stub(t));
+            if is_hydrated {
+                valid_ids.push(id.clone());
+            } else {
+                stale_ids.push(id.clone());
+            }
+        }
+        if valid_ids.len() <= MAX_HYDRATED_THREADS {
+            Vec::new()
+        } else {
+            let target_evictions = valid_ids.len() - MAX_HYDRATED_THREADS;
+            let mut picked = Vec::with_capacity(target_evictions);
+            for id in &valid_ids {
+                if picked.len() >= target_evictions {
+                    break;
+                }
+                if keep_set.contains(id.as_str()) {
+                    continue;
+                }
+                if let Some(t) = threads_guard.iter().find(|t| json_row_id(t) == Some(id.as_str())) {
+                    if !is_thread_stub(t) && !is_thread_active_status(t) {
+                        picked.push(DehydrateCandidate {
+                            id: id.clone(),
+                            snapshot: t.clone(),
+                            stamp: thread_sync_stamp(t),
+                        });
+                    }
+                }
+            }
+            picked
+        }
+    };
+
+    if !stale_ids.is_empty() {
+        if let Ok(mut lru) = hydrated_lru().lock() {
+            lru.retain(|id| !stale_ids.iter().any(|s| s == id));
+        }
+    }
+
+    flush_and_dehydrate_candidates(candidates, keep_ids)
+}
+
+pub fn hydrate_thread(thread_id: &str) -> bool {
+    if thread_id.trim().is_empty() {
+        return false;
+    }
+    let already_hydrated = {
+        let Ok(threads_guard) = threads().lock() else {
+            return false;
+        };
+        threads_guard
+            .iter()
+            .find(|t| json_row_id(t) == Some(thread_id))
+            .is_some_and(|t| !is_thread_stub(t))
+    };
+    if already_hydrated {
+        let need_evict = if let Ok(mut lru) = hydrated_lru().lock() {
+            touch_hydrated_lru(&mut lru, thread_id);
+            lru.len() > MAX_HYDRATED_THREADS
+        } else {
+            false
+        };
+        if need_evict {
+            evict_excess_hydrated_threads(&[thread_id]);
+        }
+        return true;
+    }
+
+    let Some(loaded) = find_thread_direct(thread_id) else {
+        return false;
+    };
+
+    let (already_hydrated_raced, stamp_if_clean) = {
+        let Ok(mut threads_guard) = threads().lock() else {
+            return false;
+        };
+        let pos = threads_guard.iter().position(|t| json_row_id(t) == Some(thread_id));
+        if let Some(idx) = pos {
+            if !is_thread_stub(&threads_guard[idx]) {
+                (true, None)
+            } else {
+                let (merged, stub_was_newer) =
+                    apply_loaded_thread_over_stub(loaded, Some(&threads_guard[idx]));
+                let stamp = if !stub_was_newer {
+                    thread_sync_stamp(&merged)
+                } else {
+                    None
+                };
+                threads_guard[idx] = merged;
+                (false, stamp)
+            }
+        } else {
+            let (merged, _) = apply_loaded_thread_over_stub(loaded, None);
+            let stamp = thread_sync_stamp(&merged);
+            threads_guard.push(merged);
+            (false, stamp)
+        }
+    };
+
+    if !already_hydrated_raced {
+        if let Some(stamp) = stamp_if_clean {
+            if let Ok(mut revs) = persisted_thread_revs().lock() {
+                revs.insert(thread_id.to_string(), stamp);
+            }
+        }
+    }
+
+    let need_evict = if let Ok(mut lru) = hydrated_lru().lock() {
+        touch_hydrated_lru(&mut lru, thread_id);
+        lru.len() > MAX_HYDRATED_THREADS
+    } else {
+        false
+    };
+    if need_evict {
+        evict_excess_hydrated_threads(&[thread_id]);
+    }
+    true
+}
+
+pub fn dehydrate_idle_threads(keep_ids: &[&str]) -> usize {
+    let keep_set: HashSet<&str> = keep_ids.iter().copied().collect();
+    let candidates: Vec<DehydrateCandidate> = {
+        let Ok(threads_guard) = threads().lock() else {
+            return 0;
+        };
+        threads_guard
+            .iter()
+            .filter_map(|t| {
+                let id = json_row_id(t)?;
+                if is_thread_stub(t) || is_thread_active_status(t) || keep_set.contains(id) {
+                    return None;
+                }
+                Some(DehydrateCandidate {
+                    id: id.to_string(),
+                    snapshot: t.clone(),
+                    stamp: thread_sync_stamp(t),
+                })
+            })
+            .collect()
+    };
+    flush_and_dehydrate_candidates(candidates, keep_ids)
 }
 
 fn prune_absent_threads(
@@ -1348,6 +2325,8 @@ struct PersistStores {
 }
 
 fn stores() -> &'static PersistStores {
+    #[cfg(test)]
+    TEST_THREAD_TOUCHED_STORES.with(|flag| flag.set(true));
     static STORES: std::sync::OnceLock<PersistStores> = std::sync::OnceLock::new();
     STORES.get_or_init(|| {
         let state = load_or_migrate_sqlite();
@@ -1368,8 +2347,7 @@ fn stores() -> &'static PersistStores {
     })
 }
 
-#[cfg(test)]
-pub(crate) fn stores_initialized() -> bool {
+pub fn stores_initialized() -> bool {
     STORES_INITIALIZED.load(Ordering::Relaxed)
 }
 
@@ -1515,6 +2493,9 @@ pub fn workspace_path(id: &str) -> Option<String> {
 }
 
 pub fn all_workspace_paths() -> HashMap<String, String> {
+    if is_daemon_process() {
+        return all_workspace_paths_direct();
+    }
     paths().lock().unwrap().clone()
 }
 

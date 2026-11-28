@@ -27,6 +27,24 @@ Review the task. Report defects, risks, and a recommendation.
 Do not take irreversible actions. Those wait for the person.
 ";
 
+pub const BROWSER_ROLE_NAME: &str = "browser";
+
+pub const BROWSER_ROLE: &str = "\
+command: auto
+description: Inspect, test, and verify web apps in Kite's embedded browser with kite-ctx reuse.
+
+You are Kite's dedicated Browser Verification Subagent.
+Use `kite_browser` (or `kite browser` CLI) directly against Kite's embedded RightDock browser:
+1. Call `discover` first to find active local dev servers and open tabs before opening a new URL.
+2. Open background tabs (`background: true`) so you never steal keyboard focus or navigate away from the user's active tab.
+3. Prefer `snapshot` with `mode: \"auto\"` (semantic AX diff / unchanged stub) over raw DOM dumps or screenshots.
+4. Combine sequential interactions and assertions (`click`, `fill`, `press`, `wait_for`, `assert_text`, `assert_url`, `assert_no_errors`) into one `batch` call.
+5. Check `errors` (console + 4xx/5xx network) to validate runtime health. Use `replay` / `save_recipe` for repeated test flows.
+6. Capture `screenshot` only when verifying visual layout, alignment, or rendering regressions.
+7. Never bypass CAPTCHA, OAuth/SSO sign-in, or payment pages: pause and return the paused tab state so the user can sign in and resume you.
+8. Return a concise verification summary (PASS/FAIL, affected routes, console/network errors, and any screenshots or recipe keys).
+";
+
 fn split_role_header_and_body(text: &str) -> (&str, &str) {
     let normalized = text.trim_start();
     if let Some(after_open) = normalized
@@ -196,6 +214,10 @@ pub fn ensure_sample_role(config_dir: &Path) -> Result<PathBuf, DispatchError> {
     let reviewer = write_sample(&dir, SAMPLE_ROLE_NAME)?;
     // Sample briefs. They are not the program catalog and they are not run by themselves.
     let _ = write_sample(&dir, "review")?;
+    let browser_path = dir.join(format!("{BROWSER_ROLE_NAME}.md"));
+    if !browser_path.exists() {
+        let _ = fs::write(&browser_path, BROWSER_ROLE);
+    }
     Ok(reviewer)
 }
 
@@ -403,6 +425,10 @@ mod tests {
         ensure_sample_role(&dir).unwrap();
         let on_disk = fs::read_to_string(rdir.join("reviewer.md")).unwrap();
         assert!(on_disk.starts_with("command: auto"), "on_disk={on_disk}");
+
+        let browser_role = load_role(&dir, BROWSER_ROLE_NAME).unwrap();
+        assert_eq!(browser_role.command, "auto");
+        assert!(browser_role.body.contains("kite_browser"));
 
         let _ = fs::remove_dir_all(&dir);
     }

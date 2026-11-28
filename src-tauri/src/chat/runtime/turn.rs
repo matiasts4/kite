@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::pipeline::{flush_pipeline_deltas, set_thread_field};
-use super::settle::finish_run;
+use super::settle::{finish_run, finish_run_with_options};
 use super::spawn::launch_provider;
 use super::state::{
     bounded_notice, emit_note_item, emit_notice_item, live_cv, live_turns, prune_stale_runs,
@@ -243,7 +243,17 @@ pub(crate) fn resolve_pump_sync_handle<'a>(
 /// pump stops at a completed turn, a provider exit, a failure, or a run the
 /// user already finished.
 pub fn pump_persistent_session(thread_id: String, run_id: String, assistant_id: String) {
+    pump_persistent_session_with_permit(thread_id, run_id, assistant_id, None);
+}
+
+pub(crate) fn pump_persistent_session_with_permit(
+    thread_id: String,
+    run_id: String,
+    assistant_id: String,
+    permit: Option<crate::chat::session::GovernorPermit>,
+) {
     std::thread::spawn(move || {
+        let _governor_permit = permit;
         let mut last_progress = Instant::now();
         let mut last_stdout_event = Instant::now();
         let mut last_transcript_probe = Instant::now();
@@ -752,7 +762,12 @@ pub fn start_turn_with_binding(
     ));
     let user_id = format!("u{}", Uuid::new_v4().simple());
     let assistant_id = format!("a{}", Uuid::new_v4().simple());
-    let provider_prompt = crate::chat::format_prompt_with_attachments(prompt, &attachments);
+    let base_provider_prompt = crate::chat::format_prompt_with_attachments(prompt, &attachments);
+    let provider_prompt = if is_internal_dispatch_prompt(prompt) {
+        base_provider_prompt
+    } else {
+        append_active_subagents_context(&thread, &base_provider_prompt)
+    };
     let mut user_item = chat_item(&user_id, "user", prompt, false);
     if is_internal_dispatch_prompt(prompt) {
         user_item["internalDispatch"] = json!(true);
@@ -810,6 +825,7 @@ pub fn start_turn_with_binding(
         live.by_thread.insert(thread_id.to_string(), run_id.clone());
         live.runs.insert(run_id.clone(), run);
     }
+    crate::dispatch_wire::on_thread_started(thread_id);
     launch_provider(thread_id.to_string(), run_id.clone(), &thread, &provider_prompt, binding);
     json!({
         "schemaVersion": 1,
@@ -1003,8 +1019,146 @@ fn cancel_active_child_threads(parent_thread_id: &str) {
     }
 }
 
+pub(crate) const ACTIVE_SUBAGENTS_MARKER: &str = "\n\n[Active Background Subagents]\n";
+
+fn is_terminal_subagent_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed"
+            | "failed"
+            | "killed"
+            | "cancelled"
+            | "canceled"
+            | "stopped"
+            | "interrupted"
+    )
+}
+
+pub(crate) fn append_active_subagents_context(thread: &Value, provider_prompt: &str) -> String {
+    let parent_thread_id = thread.get("id").and_then(Value::as_str).unwrap_or("");
+    let mut seen_cids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut lines: Vec<String> = Vec::new();
+
+    if let Some(runs) = thread.get("subagentRuns").and_then(Value::as_array) {
+        for run in runs {
+            let status = run.get("status").and_then(Value::as_str).unwrap_or("running");
+            if is_terminal_subagent_status(status) {
+                continue;
+            }
+            let Some(cid) = run
+                .get("childThreadId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != parent_thread_id)
+            else {
+                continue;
+            };
+            if !seen_cids.insert(cid.to_string()) {
+                continue;
+            }
+            let role = run
+                .get("role")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Subagent");
+            let provider = run
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let model = run
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let member = run
+                .get("swarmMemberName")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+
+            let mut meta = vec![format!("role: {role}"), format!("status: {status}")];
+            if let Some(name) = member {
+                meta.push(format!("member: @{name}"));
+            }
+            match (provider, model) {
+                (Some(p), Some(m)) => meta.push(format!("model: {p}/{m}")),
+                (Some(p), None) => meta.push(format!("provider: {p}")),
+                (None, Some(m)) => meta.push(format!("model: {m}")),
+                (None, None) => {}
+            }
+            lines.push(format!("- thread:{cid} ({})", meta.join(", ")));
+        }
+    }
+
+    if let Some(members) = thread
+        .pointer("/swarmState/members")
+        .and_then(Value::as_array)
+    {
+        for member in members {
+            let state = member.get("state").and_then(Value::as_str).unwrap_or("");
+            if state != "working" {
+                continue;
+            }
+            let Some(cid) = member
+                .get("childThreadId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != parent_thread_id)
+            else {
+                continue;
+            };
+            if !seen_cids.insert(cid.to_string()) {
+                continue;
+            }
+            let name = member
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("worker");
+            let role = member
+                .get("role")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let mut meta = vec![format!("member: @{name}"), format!("status: {state}")];
+            if let Some(r) = role {
+                meta.push(format!("role: {r}"));
+            }
+            lines.push(format!("- thread:{cid} ({})", meta.join(", ")));
+        }
+    }
+
+    if lines.is_empty() {
+        return provider_prompt.to_string();
+    }
+
+    format!(
+        "{provider_prompt}{ACTIVE_SUBAGENTS_MARKER}The following background subagents in this conversation are still running and were NOT cancelled:\n{}\nKeep them running unless the user's message explicitly asks to stop or cancel them. You can wait for their results (`kite_subagent_wait`), send them updated instructions (`kite_subagent_send`), read their progress (`kite_subagent_read`), or stop them only if requested.",
+        lines.join("\n")
+    )
+}
+
+pub(crate) fn strip_active_subagents_context(prompt: &str) -> &str {
+    prompt
+        .split_once(ACTIVE_SUBAGENTS_MARKER)
+        .map(|(head, _)| head)
+        .unwrap_or(prompt)
+}
+
 pub fn cancel_turn(thread_id: &str) {
-    chat_log(&format!("cancel_turn: requested for thread={}", thread_id));
+    cancel_turn_with_options(thread_id, false);
+}
+
+pub fn cancel_turn_with_options(thread_id: &str, preserve_children: bool) {
+    super::pipeline::clear_acp_approval_wire(thread_id);
+    super::pipeline::clear_session_auto_approved(thread_id);
+    chat_log(&format!(
+        "cancel_turn: requested for thread={}, preserve_children={}",
+        thread_id, preserve_children
+    ));
     enum CancelRunState {
         Active(String),
         Closing,
@@ -1027,18 +1181,29 @@ pub fn cancel_turn(thread_id: &str) {
         CancelRunState::Active(rid) => rid,
         CancelRunState::MissingOrFinished => {
             chat_log(&format!("cancel_turn: no live run for thread={}", thread_id));
+            if preserve_children {
+                crate::dispatch_wire::restore_parent_notices_for_active_children(thread_id);
+            }
             if let Ok(mut manager) = session_manager().lock() {
                 let _ = manager.interrupt(thread_id);
             }
-            cancel_active_child_threads(thread_id);
+            if !preserve_children {
+                cancel_active_child_threads(thread_id);
+            }
             let mut changed = false;
+            let _ = crate::persist::hydrate_thread(thread_id);
             {
                 let mut items = threads().lock().unwrap();
                 if let Some(stored) = items
                     .iter_mut()
                     .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
                 {
-                    if super::settle::heal_orphaned_running_thread(stored, true) {
+                    let healed = if preserve_children {
+                        super::settle::heal_orphaned_thread_with_children(stored, true, false, false)
+                    } else {
+                        super::settle::heal_orphaned_running_thread(stored, true)
+                    };
+                    if healed {
                         touch(stored);
                         changed = true;
                     } else if apply_derived_title_if_needed(stored, "generated", true) {
@@ -1052,6 +1217,9 @@ pub fn cancel_turn(thread_id: &str) {
             return;
         }
     };
+    if preserve_children {
+        crate::dispatch_wire::restore_parent_notices_for_active_children(thread_id);
+    }
     let child = {
         let live = live_turns().lock().unwrap();
         live.runs.get(&run_id).and_then(|run| run.child.clone())
@@ -1066,14 +1234,17 @@ pub fn cancel_turn(thread_id: &str) {
     if let Ok(mut manager) = session_manager().lock() {
         let _ = manager.stop(thread_id);
     }
-    cancel_active_child_threads(thread_id);
-    finish_run(&run_id, false, true, "Stopped.");
+    if !preserve_children {
+        cancel_active_child_threads(thread_id);
+    }
+    finish_run_with_options(&run_id, false, true, "Stopped.", preserve_children);
 }
 
 pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
     let Some(items) = thread.get("items").and_then(|v| v.as_array()) else {
         return current_prompt.to_string();
     };
+    let normalized_current = strip_active_subagents_context(current_prompt);
 
     let mut past_items: Vec<&Value> = items
         .iter()
@@ -1096,8 +1267,8 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
                 .and_then(|v| v.as_array())
                 .map(|a| a.as_slice())
                 .unwrap_or(&[]);
-            if last_text == current_prompt
-                || crate::chat::format_prompt_with_attachments(last_text, last_atts) == current_prompt
+            if last_text == normalized_current
+                || crate::chat::format_prompt_with_attachments(last_text, last_atts) == normalized_current
             {
                 past_items.pop();
             }
@@ -1107,14 +1278,6 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
     if past_items.is_empty() {
         return current_prompt.to_string();
     }
-
-    if past_items.len() > 14 {
-        let drain_count = past_items.len() - 14;
-        past_items = past_items[drain_count..].to_vec();
-    }
-
-    let mut context_buffer = String::new();
-    context_buffer.push_str("--- Previous Conversation History ---\n");
 
     let session_id = thread
         .get("id")
@@ -1143,9 +1306,12 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("unknown");
-    let ctx_engine = past_items
-        .iter()
-        .any(|it| it.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.len() > 900))
+
+    let needs_engine = past_items.len() > 14
+        || past_items
+            .iter()
+            .any(|it| it.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.len() > 900));
+    let ctx_engine = needs_engine
         .then(|| {
             if cfg!(test) && std::env::var_os(kite_ctx::ENV_DB_PATH).is_none() {
                 kite_ctx::ContextEngine::open_in_memory().ok()
@@ -1154,6 +1320,34 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
             }
         })
         .flatten();
+
+    let window_start = if past_items.len() > 14 {
+        if let Some(ref eng) = ctx_engine {
+            let item_hashes: Vec<String> = past_items
+                .iter()
+                .map(|it| {
+                    let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let kind = it.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                    let text = it.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                    kite_ctx::sha256_hex(&format!("{id}|{kind}|{text}"))
+                })
+                .collect();
+            eng.kv()
+                .plan_thread_window(session_id, provider_name, &item_hashes, 14, 6)
+                .map(|p| p.live_start_index)
+                .unwrap_or_else(|_| past_items.len() - 14)
+        } else {
+            past_items.len() - 14
+        }
+    } else {
+        0
+    };
+    if window_start > 0 && window_start < past_items.len() {
+        past_items = past_items[window_start..].to_vec();
+    }
+
+    let mut context_buffer = String::new();
+    context_buffer.push_str("--- Previous Conversation History ---\n");
 
     for item in past_items {
         let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
@@ -1174,18 +1368,15 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
                 context_buffer.push_str("\n[Assistant]:\n");
                 let trimmed = text.trim();
                 if trimmed.chars().count() > 4000 || trimmed.len() > 1200 {
-                    if let Some(compressed) = ctx_engine.as_ref().and_then(|eng| {
-                        eng.compress_runtime_segment(
-                            trimmed,
-                            4000,
-                            "runtime:thread_history",
-                            session_id,
-                            agent_name,
-                            provider_name,
-                            model_name,
-                        )
-                        .ok()
-                    }) {
+                    if let Some(compressed) = compress_thread_segment_cached(
+                        ctx_engine.as_ref(),
+                        trimmed,
+                        4000,
+                        session_id,
+                        agent_name,
+                        provider_name,
+                        model_name,
+                    ) {
                         context_buffer.push_str(&compressed);
                         context_buffer.push('\n');
                     } else {
@@ -1211,18 +1402,15 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
                 context_buffer.push_str(&format!("\n[Tool Call: {} ({})]\n", tool_name, status));
                 let trimmed = text.trim();
                 if trimmed.chars().count() > 1500 || trimmed.len() > 900 {
-                    if let Some(compressed) = ctx_engine.as_ref().and_then(|eng| {
-                        eng.compress_runtime_segment(
-                            trimmed,
-                            1500,
-                            "runtime:thread_history",
-                            session_id,
-                            agent_name,
-                            provider_name,
-                            model_name,
-                        )
-                        .ok()
-                    }) {
+                    if let Some(compressed) = compress_thread_segment_cached(
+                        ctx_engine.as_ref(),
+                        trimmed,
+                        1500,
+                        session_id,
+                        agent_name,
+                        provider_name,
+                        model_name,
+                    ) {
                         context_buffer.push_str(&compressed);
                         context_buffer.push('\n');
                     } else {
@@ -1246,4 +1434,47 @@ pub fn assemble_thread_context(thread: &Value, current_prompt: &str) -> String {
     context_buffer.push_str("\n--- Current Request ---\n");
     context_buffer.push_str(current_prompt);
     context_buffer
+}
+
+fn compress_thread_segment_cached(
+    ctx_engine: Option<&kite_ctx::ContextEngine>,
+    trimmed: &str,
+    max_chars: usize,
+    session_id: &str,
+    agent_name: &str,
+    provider_name: &str,
+    model_name: &str,
+) -> Option<String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let db_scope = std::env::var(kite_ctx::ENV_DB_PATH).unwrap_or_default();
+    let key = kite_ctx::sha256_hex(&format!("{db_scope}|{session_id}|{max_chars}|{trimmed}"));
+
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.get(&key) {
+            return Some(cached.clone());
+        }
+    }
+
+    let compressed = ctx_engine?
+        .compress_runtime_segment(
+            trimmed,
+            max_chars,
+            "runtime:thread_history",
+            session_id,
+            agent_name,
+            provider_name,
+            model_name,
+        )
+        .ok()?;
+
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= 512 {
+            guard.clear();
+        }
+        guard.insert(key, compressed.clone());
+    }
+
+    Some(compressed)
 }

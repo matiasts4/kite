@@ -1,5 +1,5 @@
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn ids(raw: &str) -> Vec<String> {
         parse_opencode_models(raw)
@@ -311,6 +311,169 @@
     }
 
     #[test]
+    fn parses_agy_models_without_fabricating_effort_for_untiered_orchestrators() {
+        let raw = "\
+gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)
+gemini-4-neon-high\tGemini 4 Neon (High)
+gemini-4-neon-medium\tGemini 4 Neon (Medium)
+gemini-4-neon-low\tGemini 4 Neon (Low)
+gemini-pro-orchestrator-neon\tOrchestrator (Neon)
+gemini-pro-orchestrator\tOrchestrator (Carbon)
+gemini-pro-orchestrator-argon\tOrchestrator (Argon)
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
+";
+        let parsed = parse_agy_models(raw);
+
+        let neon = parsed
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some("gemini-4-neon"))
+            .expect("gemini-4-neon");
+        assert_eq!(neon.get("name").and_then(Value::as_str), Some("Gemini 4 Neon"));
+        assert_eq!(neon.get("supportsEffort").and_then(Value::as_bool), Some(true));
+        let neon_levels: Vec<&str> = neon
+            .get("effortLevels")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(neon_levels, vec!["low", "medium", "high", "xhigh"]);
+
+        for orch_id in [
+            "gemini-pro-orchestrator-neon",
+            "gemini-pro-orchestrator",
+            "gemini-pro-orchestrator-argon",
+        ] {
+            let orch = parsed
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(orch_id))
+                .unwrap_or_else(|| panic!("missing {orch_id}"));
+            assert_eq!(
+                orch.get("supportsEffort").and_then(Value::as_bool),
+                Some(false),
+                "{orch_id} must not fabricate supportsEffort=true"
+            );
+            assert!(
+                orch.get("effortLevels").is_none(),
+                "{orch_id} must not fabricate effortLevels: {orch}"
+            );
+            assert!(
+                orch.get("defaultEffort").is_none(),
+                "{orch_id} must not fabricate defaultEffort: {orch}"
+            );
+        }
+
+        let oss = parsed
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some("gpt-oss-120b"))
+            .expect("gpt-oss-120b");
+        assert_eq!(oss.get("supportsEffort").and_then(Value::as_bool), Some(false));
+        assert!(oss.get("effortLevels").is_none());
+    }
+
+    #[test]
+    fn resolve_model_effort_from_catalog_omits_unsupported_and_clamps_out_of_range_tiers() {
+        let models = parse_agy_models(
+            "\
+gemini-4-neon-high\tGemini 4 Neon (High)
+gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)
+gemini-4-neon-medium\tGemini 4 Neon (Medium)
+gemini-4-neon-low\tGemini 4 Neon (Low)
+gemini-4-argon-high\tGemini 4 Argon (High)
+gemini-4-argon-medium\tGemini 4 Argon (Medium)
+gemini-4-argon-low\tGemini 4 Argon (Low)
+gemini-pro-orchestrator-neon\tOrchestrator (Neon)
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)
+",
+        );
+
+        assert_eq!(
+            resolve_model_effort_from_catalog(
+                "antigravity",
+                &models,
+                Some("gemini-pro-orchestrator-neon"),
+                Some("high"),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_model_effort_from_catalog(
+                "antigravity",
+                &models,
+                Some("gpt-oss-120b"),
+                Some("high"),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_model_effort_from_catalog(
+                "antigravity",
+                &models,
+                Some("gemini-4-argon"),
+                Some("xhigh"),
+            )
+            .as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            resolve_model_effort_from_catalog(
+                "antigravity",
+                &models,
+                Some("gemini-4-neon"),
+                Some("minimal"),
+            )
+            .as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            resolve_model_effort_from_catalog(
+                "antigravity",
+                &models,
+                Some("gemini-4-neon"),
+                Some("xhigh"),
+            )
+            .as_deref(),
+            Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn disk_model_cache_rejects_unversioned_legacy_entries_and_accepts_current_schema() {
+        let path = std::env::temp_dir().join(format!(
+            "kite-model-cache-schema-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let legacy = json!({
+            "antigravity|": {
+                "cachedAtUnixMs": now_unix_ms(),
+                "models": [
+                    {
+                        "id": "gemini-pro-orchestrator-neon",
+                        "supportsEffort": true,
+                        "effortLevels": ["minimal", "low", "medium", "high"]
+                    }
+                ]
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+        assert!(
+            load_provider_models_from_disk_at(&path, "antigravity|").is_none(),
+            "legacy unversioned disk cache entry must miss so poisoned effort tiers refresh"
+        );
+
+        let clean = parse_agy_models("gemini-pro-orchestrator-neon\tOrchestrator (Neon)\n");
+        save_provider_models_to_disk_at(&path, "antigravity|", &clean);
+        let loaded = load_provider_models_from_disk_at(&path, "antigravity|")
+            .expect("current schema version cache entry must load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].get("supportsEffort").and_then(Value::as_bool),
+            Some(false)
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn grok_text_list_has_no_invented_effort_until_the_catalog_says_so() {
         let raw = "Available models:\n  * grok-4.7 (default)\n  - grok-4.5\n";
         let mut models = parse_grok_models(raw);
@@ -480,4 +643,14 @@
         });
         assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(e["call"], json!(4));
+    }
+
+    #[test]
+    fn all_providers_default_to_and_accept_full_access_mode() {
+        for provider in ["antigravity", "claude", "codex", "cursor", "gemini", "grok", "opencode"] {
+            assert_eq!(default_mode(provider), "fullAccess", "{provider} should default to fullAccess");
+            assert!(mode_ok(provider, "fullAccess"), "{provider} should accept fullAccess");
+            assert!(mode_ok(provider, "acceptEdits"), "{provider} should accept acceptEdits");
+            assert!(mode_ok(provider, "readOnly"), "{provider} should accept readOnly");
+        }
     }

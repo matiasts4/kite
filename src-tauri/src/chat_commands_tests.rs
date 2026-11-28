@@ -540,7 +540,45 @@ fn list_all_subagent_runs_groups_active_first_and_excludes_archived() {
         }));
     }
 
-    let snap_all = subagents_ui::list_all_subagent_runs(Some(json!({ "limit": 500 })));
+    // Default session-scoped snapshot hides completed pre-session runs until activated/resumed,
+    // while keeping live/waiting runs and excluding archived parents.
+    let snap_session = subagents_ui::list_all_subagent_runs(Some(json!({ "limit": 500 })));
+    assert_eq!(snap_session["ok"], true);
+    assert!(
+        snap_session["historyCount"].as_u64().unwrap_or(0) >= 1,
+        "completed pre-session run should be counted in historyCount"
+    );
+    let session_runs = snap_session["runs"].as_array().expect("session runs array");
+    let session_matching: Vec<&Value> = session_runs
+        .iter()
+        .filter(|e| {
+            let tid = e.get("threadId").and_then(Value::as_str).unwrap_or("");
+            tid == parent_done || tid == parent_live || tid == parent_arch
+        })
+        .collect();
+    assert_eq!(session_matching.len(), 1, "only live session run expected by default");
+    assert_eq!(session_matching[0]["threadId"], parent_live);
+
+    // Explicitly activating/resuming a previous thread surfaces its runs in this session.
+    let snap_resumed = subagents_ui::list_all_subagent_runs(Some(json!({
+        "limit": 500,
+        "activeThreadIds": [&parent_done],
+    })));
+    let resumed_matching: Vec<&Value> = snap_resumed["runs"]
+        .as_array()
+        .expect("resumed runs array")
+        .iter()
+        .filter(|e| {
+            let tid = e.get("threadId").and_then(Value::as_str).unwrap_or("");
+            tid == parent_done || tid == parent_live || tid == parent_arch
+        })
+        .collect();
+    assert_eq!(resumed_matching.len(), 2);
+
+    let snap_all = subagents_ui::list_all_subagent_runs(Some(json!({
+        "limit": 500,
+        "includeHistory": true,
+    })));
     assert_eq!(snap_all["ok"], true);
     let runs = snap_all["runs"].as_array().expect("runs array");
     let matching: Vec<&Value> = runs
@@ -557,10 +595,27 @@ fn list_all_subagent_runs_groups_active_first_and_excludes_archived() {
     assert_eq!(matching[0]["run"]["items"].as_array().map(|a| a.len()), Some(0));
     assert_eq!(matching[1]["threadId"], parent_done);
 
-    let snap_ws_a = subagents_ui::list_all_subagent_runs(Some(json!({ "workspaceId": ws_a })));
+    let snap_ws_a = subagents_ui::list_all_subagent_runs(Some(json!({
+        "workspaceId": ws_a,
+        "includeHistory": true,
+    })));
     let ws_a_runs = snap_ws_a["runs"].as_array().expect("ws_a runs");
     assert_eq!(ws_a_runs.len(), 1);
     assert_eq!(ws_a_runs[0]["threadId"], parent_done);
+
+    // Turning a pre-session parent thread in the current session also promotes its runs without includeHistory.
+    {
+        let mut all = threads().lock().unwrap();
+        if let Some(done_thread) = all.iter_mut().find(|t| t.get("id").and_then(Value::as_str) == Some(parent_done.as_str())) {
+            let mut turn_item = crate::chat::chat_item("u-resume", "user", "Resume thread", false);
+            turn_item["createdAtUnixMs"] = json!(crate::chat::subagents::app_session_started_at_ms() + 10);
+            done_thread["items"] = json!([turn_item]);
+        }
+    }
+    let snap_after_turn = subagents_ui::list_all_subagent_runs(Some(json!({ "workspaceId": ws_a })));
+    let ws_a_resumed = snap_after_turn["runs"].as_array().expect("ws_a resumed runs");
+    assert_eq!(ws_a_resumed.len(), 1);
+    assert_eq!(ws_a_resumed[0]["threadId"], parent_done);
 }
 
 #[test]
@@ -662,4 +717,73 @@ fn create_agent_chat_preserves_workspace_id_and_overrides() {
     let tid2 = blank_ws.get("id").and_then(Value::as_str).unwrap().to_string();
     let _thread_cleanup2 = RemoveThread(tid2);
     assert!(blank_ws.get("workspaceId").is_none_or(Value::is_null));
+}
+
+#[test]
+fn load_agent_chat_thread_does_not_hijack_general_or_other_agent_threads() {
+    let general_tid = format!("general-thread-{}", uuid::Uuid::new_v4().simple());
+    let agent_a_tid = format!("agent-a-thread-{}", uuid::Uuid::new_v4().simple());
+    let _cleanup_general = RemoveThread(general_tid.clone());
+    let _cleanup_agent_a = RemoveThread(agent_a_tid.clone());
+    {
+        let mut all = crate::persist::threads().lock().unwrap();
+        all.push(blank_thread(&general_tid, None, "General Thread", "claude", None));
+        all.push(blank_thread(
+            &agent_a_tid,
+            Some("agent-a"),
+            "Agent A Thread",
+            "antigravity",
+            None,
+        ));
+    }
+
+    let rejected_general = threads_cmd::load_agent_chat_thread(Some(json!({
+        "request": {
+            "agentId": "ship-guard",
+            "threadId": general_tid
+        }
+    })));
+    assert_eq!(rejected_general, Value::Null);
+
+    let rejected_cross_agent = threads_cmd::load_agent_chat_thread(Some(json!({
+        "request": {
+            "agentId": "agent-b",
+            "threadId": agent_a_tid
+        }
+    })));
+    assert_eq!(rejected_cross_agent, Value::Null);
+
+    // Ensure load_thread directly also preserves original profileId on existing threads.
+    let direct_loaded = crate::chat::threads::load_thread(&general_tid, Some("ship-guard"), "Agent Chat");
+    assert!(direct_loaded.get("profileId").is_none_or(Value::is_null));
+
+    {
+        let all = crate::persist::threads().lock().unwrap();
+        let stored_general = all
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(general_tid.as_str()))
+            .expect("general thread must remain stored");
+        assert!(stored_general.get("profileId").is_none_or(Value::is_null));
+
+        let stored_agent_a = all
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(agent_a_tid.as_str()))
+            .expect("agent-a thread must remain stored");
+        assert_eq!(
+            stored_agent_a.get("profileId").and_then(Value::as_str),
+            Some("agent-a")
+        );
+    }
+
+    let owned_loaded = threads_cmd::load_agent_chat_thread(Some(json!({
+        "request": {
+            "agentId": "agent-a",
+            "threadId": agent_a_tid
+        }
+    })));
+    assert_eq!(owned_loaded.get("id").and_then(Value::as_str), Some(agent_a_tid.as_str()));
+    assert_eq!(
+        owned_loaded.get("profileId").and_then(Value::as_str),
+        Some("agent-a")
+    );
 }

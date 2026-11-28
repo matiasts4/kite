@@ -6,11 +6,13 @@
 //! deterministic [`ScriptedTransport`].
 
 mod eviction;
+mod governor;
 mod manager;
 mod scripted;
 mod types;
 
 pub use eviction::*;
+pub use governor::*;
 pub use manager::*;
 pub use scripted::*;
 pub use types::*;

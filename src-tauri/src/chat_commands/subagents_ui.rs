@@ -39,7 +39,35 @@ pub fn list_all_subagent_runs(request: Option<Value>) -> Value {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(120);
-    crate::chat::subagents::list_all_subagent_runs_snapshot(workspace_id, limit)
+    let include_history = req
+        .and_then(|r| r.get("includeHistory").or_else(|| r.get("include_history")))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let active_thread_ids: std::collections::HashSet<String> = req
+        .and_then(|r| r.get("activeThreadIds").or_else(|| r.get("active_thread_ids")))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::chat::subagents::list_all_subagent_runs_snapshot_with_options(
+        crate::chat::subagents::GlobalSubagentRunsOptions {
+            workspace_id,
+            limit,
+            include_history,
+            active_thread_ids: if active_thread_ids.is_empty() {
+                None
+            } else {
+                Some(&active_thread_ids)
+            },
+            session_started_at_ms: None,
+        },
+    )
 }
 
 pub fn get_thread_swarm_state(request: Option<Value>) -> Value {

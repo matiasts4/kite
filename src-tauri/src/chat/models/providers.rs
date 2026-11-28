@@ -13,6 +13,123 @@ pub fn provider_models(provider: &str, force_refresh: bool) -> Value {
     provider_models_for(provider, None, force_refresh)
 }
 
+/// Reads already-cached model rows (memory or disk cache) without spawning a CLI binary.
+pub fn cached_provider_models(provider: &str, connection_id: Option<&str>) -> Vec<Value> {
+    let Some(canon) = canonical_thread_provider_id(provider) else {
+        return Vec::new();
+    };
+    let read_key = |key: &str| -> Option<Vec<Value>> {
+        let from_mem = model_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| {
+                cache
+                    .get(key)
+                    .filter(|entry| !entry.models.is_empty())
+                    .map(|entry| entry.models.clone())
+            });
+        if from_mem.is_some() {
+            return from_mem;
+        }
+        if cfg!(test) {
+            return None;
+        }
+        load_provider_models_from_disk(key)
+    };
+    let primary_key = catalog_cache_key(canon, connection_id);
+    if let Some(models) = read_key(&primary_key) {
+        return models;
+    }
+    if connection_id.is_some() {
+        let fallback_key = catalog_cache_key(canon, None);
+        if let Some(models) = read_key(&fallback_key) {
+            return models;
+        }
+    }
+    Vec::new()
+}
+
+fn strip_effort_suffix(model: &str) -> &str {
+    for suffix in ["-xhigh", "-high", "-medium", "-low", "-max", "-minimal", "-ultra"] {
+        if let Some(base) = model.strip_suffix(suffix) {
+            if !base.is_empty() {
+                return base;
+            }
+        }
+    }
+    model
+}
+
+/// Reconciles `effort` against `models` for `(provider, model)`:
+/// - Returns `None` when the model row advertises `supportsEffort: false` or fewer than 2 levels.
+/// - Clamps out-of-range levels to the nearest advertised tier in `effortLevels`.
+/// - Falls back to deterministic CLI rules (e.g., Antigravity non-effort orchestrator models
+///   and `--effort minimal` normalization) when no catalog entry is available yet.
+pub fn resolve_model_effort_from_catalog(
+    provider: &str,
+    models: &[Value],
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    let trimmed_effort = effort.map(str::trim).filter(|s| !s.is_empty())?;
+    let canon = canonical_thread_provider_id(provider).unwrap_or(provider);
+    let trimmed_model = model.map(str::trim).filter(|s| !s.is_empty());
+
+    if let Some(m) = trimmed_model {
+        let base_model = strip_effort_suffix(m);
+        let matched = models.iter().find(|entry| {
+            entry
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.eq_ignore_ascii_case(m) || id.eq_ignore_ascii_case(base_model))
+        });
+
+        if let Some(entry) = matched {
+            let supports_effort = entry
+                .get("supportsEffort")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !supports_effort {
+                return None;
+            }
+            if let Some(levels) = entry.get("effortLevels").and_then(Value::as_array) {
+                let allowed: Vec<String> = levels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                if allowed.len() < 2 {
+                    return None;
+                }
+                let clamped = clamp_effort_to_levels(trimmed_effort, &allowed)?;
+                return if canon == "antigravity" {
+                    sanitize_antigravity_cli_effort(Some(m), Some(&clamped))
+                } else {
+                    Some(clamped)
+                };
+            }
+        }
+    }
+
+    if canon == "antigravity" {
+        return sanitize_antigravity_cli_effort(trimmed_model, Some(trimmed_effort));
+    }
+    Some(trimmed_effort.to_string())
+}
+
+/// Side-effect-free effort resolution backed by already-cached provider models.
+pub fn resolve_effective_effort_for_provider(
+    provider: &str,
+    connection_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    let models = cached_provider_models(provider, connection_id);
+    resolve_model_effort_from_catalog(provider, &models, model, effort)
+}
+
 /// Reads already-cached model IDs (memory or disk cache) without spawning a CLI binary.
 pub fn cached_provider_model_ids(provider: &str) -> Vec<String> {
     let Some(canon) = canonical_thread_provider_id(provider) else {
@@ -167,9 +284,9 @@ pub fn provider_ok(provider: &str) -> bool {
 
 pub fn mode_ok(provider: &str, mode: &str) -> bool {
     match provider {
-        "codex" => matches!(mode, "acceptEdits" | "readOnly"),
         "claude"
         | "claude-code"
+        | "codex"
         | "cursor"
         | "cursor-agent"
         | "grok"
@@ -184,12 +301,8 @@ pub fn mode_ok(provider: &str, mode: &str) -> bool {
     }
 }
 
-pub fn default_mode(provider: &str) -> &'static str {
-    if provider == "codex" {
-        "acceptEdits"
-    } else {
-        "fullAccess"
-    }
+pub fn default_mode(_provider: &str) -> &'static str {
+    "fullAccess"
 }
 
 pub fn normalize_model(model: Option<&Value>) -> Value {

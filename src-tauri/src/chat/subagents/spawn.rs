@@ -219,6 +219,7 @@ pub fn spawn_child_subagent_thread(
     child["mode"] = json!(resolved_mode);
     child["startedByAgent"] = json!(true);
     child["sideChat"] = json!(true);
+    child["ephemeral"] = json!(true);
     if let Some(ref pid) = params.parent_thread_id {
         child["parentThreadId"] = json!(pid);
     }
@@ -291,7 +292,9 @@ pub fn spawn_child_subagent_thread(
         "toolKind": "subagent",
         "title": title,
         "detail": params.task,
+        "text": "",
         "status": "running",
+        "createdAtUnixMs": now_ms(),
         "subagentMeta": {
             "subagentId": child_id,
             "role": params.role.unwrap_or_else(|| format!("Subagent ({provider})")),
@@ -366,27 +369,68 @@ pub(crate) fn find_reclaimable_unbound_subagent_call_id(
 ) -> Option<String> {
     let target_role = target_role.trim();
     let target_prompt = target_prompt.trim();
+
+    let is_eligible_unbound = |it: &&Value| -> bool {
+        let id = it.get("id").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty()
+            || id.starts_with("dispatch-subagent-")
+            || it.get("toolKind").and_then(Value::as_str) != Some("subagent")
+        {
+            return false;
+        }
+        if is_terminal_subagent_item(it) {
+            return false;
+        }
+        let has_cid = it
+            .pointer("/subagentMeta/childThreadId")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        !has_cid
+    };
+
+    if !target_prompt.is_empty() {
+        if let Some(id) = items
+            .iter()
+            .rev()
+            .filter(&is_eligible_unbound)
+            .find(|it| {
+                let it_prompt = it
+                    .pointer("/subagentMeta/prompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                it_prompt == target_prompt
+            })
+            .and_then(|it| it.get("id").and_then(Value::as_str).map(str::to_string))
+        {
+            return Some(id);
+        }
+    }
+
+    if !target_role.is_empty() {
+        if let Some(id) = items
+            .iter()
+            .rev()
+            .filter(&is_eligible_unbound)
+            .find(|it| {
+                let it_role = it
+                    .pointer("/subagentMeta/role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                it_role.eq_ignore_ascii_case(target_role)
+            })
+            .and_then(|it| it.get("id").and_then(Value::as_str).map(str::to_string))
+        {
+            return Some(id);
+        }
+    }
+
     items
         .iter()
         .rev()
+        .filter(&is_eligible_unbound)
         .find(|it| {
-            let id = it.get("id").and_then(Value::as_str).unwrap_or("");
-            if id.is_empty()
-                || id.starts_with("dispatch-subagent-")
-                || it.get("toolKind").and_then(Value::as_str) != Some("subagent")
-            {
-                return false;
-            }
-            if is_terminal_subagent_item(it) {
-                return false;
-            }
-            let has_cid = it
-                .pointer("/subagentMeta/childThreadId")
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty());
-            if has_cid {
-                return false;
-            }
             let it_role = it
                 .pointer("/subagentMeta/role")
                 .and_then(Value::as_str)
@@ -397,14 +441,71 @@ pub(crate) fn find_reclaimable_unbound_subagent_call_id(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim();
-            let is_live = matches!(
+            if !target_prompt.is_empty() && !it_prompt.is_empty() && it_prompt != target_prompt {
+                return false;
+            }
+            let role_is_specific = !it_role.is_empty()
+                && !it_role.eq_ignore_ascii_case("subagent")
+                && !it_role.starts_with("Subagent (");
+            if !target_role.is_empty()
+                && role_is_specific
+                && !it_role.eq_ignore_ascii_case(target_role)
+            {
+                return false;
+            }
+            matches!(
                 it.get("status").and_then(Value::as_str),
                 Some("running" | "inProgress" | "pending" | "in_progress")
-            );
-            (!target_prompt.is_empty() && it_prompt == target_prompt)
-                || (!target_role.is_empty() && it_role == target_role)
-                || is_live
+            )
         })
         .and_then(|it| it.get("id").and_then(Value::as_str).map(str::to_string))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::threads::remove_thread;
+
+    struct CleanupThread(String);
+
+    impl Drop for CleanupThread {
+        fn drop(&mut self) {
+            remove_thread(&self.0);
+        }
+    }
+
+    #[test]
+    fn spawned_child_subagent_thread_is_marked_ephemeral() {
+        let spawned = spawn_child_subagent_thread(ChildSubagentSpawnParams {
+            parent_thread_id: None,
+            provider: Some("antigravity".to_string()),
+            model: Some("gemini-3-flash".to_string()),
+            effort: None,
+            role: Some("Explorer".to_string()),
+            agent_id: None,
+            mode: None,
+            workspace_mode: "inherit".to_string(),
+            fallback_cwd: None,
+            task: "Check ephemeral flag".to_string(),
+        })
+        .expect("spawn child subagent thread");
+        let _cleanup = CleanupThread(spawned.child_thread_id.clone());
+
+        {
+            let all = threads().lock().unwrap();
+            let child = all
+                .iter()
+                .find(|t| {
+                    t.get("id").and_then(Value::as_str) == Some(spawned.child_thread_id.as_str())
+                })
+                .expect("child thread persisted");
+            assert_eq!(
+                child.get("startedByAgent").and_then(Value::as_bool),
+                Some(true)
+            );
+            assert_eq!(child.get("sideChat").and_then(Value::as_bool), Some(true));
+            assert_eq!(child.get("ephemeral").and_then(Value::as_bool), Some(true));
+        }
+    }
 }
 

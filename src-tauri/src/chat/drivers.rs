@@ -431,6 +431,32 @@ pub fn declaration(driver: &str) -> Option<DriverDeclaration> {
     Some(declared)
 }
 
+/// Returns the documented fail-closed reason why `codex app-server` is not
+/// enabled as a persistent session wire without verified user-turn frames.
+pub fn codex_app_server_gap_reason() -> &'static str {
+    CODEX_APP_SERVER_GAP
+}
+
+/// Returns the verified CLI stream-output and session-resume flags observed
+/// for drivers that support structured streaming and/or handle-based resume,
+/// without altering [`declaration`]'s persistent-wire capability matrix.
+pub fn verified_stream_resume_flags(driver: &str) -> Option<&'static [&'static str]> {
+    match driver {
+        "claude" => Some(&["--output-format", "stream-json", "--verbose", "--resume"]),
+        "gemini" => Some(&["--resume", "--output-format", "stream-json"]),
+        "cursor" => Some(&["--resume"]),
+        "codex" => Some(&["exec", "resume", "--json"]),
+        "antigravity" | "agy" => Some(&[
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--conversation",
+        ]),
+        _ => None,
+    }
+}
+
 fn unsupported(control: &str, driver: &str, detail: &str) -> (String, String) {
     (control.to_string(), format!("{driver}: {detail}"))
 }
@@ -689,5 +715,50 @@ mod tests {
                 "{driver} must explain the missing wire"
             );
         }
+    }
+
+    #[test]
+    fn codex_app_server_gap_reason_and_verified_stream_resume_flags_match_observed_cli() {
+        assert_eq!(codex_app_server_gap_reason(), CODEX_APP_SERVER_GAP);
+
+        assert_eq!(
+            verified_stream_resume_flags("claude"),
+            Some(&["--output-format", "stream-json", "--verbose", "--resume"][..])
+        );
+        assert_eq!(
+            verified_stream_resume_flags("gemini"),
+            Some(&["--resume", "--output-format", "stream-json"][..])
+        );
+        assert_eq!(
+            verified_stream_resume_flags("cursor"),
+            Some(&["--resume"][..])
+        );
+        assert_eq!(
+            verified_stream_resume_flags("codex"),
+            Some(&["exec", "resume", "--json"][..])
+        );
+        assert_eq!(
+            verified_stream_resume_flags("antigravity"),
+            Some(
+                &[
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--conversation"
+                ][..]
+            )
+        );
+        assert_eq!(
+            verified_stream_resume_flags("agy"),
+            verified_stream_resume_flags("antigravity")
+        );
+        assert_eq!(verified_stream_resume_flags("grok"), None);
+        assert_eq!(verified_stream_resume_flags("opencode"), None);
+        assert_eq!(verified_stream_resume_flags("not-a-driver"), None);
+
+        // `declaration(driver)` must keep its existing observed contract matrix untouched.
+        let codex = declaration("codex").expect("codex declaration");
+        assert_eq!(codex.wire, WireSupport::unsupported(CODEX_APP_SERVER_GAP));
     }
 }

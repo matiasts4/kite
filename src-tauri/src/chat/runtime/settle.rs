@@ -179,26 +179,34 @@ fn settle_in_flight_thread_work(
     if let Some(arr) = thread.get_mut("items").and_then(|v| v.as_array_mut()) {
         prune_quiet_turn_notes(arr);
         for it in arr.iter_mut() {
+            let is_subagent = it.get("toolKind").and_then(Value::as_str) == Some("subagent")
+                || it.get("subagentMeta").is_some();
+            if !waiting_for_permission && is_subagent {
+                let item_id = it.get("id").and_then(Value::as_str);
+                let meta_sid = it.pointer("/subagentMeta/subagentId").and_then(Value::as_str);
+                let it_cur = it.get("status").and_then(Value::as_str);
+                let meta_cur = it.pointer("/subagentMeta/status").and_then(Value::as_str);
+                let is_preserved_async = !settle_async_children
+                    && (meta_sid.is_some_and(|sid| subagents.preserved_async_child_ids.contains(sid))
+                        || item_id.is_some_and(|id| subagents.preserved_async_child_ids.contains(id))
+                        || (it
+                            .get("subagentMeta")
+                            .is_some_and(has_non_empty_child_thread_id)
+                            && (is_in_flight_status(it_cur)
+                                || is_non_terminal_subagent_status(meta_cur))));
+                if is_preserved_async {
+                    continue;
+                }
+            }
             if it.get("streaming").and_then(|v| v.as_bool()) == Some(true) {
                 it["streaming"] = json!(false);
             }
             if waiting_for_permission {
                 continue;
             }
-            let is_subagent = it.get("toolKind").and_then(Value::as_str) == Some("subagent")
-                || it.get("subagentMeta").is_some();
             if is_subagent {
                 let item_id = it.get("id").and_then(Value::as_str);
                 let meta_sid = it.pointer("/subagentMeta/subagentId").and_then(Value::as_str);
-                let is_preserved_async = !settle_async_children
-                    && (meta_sid.is_some_and(|sid| subagents.preserved_async_child_ids.contains(sid))
-                        || item_id.is_some_and(|id| subagents.preserved_async_child_ids.contains(id))
-                        || it
-                            .get("subagentMeta")
-                            .is_some_and(has_non_empty_child_thread_id));
-                if is_preserved_async {
-                    continue;
-                }
                 let it_cur = it.get("status").and_then(Value::as_str);
                 let meta_cur = it.pointer("/subagentMeta/status").and_then(Value::as_str);
                 if is_in_flight_status(it_cur)
@@ -250,10 +258,11 @@ fn settle_in_flight_thread_work(
 /// `settle_idle_work` is true, an idle/error thread still holding orphaned
 /// streaming items, non-terminal subagent runs, or `"working"` swarm workers).
 /// Returns `true` when any field changed so callers can persist safely.
-pub fn heal_orphaned_thread_with_options(
+pub fn heal_orphaned_thread_with_children(
     thread: &mut Value,
     stopped_by_user: bool,
     settle_idle_work: bool,
+    settle_async_children: bool,
 ) -> bool {
     let status_str = thread.get("status").and_then(Value::as_str);
     let waiting_for_permission = has_pending_approval_or_input(thread);
@@ -270,19 +279,27 @@ pub fn heal_orphaned_thread_with_options(
     } else if status_str != Some("error") {
         thread["status"] = json!("idle");
     }
-    if stopped_by_user && !waiting_for_permission {
+    if stopped_by_user && !waiting_for_permission && settle_async_children {
         thread["stoppedByBuilder"] = json!(true);
     }
 
     if !waiting_for_permission {
         settle_implementing_plan_slot(thread, "interrupted");
-        settle_in_flight_thread_work(thread, false, "stopped", "killed", true);
+        settle_in_flight_thread_work(thread, false, "stopped", "killed", settle_async_children);
     }
 
     if is_running || stopped_by_user {
         apply_derived_title_if_needed(thread, "generated", true);
     }
     true
+}
+
+pub fn heal_orphaned_thread_with_options(
+    thread: &mut Value,
+    stopped_by_user: bool,
+    settle_idle_work: bool,
+) -> bool {
+    heal_orphaned_thread_with_children(thread, stopped_by_user, settle_idle_work, true)
 }
 
 /// Idempotently settles a persisted thread left in `"running"` after an app
@@ -293,6 +310,16 @@ pub fn heal_orphaned_running_thread(thread: &mut Value, stopped_by_user: bool) -
 }
 
 pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
+    finish_run_with_options(run_id, ok, stopped, error_text, false);
+}
+
+pub fn finish_run_with_options(
+    run_id: &str,
+    ok: bool,
+    stopped: bool,
+    error_text: &str,
+    preserve_async_children: bool,
+) {
     chat_log(&format!("finish_run starting: run_id={}, ok={}, stopped={}", run_id, ok, stopped));
     if let Some((thread_id, assistant_id)) = {
         let live = live_turns().lock().unwrap();
@@ -309,6 +336,7 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
         flush_pipeline_deltas(&thread_id, run_id, &assistant_id);
         pipeline_runs().lock().unwrap().remove(run_id);
     }
+    super::pipeline::clear_pending_delta_flush(run_id);
     super::stream_json::clear_stream_run_state(run_id);
     let (thread_id, assistant_id, assistant_text, routine_id) = {
         let mut live = live_turns().lock().unwrap();
@@ -427,7 +455,7 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                 waiting_for_permission,
                 settled_tool_status,
                 settled_subagent_status,
-                stopped,
+                stopped && !preserve_async_children,
             );
             crate::chat::subagents::reconcile_duplicate_subagent_state(thread);
 
@@ -614,6 +642,36 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
 
     // The process already exited, but the person still has to answer. A settled
     // notice here would announce a finished turn, including a failure chime.
+    let mut resolved_waiting_notifs = false;
+    if !waiting_for_permission && !thread_id.is_empty() {
+        if let Ok(mut notifs) = notifications().lock() {
+            let resolution = if stopped { "abandoned" } else { "runSettled" };
+            for item in notifs.iter_mut() {
+                let is_waiting = item
+                    .get("isWaitingForInput")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !is_waiting {
+                    continue;
+                }
+                let matches_run = item
+                    .get("runId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|r| r == run_id);
+                let matches_thread = item
+                    .pointer("/target/id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t == thread_id);
+                if matches_run || matches_thread {
+                    item["isWaitingForInput"] = json!(false);
+                    item["resolution"] = json!(resolution);
+                    item["isRead"] = json!(true);
+                    resolved_waiting_notifs = true;
+                }
+            }
+        }
+    }
+
     if !waiting_for_permission {
         if let Some(routine_id) = routine_id.as_deref() {
             if !thread_id.is_empty() {
@@ -650,7 +708,15 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
                 } else {
                     let final_status = if ok || stopped { "idle" } else { "error" };
                     append_event(run, json!({ "kind": "status", "status": final_status }), true);
-                    append_event(run, json!({ "kind": "finished", "ok": ok && !stopped, "stoppedByBuilder": stopped }), true);
+                    append_event(
+                        run,
+                        json!({
+                            "kind": "finished",
+                            "ok": ok && !stopped,
+                            "stoppedByBuilder": stopped && !preserve_async_children
+                        }),
+                        true,
+                    );
                 }
                 run.finished = true;
                 run.finished_at_ms = Some(now_ms());
@@ -665,9 +731,19 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
         crate::chat::subagents::reconcile_antigravity_subagents_for_thread(&thread_id, None);
     }
     persist();
+    if resolved_waiting_notifs {
+        crate::notifications::emit_notifications_updated();
+    }
     if !thread_id.is_empty() {
         crate::chat::swarm::on_worker_turn_settled(&thread_id, ok && !stopped);
+        crate::chat::swarm::cleanup_settled_wait_channel(&thread_id);
         crate::dispatch_wire::on_thread_settled(&thread_id);
+        if !waiting_for_permission {
+            super::pipeline::clear_acp_approval_wire(&thread_id);
+            if let Ok(mut manager) = crate::chat::runtime::session_manager().lock() {
+                let _ = manager.reap_if_ephemeral(&thread_id);
+            }
+        }
     }
     if let Some(ctx) = exhausted_turn_ctx {
         handle_thread_quota_exhaustion_after_settle(&ctx);
@@ -678,6 +754,12 @@ pub fn finish_run(run_id: &str, ok: bool, stopped: bool, error_text: &str) {
 pub fn settle_routine(run_id: &str, thread_id: &str, routine_id: &str, profile_id: Option<&str>, ok: bool, stopped: bool) {
     if Uuid::parse_str(thread_id).is_err() || Uuid::parse_str(run_id).is_err() {
         return;
+    }
+    if ok && !stopped {
+        let assistant_text = crate::chat::subagents::extract_final_assistant_text(thread_id);
+        if crate::routines::is_heartbeat_ok(&assistant_text) {
+            return;
+        }
     }
     let outcome = if stopped {
         "cancelled"
@@ -692,23 +774,37 @@ pub fn settle_routine(run_id: &str, thread_id: &str, routine_id: &str, profile_i
     } else {
         Value::Null
     };
+    let meta = crate::notifications::resolve_notification_context(
+        Some(thread_id),
+        profile_id,
+        Some(routine_id),
+    );
+    let source = if profile.is_some() { "agentChat" } else { "codeThread" };
+    let module = if profile.is_some() { "agent" } else { "chat" };
     let notice = json!({
         "id": Uuid::new_v4().to_string(),
         "runId": run_id,
-        "target": { "source": "codeThread", "id": thread_id },
+        "target": { "source": source, "id": thread_id },
         "profileId": profile,
         "routineId": routine,
+        "actorName": meta.actor_name,
+        "threadTitle": meta.thread_title,
+        "workspaceId": meta.workspace_id,
+        "module": module,
         "kind": { "kind": "settled", "outcome": outcome },
         "resolution": "runSettled",
         "createdAtUnixMs": now_ms(),
         "isRead": false,
         "isWaitingForInput": false
     });
-    let mut items = notifications().lock().unwrap();
-    items.insert(0, notice);
-    if items.len() > 100 {
-        items.truncate(100);
+    {
+        let mut items = notifications().lock().unwrap();
+        items.insert(0, notice);
+        if items.len() > 100 {
+            items.truncate(100);
+        }
     }
+    crate::notifications::emit_notifications_updated();
 }
 
 fn is_subagent_child_thread(thread: &Value) -> bool {
@@ -768,24 +864,33 @@ pub fn settle_turn_notification(run_id: &str, thread_id: &str, profile_id: Optio
     } else {
         "failed"
     };
+    let meta = crate::notifications::resolve_notification_context(Some(thread_id), profile_id, None);
     let source = if profile_id.is_some() { "agentChat" } else { "codeThread" };
+    let module = if profile_id.is_some() { "agent" } else { "chat" };
     let notice = json!({
         "id": Uuid::new_v4().to_string(),
         "runId": run_id,
         "target": { "source": source, "id": thread_id },
         "profileId": profile_id,
         "routineId": Value::Null,
+        "actorName": meta.actor_name,
+        "threadTitle": meta.thread_title,
+        "workspaceId": meta.workspace_id,
+        "module": module,
         "kind": { "kind": "settled", "outcome": outcome },
         "resolution": "runSettled",
         "createdAtUnixMs": now_ms(),
         "isRead": false,
         "isWaitingForInput": false
     });
-    let mut items = notifications().lock().unwrap();
-    items.insert(0, notice);
-    if items.len() > 100 {
-        items.truncate(100);
+    {
+        let mut items = notifications().lock().unwrap();
+        items.insert(0, notice);
+        if items.len() > 100 {
+            items.truncate(100);
+        }
     }
+    crate::notifications::emit_notifications_updated();
 }
 
 pub(crate) fn canonical_handoff_provider(raw: Option<&str>) -> String {
@@ -1487,5 +1592,85 @@ mod tests {
             !super::super::stream_json::has_stream_run_state_for_test(&run_id),
             "finish_run must remove finished run_id from streaming_sys_msg_runs, last_agent_step_by_run, and fallback_projected_steps_by_run"
         );
+    }
+
+    #[test]
+    fn finish_run_resolves_lingering_waiting_approval_notifications_on_cancel_or_settle() {
+        let tid = Uuid::new_v4().to_string();
+        let run_id = Uuid::new_v4().to_string();
+        let notif_id = format!("req-{}", Uuid::new_v4().simple());
+
+        {
+            let mut list = threads().lock().unwrap();
+            let mut t = crate::chat::threads::blank_thread(&tid, None, "Test approval settle", "antigravity", None);
+            t["status"] = json!("running");
+            list.push(t);
+        }
+        {
+            let mut live = live_turns().lock().unwrap();
+            live.by_thread.insert(tid.clone(), run_id.clone());
+            live.runs.insert(
+                run_id.clone(),
+                super::super::state::TurnRun {
+                    revision: "rev-1".into(),
+                    assistant_id: "asst-1".into(),
+                    assistant_text: String::new(),
+                    events: Vec::new(),
+                    next_sequence: 0,
+                    delivered_through: 0,
+                    started_at_ms: now_ms(),
+                    finished_at_ms: None,
+                    closing: false,
+                    finished: false,
+                    child: None,
+                    stdin: None,
+                    routine_id: None,
+                    file_baselines: std::collections::HashMap::new(),
+                },
+            );
+        }
+        {
+            let mut notifs = notifications().lock().unwrap();
+            notifs.insert(
+                0,
+                json!({
+                    "id": notif_id,
+                    "runId": run_id,
+                    "target": { "source": "codeThread", "id": tid },
+                    "kind": { "kind": "needsInput", "requestKind": "toolApproval" },
+                    "resolution": Value::Null,
+                    "createdAtUnixMs": now_ms(),
+                    "isRead": false,
+                    "isWaitingForInput": true
+                }),
+            );
+        }
+
+        finish_run(&run_id, false, true, "");
+
+        let updated = {
+            let notifs = notifications().lock().unwrap();
+            notifs
+                .iter()
+                .find(|n| n.get("id").and_then(Value::as_str) == Some(notif_id.as_str()))
+                .cloned()
+                .expect("notification record still present")
+        };
+        assert_eq!(updated["isWaitingForInput"], json!(false));
+        assert_eq!(updated["isRead"], json!(true));
+        assert_eq!(updated["resolution"], json!("abandoned"));
+
+        // Clean up test fixtures
+        notifications().lock().unwrap().retain(|n| {
+            n.get("id").and_then(Value::as_str) != Some(notif_id.as_str())
+                && n.get("runId").and_then(Value::as_str) != Some(run_id.as_str())
+        });
+        threads()
+            .lock()
+            .unwrap()
+            .retain(|t| t.get("id").and_then(Value::as_str) != Some(tid.as_str()));
+        let mut live = live_turns().lock().unwrap();
+        live.by_thread.remove(&tid);
+        live.runs.remove(&run_id);
     }
 }

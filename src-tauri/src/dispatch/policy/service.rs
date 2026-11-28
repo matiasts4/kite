@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use super::types::*;
 use crate::dispatch::address::{canonical, is_alias_name, parse_address, AddrRef};
@@ -25,11 +25,16 @@ pub(crate) fn is_settled_child_state(state: PresenceState) -> bool {
     )
 }
 
+pub const MAX_POLICY_RECEIPTS: usize = 512;
+pub const MAX_STOPPED_ENDPOINTS: usize = 128;
+
 pub struct Service<P: Port> {
     pub(crate) endpoints: HashMap<String, Endpoint>,
     pub(crate) aliases: HashMap<String, String>,
     pub(crate) agents: HashMap<String, String>,
     pub(crate) receipts: HashMap<String, Receipt>,
+    pub(crate) receipt_order: VecDeque<String>,
+    pub(crate) stopped_endpoint_order: VecDeque<String>,
     pub(crate) inflight: HashMap<String, InflightMeta>,
     pub(crate) messaging_enabled: bool,
     pub(crate) read_only: bool,
@@ -45,6 +50,8 @@ impl<P: Port> Service<P> {
             aliases: HashMap::new(),
             agents: HashMap::new(),
             receipts: HashMap::new(),
+            receipt_order: VecDeque::new(),
+            stopped_endpoint_order: VecDeque::new(),
             inflight: HashMap::new(),
             messaging_enabled: true,
             read_only: false,
@@ -125,6 +132,7 @@ impl<P: Port> Service<P> {
             }
         });
         let alias = self.claim_alias(normalized_alias.as_deref(), &key)?;
+        self.stopped_endpoint_order.retain(|k| k != &key);
         self.endpoints.insert(
             key.clone(),
             Endpoint::new(family, id, alias, parent_key, outlive),
@@ -479,6 +487,27 @@ impl<P: Port> Service<P> {
         }
     }
 
+    pub fn restore_parent_notices_for_active_children(&mut self, parent_address: &str) {
+        let Ok(parent) = self.resolve(parent_address) else {
+            return;
+        };
+        let child_keys: Vec<String> = self
+            .endpoints
+            .iter()
+            .filter(|(_, ep)| {
+                ep.live
+                    && ep.parent.as_deref() == Some(parent.as_str())
+                    && !is_settled_child_state(endpoint_wait_state(ep))
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for child_key in child_keys {
+            if let Some(ep) = self.endpoints.get_mut(&child_key) {
+                ep.suppress_parent_notice = false;
+            }
+        }
+    }
+
     pub fn suppress_if_settled_child(&mut self, address: &str, reader: Option<&str>) {
         let Ok(key) = self.resolve(address) else {
             return;
@@ -618,6 +647,7 @@ impl<P: Port> Service<P> {
         }
         self.aliases.retain(|_, target| target != key);
         self.agents.retain(|_, target| target != key);
+        self.record_stopped_endpoint(key);
         self.port.stop(family, &id)?;
         Ok(())
     }
@@ -729,8 +759,92 @@ impl<P: Port> Service<P> {
         }
     }
 
+    pub(crate) fn record_stopped_endpoint(&mut self, key: &str) {
+        self.stopped_endpoint_order.retain(|k| k != key);
+        self.stopped_endpoint_order.push_back(key.to_string());
+        let stopped_count = self.endpoints.values().filter(|ep| !ep.live).count();
+        if stopped_count <= MAX_STOPPED_ENDPOINTS {
+            return;
+        }
+        let mut to_remove = stopped_count - MAX_STOPPED_ENDPOINTS;
+        while to_remove > 0 {
+            let Some(oldest_key) = self.stopped_endpoint_order.pop_front() else {
+                break;
+            };
+            if self.endpoints.get(&oldest_key).is_some_and(|ep| !ep.live) {
+                self.endpoints.remove(&oldest_key);
+                to_remove -= 1;
+            }
+        }
+        if to_remove > 0 {
+            let extra_keys: Vec<String> = self
+                .endpoints
+                .iter()
+                .filter(|(_, ep)| !ep.live)
+                .take(to_remove)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for extra in extra_keys {
+                self.endpoints.remove(&extra);
+            }
+        }
+    }
+
     pub(crate) fn finish(&mut self, receipt: Receipt) -> Receipt {
+        if !self.receipts.contains_key(&receipt.id) {
+            self.receipt_order.push_back(receipt.id.clone());
+        }
         self.receipts.insert(receipt.id.clone(), receipt.clone());
+        while self.receipts.len() > MAX_POLICY_RECEIPTS {
+            let Some(oldest_id) = self.receipt_order.pop_front() else {
+                break;
+            };
+            if oldest_id != receipt.id {
+                self.receipts.remove(&oldest_id);
+            }
+        }
         receipt
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dispatch::port::FakePort;
+
+    #[test]
+    fn service_caps_receipts_fifo_at_max_policy_receipts() {
+        let mut svc = Service::new(FakePort::default());
+        for i in 0..(MAX_POLICY_RECEIPTS + 20) {
+            let id = format!("rcpt-{i}");
+            let r = Receipt::new(&id, "send", ReceiptStatus::Settled, "thread:t1", false, None, None);
+            svc.finish(r);
+        }
+        assert_eq!(svc.receipts.len(), MAX_POLICY_RECEIPTS);
+        assert!(svc.receipt("rcpt-0").is_none());
+        assert!(svc.receipt("rcpt-19").is_none());
+        assert!(svc.receipt("rcpt-20").is_some());
+        assert!(svc.receipt(&format!("rcpt-{}", MAX_POLICY_RECEIPTS + 19)).is_some());
+    }
+
+    #[test]
+    fn service_prunes_stopped_endpoints_beyond_cap_while_preserving_live_endpoints() {
+        let mut svc = Service::new(FakePort::default());
+        for i in 0..8 {
+            svc.attach(Family::Thread, &format!("live-{i}"), None, None, false)
+                .unwrap();
+        }
+        for i in 0..(MAX_STOPPED_ENDPOINTS + 15) {
+            let id = format!("dead-{i}");
+            svc.attach(Family::Thread, &id, None, None, false).unwrap();
+            svc.stop(&format!("thread:{id}")).unwrap();
+        }
+        let live_count = svc.endpoints.values().filter(|ep| ep.live).count();
+        let stopped_count = svc.endpoints.values().filter(|ep| !ep.live).count();
+        assert_eq!(live_count, 8);
+        assert_eq!(stopped_count, MAX_STOPPED_ENDPOINTS);
+        assert!(!svc.endpoints.contains_key("thread:dead-0"));
+        assert!(!svc.endpoints.contains_key("thread:dead-14"));
+        assert!(svc.endpoints.contains_key(&format!("thread:dead-{}", MAX_STOPPED_ENDPOINTS + 14)));
     }
 }

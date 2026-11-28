@@ -22,4 +22,6 @@ pub use types::*;
 pub use worktree::*;
 
 #[cfg(test)]
+mod payload_slimming_tests;
+#[cfg(test)]
 mod tests;

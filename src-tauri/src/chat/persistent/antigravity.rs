@@ -76,9 +76,12 @@ pub fn antigravity_args(
         }
     }
     if declared.accepts_effort {
-        if let Some(effort) = controls.effort.as_deref().map(str::trim).filter(|effort| !effort.is_empty()) {
+        if let Some(effort) = crate::chat::models::sanitize_antigravity_cli_effort(
+            controls.model.as_deref(),
+            controls.effort.as_deref(),
+        ) {
             args.push("--effort".to_string());
-            args.push(effort.to_string());
+            args.push(effort);
         }
     }
 
@@ -275,6 +278,12 @@ fn error_detail(value: &Value) -> String {
         .filter_map(|pointer| value.pointer(pointer))
         .find_map(|detail| detail.as_str().map(str::to_string))
         .unwrap_or_else(|| "no detail was reported".to_string())
+}
+
+/// Whether Antigravity persistent sessions route through the shared multiplexed
+/// `agy acp --stdio` daemon pool. Defaults ON unless `KITE_AGY_ACP_MUX=0`.
+pub fn use_shared_acp_mux() -> bool {
+    std::env::var("KITE_AGY_ACP_MUX").ok().as_deref() != Some("0")
 }
 
 /// Resolves the observed launcher. A missing binary is a hard error: the caller

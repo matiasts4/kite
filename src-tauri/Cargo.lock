@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "kite-code"
-version = "0.1.79"
+version = "0.1.96"
 dependencies = [
  "base64 0.22.1",
  "cpal",
@@ -2294,6 +2294,7 @@ dependencies = [
  "futures-util",
  "kite-ctx",
  "portable-pty",
+ "regex",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",
@@ -2310,12 +2311,13 @@ dependencies = [
  "tokio-tungstenite",
  "uuid",
  "vt100",
+ "webview2-com",
  "windows 0.62.2",
 ]
 
 [[package]]
 name = "kite-ctx"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "hex",
  "regex",

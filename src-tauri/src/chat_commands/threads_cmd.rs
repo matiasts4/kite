@@ -85,6 +85,23 @@ pub fn create_agent_chat(request: Option<Value>) -> Value {
         if !agent.default_provider_options.is_empty() {
             thread["providerOptions"] = json!(agent.default_provider_options);
         }
+        let current_effort = crate::chat::normalize::hydrated_effort(&thread);
+        let reconciled_effort = crate::chat::models::resolve_effective_effort_for_provider(
+            &initial_provider,
+            None,
+            thread.get("model").and_then(|v| v.as_str()),
+            current_effort.as_deref(),
+        );
+        if reconciled_effort != current_effort {
+            thread["providerOptions"] = crate::chat::normalize::effort_option(
+                &thread["providerOptions"],
+                reconciled_effort.as_deref(),
+            );
+            thread["effort"] = match reconciled_effort {
+                Some(ref val) => json!(val),
+                None => Value::Null,
+            };
+        }
         crate::chat::replace_thread(&thread);
     }
 
@@ -123,14 +140,25 @@ pub fn load_chat_thread(request: Option<Value>) -> Value {
         .and_then(|r| r.get("threadId"))
         .and_then(|v| v.as_str())
         .unwrap_or("11111111-1111-4111-8111-111111111111");
-    load_thread(thread_id, None, "Chat Thread")
+    crate::chat::subagents::project_thread_for_ipc(load_thread(thread_id, None, "Chat Thread"))
 }
 
 pub fn load_agent_chat_thread(request: Option<Value>) -> Value {
     let req = body(&request);
     let agent_id = req.and_then(|r| r.get("agentId")).and_then(|v| v.as_str()).unwrap_or("c3333333-3333-4333-8333-333333333333");
     let thread_id = req.and_then(|r| r.get("threadId")).and_then(|v| v.as_str()).unwrap_or("11111111-1111-4111-8111-111111111111");
-    load_thread(thread_id, Some(agent_id), "Agent Chat Thread")
+    {
+        let items = crate::persist::threads().lock().unwrap();
+        if let Some(existing) = items
+            .iter()
+            .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
+        {
+            if existing.get("profileId").and_then(|v| v.as_str()) != Some(agent_id) {
+                return Value::Null;
+            }
+        }
+    }
+    crate::chat::subagents::project_thread_for_ipc(load_thread(thread_id, Some(agent_id), "Agent Chat Thread"))
 }
 
 /// Reopens a thread from its durable event log without starting a provider.
@@ -375,6 +403,7 @@ pub(super) fn request_thread_id(request: &Option<Value>) -> Option<String> {
 }
 
 pub(super) fn archive_thread(thread_id: &str) {
+    let _ = crate::persist::hydrate_thread(thread_id);
     let mut items = threads().lock().unwrap();
     let Some(thread) = items
         .iter_mut()
@@ -390,6 +419,7 @@ pub(super) fn archive_thread(thread_id: &str) {
 }
 
 pub(super) fn clear_archived(thread_id: &str) {
+    let _ = crate::persist::hydrate_thread(thread_id);
     let mut items = threads().lock().unwrap();
     let Some(thread) = items
         .iter_mut()
@@ -565,12 +595,19 @@ mod tests {
         let input_child_tid = format!("child-input-{}", Uuid::new_v4().simple());
         let top_tid = format!("top-{}", Uuid::new_v4().simple());
 
+        let agent_side_tid = format!("agent-side-{}", Uuid::new_v4().simple());
+        let agent_settled_child_tid = format!("agent-child-idle-{}", Uuid::new_v4().simple());
+        let agent_active_child_tid = format!("agent-child-run-{}", Uuid::new_v4().simple());
+        let agent_input_child_tid = format!("agent-child-input-{}", Uuid::new_v4().simple());
+        let agent_top_tid = format!("agent-top-{}", Uuid::new_v4().simple());
+
         {
             let mut all = threads().lock().unwrap();
+            // General Threads (no profileId) belong exclusively in Threads history.
             all.push(json!({
                 "id": side_tid,
                 "title": "Side Chat",
-                "profileId": agent_id,
+                "profileId": Value::Null,
                 "provider": "grok",
                 "status": "running",
                 "sideChat": true,
@@ -580,7 +617,7 @@ mod tests {
             all.push(json!({
                 "id": settled_child_tid,
                 "title": "Settled Subagent",
-                "profileId": agent_id,
+                "profileId": Value::Null,
                 "provider": "grok",
                 "status": "idle",
                 "sideChat": true,
@@ -591,7 +628,7 @@ mod tests {
             all.push(json!({
                 "id": active_child_tid,
                 "title": "Active Subagent",
-                "profileId": agent_id,
+                "profileId": Value::Null,
                 "provider": "grok",
                 "status": "running",
                 "sideChat": true,
@@ -602,7 +639,7 @@ mod tests {
             all.push(json!({
                 "id": input_child_tid,
                 "title": "Input Child",
-                "profileId": agent_id,
+                "profileId": Value::Null,
                 "provider": "codex",
                 "status": "idle",
                 "sideChat": true,
@@ -614,10 +651,64 @@ mod tests {
             all.push(json!({
                 "id": top_tid,
                 "title": "Top Thread",
-                "profileId": agent_id,
+                "profileId": Value::Null,
                 "provider": "antigravity",
                 "status": "idle",
                 "updatedAtUnixMs": 400
+            }));
+
+            // Agent chats (non-empty profileId) belong exclusively in that Agent's chat list.
+            all.push(json!({
+                "id": agent_side_tid,
+                "title": "Agent Side Chat",
+                "profileId": agent_id,
+                "provider": "grok",
+                "status": "running",
+                "sideChat": true,
+                "startedByAgent": false,
+                "updatedAtUnixMs": 110
+            }));
+            all.push(json!({
+                "id": agent_settled_child_tid,
+                "title": "Agent Settled Subagent",
+                "profileId": agent_id,
+                "provider": "grok",
+                "status": "idle",
+                "sideChat": true,
+                "startedByAgent": true,
+                "parentThreadId": agent_top_tid,
+                "updatedAtUnixMs": 210
+            }));
+            all.push(json!({
+                "id": agent_active_child_tid,
+                "title": "Agent Active Subagent",
+                "profileId": agent_id,
+                "provider": "grok",
+                "status": "running",
+                "sideChat": true,
+                "startedByAgent": true,
+                "parentThreadId": agent_top_tid,
+                "updatedAtUnixMs": 310
+            }));
+            all.push(json!({
+                "id": agent_input_child_tid,
+                "title": "Agent Input Child",
+                "profileId": agent_id,
+                "provider": "codex",
+                "status": "idle",
+                "sideChat": true,
+                "startedByAgent": false,
+                "parentThreadId": agent_top_tid,
+                "pendingUserInput": { "requestId": "req-2", "questions": [] },
+                "updatedAtUnixMs": 360
+            }));
+            all.push(json!({
+                "id": agent_top_tid,
+                "title": "Agent Top Thread",
+                "profileId": agent_id,
+                "provider": "antigravity",
+                "status": "idle",
+                "updatedAtUnixMs": 410
             }));
         }
 
@@ -633,6 +724,9 @@ mod tests {
         assert!(top_ids.contains(&active_child_tid.as_str()), "ids={top_ids:?}");
         assert!(top_ids.contains(&input_child_tid.as_str()), "ids={top_ids:?}");
         assert!(top_ids.contains(&top_tid.as_str()), "ids={top_ids:?}");
+        assert!(!top_ids.contains(&agent_top_tid.as_str()), "agent chats must never appear in Threads");
+        assert!(!top_ids.contains(&agent_active_child_tid.as_str()), "agent child chats must never appear in Threads");
+        assert!(!top_ids.contains(&agent_input_child_tid.as_str()), "agent input chats must never appear in Threads");
 
         let agent_res = list_agent_chat_summaries(Some(json!({ "agentId": agent_id })));
         let agent_ids: Vec<&str> = agent_res["summaries"]
@@ -641,19 +735,28 @@ mod tests {
             .iter()
             .filter_map(|s| s.get("id").and_then(Value::as_str))
             .collect();
-        assert!(!agent_ids.contains(&side_tid.as_str()), "ids={agent_ids:?}");
-        assert!(!agent_ids.contains(&settled_child_tid.as_str()), "ids={agent_ids:?}");
-        assert!(!agent_ids.contains(&active_child_tid.as_str()), "ids={agent_ids:?}");
-        assert!(!agent_ids.contains(&input_child_tid.as_str()), "ids={agent_ids:?}");
-        assert!(agent_ids.contains(&top_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&agent_side_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&agent_settled_child_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&agent_active_child_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&agent_input_child_tid.as_str()), "ids={agent_ids:?}");
+        assert!(agent_ids.contains(&agent_top_tid.as_str()), "ids={agent_ids:?}");
+        assert!(!agent_ids.contains(&top_tid.as_str()), "Threads must never appear in Agent chat summaries");
 
         threads().lock().unwrap().retain(|t| {
             let id = t.get("id").and_then(Value::as_str).unwrap_or("");
-            id != side_tid
-                && id != settled_child_tid
-                && id != active_child_tid
-                && id != input_child_tid
-                && id != top_tid
+            ![
+                side_tid.as_str(),
+                settled_child_tid.as_str(),
+                active_child_tid.as_str(),
+                input_child_tid.as_str(),
+                top_tid.as_str(),
+                agent_side_tid.as_str(),
+                agent_settled_child_tid.as_str(),
+                agent_active_child_tid.as_str(),
+                agent_input_child_tid.as_str(),
+                agent_top_tid.as_str(),
+            ]
+            .contains(&id)
         });
     }
 

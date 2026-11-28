@@ -241,6 +241,7 @@ pub struct SessionEvent {
 pub enum ApprovalDecision {
     AllowOnce,
     AllowForSession,
+    AlwaysAllow,
     Deny,
     DenyAndStop,
 }
@@ -250,6 +251,7 @@ impl ApprovalDecision {
         match self {
             ApprovalDecision::AllowOnce => "allowOnce",
             ApprovalDecision::AllowForSession => "allowForSession",
+            ApprovalDecision::AlwaysAllow => "alwaysAllow",
             ApprovalDecision::Deny => "deny",
             ApprovalDecision::DenyAndStop => "denyAndStop",
         }

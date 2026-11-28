@@ -134,6 +134,10 @@ pub fn tool_definitions() -> Vec<Value> {
                     "override_stack": {
                         "type": "boolean",
                         "description": "Allow an explicit user-requested provider/model outside the curated stack under 'ask' policy."
+                    },
+                    "parent_thread_id": {
+                        "type": "string",
+                        "description": "Optional parent thread ID or 'thread:<id>' override."
                     }
                 }
             }
@@ -306,13 +310,13 @@ pub fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "kite_thread",
-            "description": "List, search, or read paged items from Kite threads without blowing context.",
+            "description": "List, search, read, or launch top-level Kite threads without blowing context.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "search", "read"],
+                        "enum": ["list", "search", "read", "launch"],
                         "description": "Thread service operation."
                     },
                     "query": {
@@ -323,9 +327,49 @@ pub fn tool_definitions() -> Vec<Value> {
                         "type": "string",
                         "description": "Target thread ID (for action='read')."
                     },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional title for the launched thread (for action='launch')."
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Initial prompt to kick off the launched thread (required for action='launch')."
+                    },
                     "workspace_id": {
                         "type": "string",
-                        "description": "Optional workspace ID filter (for list/search)."
+                        "description": "Optional workspace ID or directory path (for list/search/launch)."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "Optional target thread provider (for action='launch')."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Optional target model ID (for action='launch')."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Optional permission mode (for action='launch')."
+                    },
+                    "effort": {
+                        "type": "string",
+                        "description": "Optional reasoning effort level (for action='launch')."
+                    },
+                    "worktree": {
+                        "type": "boolean",
+                        "description": "Provision an isolated git worktree branch (for action='launch')."
+                    },
+                    "odd_path": {
+                        "type": "string",
+                        "description": "Optional ODD specification path to link on the launched thread (for action='launch')."
+                    },
+                    "open": {
+                        "type": "boolean",
+                        "description": "Open and focus the launched thread in the UI (for action='launch')."
+                    },
+                    "orchestrate": {
+                        "type": "boolean",
+                        "description": "Prepend orchestrator kickoff framing referencing odd_path and subagent/swarm tools (for action='launch')."
                     },
                     "agent_id": {
                         "type": "string",
@@ -488,8 +532,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "limit": { "type": "integer", "description": "Maximum results for list." },
                     "odd_path": { "type": "string", "description": "Linked ODD specification path." },
                     "source_agent": { "type": "string", "description": "Originating agent id or name." },
-                    "source_thread_id": { "type": "string", "description": "Originating thread identifier." },
-                    "approved": { "type": "boolean", "description": "Explicit user approval when tool policy is 'ask'." }
+                    "source_thread_id": { "type": "string", "description": "Originating thread identifier." }
                 },
                 "required": ["action"]
             }
@@ -515,8 +558,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "full": { "type": "boolean", "description": "Return full content for share_get." },
                     "hash": { "type": "string", "description": "CCR artifact hash for ccr_retrieve." },
                     "lines": { "type": "string", "description": "Line range N-M for ccr_retrieve." },
-                    "search": { "type": "string", "description": "Filter term for ccr_retrieve." },
-                    "approved": { "type": "boolean", "description": "Explicit user approval when tool policy is 'ask'." }
+                    "search": { "type": "string", "description": "Filter term for ccr_retrieve." }
                 },
                 "required": ["action"]
             }
@@ -533,8 +575,66 @@ pub fn tool_definitions() -> Vec<Value> {
                     },
                     "path": { "type": "string", "description": "Target file path for file_diff." },
                     "workspace_id": { "type": "string", "description": "Optional workspace identifier." },
-                    "staged": { "type": "boolean", "description": "Inspect staged index diff instead of working tree." },
-                    "approved": { "type": "boolean", "description": "Explicit user approval when tool policy is 'ask'." }
+                    "staged": { "type": "boolean", "description": "Inspect staged index diff instead of working tree." }
+                },
+                "required": ["action"]
+            }
+        }),
+        json!({
+            "name": "kite_browser",
+            "description": "Control Kite's embedded RightDock browser via native in-process CDP with kite-ctx semantic AX diffs, batched actions, deterministic replay recipes, and console/network diagnostics.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "discover",
+                            "tabs",
+                            "open",
+                            "close",
+                            "snapshot",
+                            "act",
+                            "batch",
+                            "replay",
+                            "save_recipe",
+                            "console",
+                            "network",
+                            "errors",
+                            "screenshot",
+                            "eval",
+                            "takeover",
+                            "resume"
+                        ],
+                        "description": "Browser operation. Prefer discover -> open -> snapshot(mode='auto') -> batch -> errors; use screenshot only for visual checks."
+                    },
+                    "url": { "type": "string", "description": "Target URL (for action='open')." },
+                    "surface_id": { "type": "string", "description": "Target browser tab/surface ID." },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["auto", "diff", "full", "stub"],
+                        "description": "AX snapshot compression mode (default: 'auto' for semantic diff/stub reuse)."
+                    },
+                    "fresh": { "type": "boolean", "description": "Bypass snapshot cache and emit a fresh full AX snapshot." },
+                    "step": {
+                        "type": "object",
+                        "description": "Single action step for action='act' ({ op: click|fill|type|press|hover|scroll|select|wait_for|assert_text|assert_url|assert_no_errors, ref?, selector?, value?, text?, key? })."
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": { "type": "object" },
+                        "description": "Ordered multi-step action and assertion sequence for action='batch' or 'save_recipe'."
+                    },
+                    "intent": { "type": "string", "description": "Recipe intent key (for action='replay' or 'save_recipe')." },
+                    "params": { "type": "object", "description": "Parameter bindings for action='replay'." },
+                    "script": { "type": "string", "description": "JavaScript expression (for action='eval', subject to browser policy)." },
+                    "background": { "type": "boolean", "default": true, "description": "Keep tab in background without stealing user focus (for action='open')." },
+                    "isolated": { "type": "boolean", "default": false, "description": "Use an isolated ephemeral browser profile (for action='open')." },
+                    "format": { "type": "string", "enum": ["jpeg", "png"], "description": "Screenshot encoding format (default: 'jpeg')." },
+                    "width": { "type": "integer", "description": "Viewport emulation width in CSS pixels." },
+                    "height": { "type": "integer", "description": "Viewport emulation height in CSS pixels." },
+                    "workspace_id": { "type": "string", "description": "Optional workspace identifier." },
+                    "include_snapshot": { "type": "boolean", "default": true, "description": "Include a compressed post-action AX diff snapshot (default: true)." }
                 },
                 "required": ["action"]
             }
@@ -585,6 +685,15 @@ fn normalize_policy_mode(raw: &str) -> Option<&'static str> {
     }
 }
 
+fn normalize_policy_family_key(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "threads" => "thread".to_string(),
+        "routines" => "routine".to_string(),
+        "teammates" => "teammate".to_string(),
+        other => other.to_string(),
+    }
+}
+
 fn parse_tool_policies_env(raw: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let trimmed = raw.trim();
@@ -594,7 +703,10 @@ fn parse_tool_policies_env(raw: &str) -> std::collections::HashMap<String, Strin
     if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
         for (k, v) in obj {
             if let Some(mode) = v.as_str().and_then(normalize_policy_mode) {
-                map.insert(k.trim().to_ascii_lowercase(), mode.to_string());
+                let key = normalize_policy_family_key(&k);
+                if !key.is_empty() {
+                    map.insert(key, mode.to_string());
+                }
             }
         }
         return map;
@@ -604,7 +716,7 @@ fn parse_tool_policies_env(raw: &str) -> std::collections::HashMap<String, Strin
             continue;
         };
         if let Some(mode) = normalize_policy_mode(v) {
-            let key = k.trim().to_ascii_lowercase();
+            let key = normalize_policy_family_key(k);
             if !key.is_empty() {
                 map.insert(key, mode.to_string());
             }
@@ -712,10 +824,11 @@ impl ToolPermissions {
             "kite_tasks" => "tasks",
             "kite_ctx" => "ctx",
             "kite_diff" => "diff",
+            "kite_browser" => "browser",
             "kite_memory" => "memory",
-            "kite_thread" => "threads",
-            "kite_routine" => "routines",
-            "kite_teammate" => "teammates",
+            "kite_thread" => "thread",
+            "kite_routine" => "routine",
+            "kite_teammate" => "teammate",
             "kite_subagent_run"
             | "kite_subagent_send"
             | "kite_subagent_wait"
@@ -731,10 +844,21 @@ impl ToolPermissions {
             return mode.as_str();
         }
         let family = Self::tool_family_for_name(tool_name);
-        self.tool_policies
-            .get(family)
-            .map(String::as_str)
-            .unwrap_or("allow")
+        if let Some(mode) = self.tool_policies.get(family) {
+            return mode.as_str();
+        }
+        let legacy_alias = match family {
+            "thread" => Some("threads"),
+            "routine" => Some("routines"),
+            "teammate" => Some("teammates"),
+            _ => None,
+        };
+        if let Some(alias) = legacy_alias {
+            if let Some(mode) = self.tool_policies.get(alias) {
+                return mode.as_str();
+            }
+        }
+        "allow"
     }
 
     pub fn is_plugin_disabled(&self, plugin: &str) -> bool {
@@ -786,6 +910,9 @@ impl ToolPermissions {
             }
             "kite_ctx" => self.is_plugin_disabled("ctx") || self.is_plugin_disabled("kite-ctx"),
             "kite_diff" => self.is_plugin_disabled("diff") || self.is_plugin_disabled("kite-diff"),
+            "kite_browser" => {
+                self.is_plugin_disabled("browser") || self.is_plugin_disabled("kite-browser")
+            }
             _ => false,
         };
         if pack_disabled {
@@ -848,22 +975,6 @@ impl ToolPermissions {
 
     pub fn check_call_permissions(&self, tool_name: &str, args: &Value) -> Result<(), String> {
         self.is_tool_allowed(tool_name)?;
-        if self.policy_for_tool(tool_name).eq_ignore_ascii_case("ask") {
-            let arg_approved = args
-                .get("approved")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let family = Self::tool_family_for_name(tool_name);
-            let preapproved = self
-                .approved_tools
-                .iter()
-                .any(|t| t.eq_ignore_ascii_case(tool_name) || t.eq_ignore_ascii_case(family));
-            if !arg_approved && !preapproved {
-                return Err(format!(
-                    "Approval required: tool '{tool_name}' (family '{family}') has policy 'ask'. Re-run with approved=true after user confirmation."
-                ));
-            }
-        }
         if matches!(tool_name, "kite_ctx" | "kite_diff") {
             if let Some(path) = args.get("path").and_then(Value::as_str) {
                 self.validate_path_against_places(path)?;
@@ -871,6 +982,76 @@ impl ToolPermissions {
         }
         Ok(())
     }
+}
+
+fn default_audit_db_path() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    Some(super::roaming_app_dir().join("kite.sqlite"))
+}
+
+pub(crate) fn record_mcp_policy_denial_at(
+    db_path: &std::path::Path,
+    perms: &ToolPermissions,
+    tool_name: &str,
+    reason: &str,
+) {
+    if !db_path.is_file() {
+        return;
+    }
+    let Ok(conn) = rusqlite::Connection::open(db_path) else {
+        return;
+    };
+    let _ = conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_audit_log (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            thread_id TEXT,
+            tool_name TEXT NOT NULL,
+            tool_family TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            reason TEXT,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            skill_event TEXT,
+            created_at_unix_ms INTEGER NOT NULL
+        );",
+    );
+    let agent_id = perms
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("anonymous");
+    let thread_id = std::env::var("KITE_ADDRESS")
+        .ok()
+        .map(|s| {
+            let trimmed = s.trim();
+            trimmed.strip_prefix("thread:").unwrap_or(trimmed).to_string()
+        })
+        .filter(|s| !s.is_empty());
+    let family = ToolPermissions::tool_family_for_name(tool_name);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let bounded_reason: String = reason.chars().take(500).collect();
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO agent_audit_log (
+            id, agent_id, thread_id, tool_name, tool_family,
+            verdict, reason, duration_ms, skill_event, created_at_unix_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'denied', ?6, 0, NULL, ?7)",
+        rusqlite::params![
+            uuid::Uuid::new_v4().to_string(),
+            agent_id,
+            thread_id,
+            tool_name,
+            family,
+            bounded_reason,
+            now_ms,
+        ],
+    );
 }
 
 /// Return the MCP tool catalog filtered by caller [`ToolPermissions`].
@@ -913,6 +1094,17 @@ fn extract_text_from_cli_output(raw: &str) -> String {
         }
     }
     trimmed.to_string()
+}
+
+fn extract_timeout_address(raw: &str) -> Option<String> {
+    let val = serde_json::from_str::<Value>(raw.trim()).ok()?;
+    let receipt = val.get("receipt").unwrap_or(&val);
+    let addr = receipt
+        .get("address")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some(normalize_thread_target(addr))
 }
 
 fn is_timeout_output(raw: &str) -> bool {
@@ -999,6 +1191,20 @@ pub fn build_subagent_run_argv(args: &Value) -> Result<Vec<String>, String> {
     {
         argv.push("--workspace".to_string());
         argv.push(normalize_workspace_arg(workspace).to_string());
+    }
+    if let Some(parent_raw) = args
+        .get("parent_thread_id")
+        .or_else(|| args.get("parentThreadId"))
+        .or_else(|| args.get("from_thread"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let normalized = normalize_thread_target(parent_raw);
+        if !normalized.is_empty() {
+            argv.push("--parent".to_string());
+            argv.push(normalized);
+        }
     }
     if args
         .get("override_stack")
@@ -1163,13 +1369,42 @@ pub fn call_tool_with_permissions<'a>(
     perms: &ToolPermissions,
     runner: &'a dyn Fn(&[String]) -> (i32, String),
 ) -> Value {
+    let default_db = default_audit_db_path();
+    call_tool_with_permissions_at(name, args, perms, default_db.as_deref(), runner)
+}
+
+pub(crate) fn call_tool_with_permissions_at<'a>(
+    name: &str,
+    args: &Value,
+    perms: &ToolPermissions,
+    audit_db_path: Option<&std::path::Path>,
+    runner: &'a dyn Fn(&[String]) -> (i32, String),
+) -> Value {
     if let Err(reason) = perms.check_call_permissions(name, args) {
+        if let Some(db_path) = audit_db_path {
+            record_mcp_policy_denial_at(db_path, perms, name, &reason);
+        }
         return tool_result(reason, true);
     }
     match name {
         "kite_subagent_run" => match build_subagent_run_argv(args) {
             Ok(argv) => {
+                let wait = args.get("wait").and_then(Value::as_bool).unwrap_or(true);
+                let timeout_ms = bounded_mcp_timeout_ms(args);
                 let (code, output) = runner(&argv);
+                if wait && code != 0 && is_timeout_output(&output) {
+                    let msg = if let Some(addr) = extract_timeout_address(&output) {
+                        let child_id = addr.strip_prefix("thread:").unwrap_or(&addr);
+                        format!(
+                            "Subagent {addr} is still running after {timeout_ms}ms wait slice.\nCall `kite_subagent_wait` with targets=[\"{addr}\"] to continue waiting rather than polling `kite_subagent_read`.\n\n[subagent_id: thread:{child_id}]"
+                        )
+                    } else {
+                        format!(
+                            "Subagent is still running after {timeout_ms}ms wait slice.\nCall `kite_subagent_wait` with children=\"all\" to continue waiting."
+                        )
+                    };
+                    return tool_result(msg, false);
+                }
                 tool_result(extract_text_from_cli_output(&output), code != 0)
             }
             Err(err) => tool_result(err, true),
@@ -1723,8 +1958,56 @@ pub fn call_tool_with_permissions<'a>(
                     let (code, out) = runner(&argv);
                     tool_result(extract_text_from_cli_output(&out), code != 0)
                 }
+                "launch" => {
+                    let prompt = args.get("prompt").and_then(Value::as_str).map(str::trim).unwrap_or("");
+                    if prompt.is_empty() {
+                        return tool_result("kite_thread action='launch' requires non-empty 'prompt'.", true);
+                    }
+                    argv.push("launch".to_string());
+                    argv.push("--prompt".to_string());
+                    argv.push(prompt.to_string());
+                    if let Some(title) = args.get("title").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--title".to_string());
+                        argv.push(title.to_string());
+                    }
+                    if let Some(ws) = args.get("workspace_id").or_else(|| args.get("workspaceId")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--workspace-id".to_string());
+                        argv.push(ws.to_string());
+                    }
+                    if let Some(provider) = args.get("provider").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--provider".to_string());
+                        argv.push(provider.to_string());
+                    }
+                    if let Some(model) = args.get("model").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--model".to_string());
+                        argv.push(model.to_string());
+                    }
+                    if let Some(mode) = args.get("mode").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--mode".to_string());
+                        argv.push(mode.to_string());
+                    }
+                    if let Some(effort) = args.get("effort").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--effort".to_string());
+                        argv.push(effort.to_string());
+                    }
+                    if args.get("worktree").and_then(Value::as_bool) == Some(true) {
+                        argv.push("--worktree".to_string());
+                    }
+                    if let Some(odd_path) = args.get("odd_path").or_else(|| args.get("oddPath")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                        argv.push("--odd-path".to_string());
+                        argv.push(odd_path.to_string());
+                    }
+                    if args.get("open").and_then(Value::as_bool) == Some(true) {
+                        argv.push("--open".to_string());
+                    }
+                    if args.get("orchestrate").and_then(Value::as_bool) == Some(true) {
+                        argv.push("--orchestrate".to_string());
+                    }
+                    let (code, out) = runner(&argv);
+                    tool_result(extract_text_from_cli_output(&out), code != 0)
+                }
                 other => tool_result(
-                    format!("Unknown kite_thread action '{other}'. Expected: list, search, read."),
+                    format!("Unknown kite_thread action '{other}'. Expected: list, search, read, launch."),
                     true,
                 ),
             }
@@ -1968,7 +2251,6 @@ pub fn call_tool_with_permissions<'a>(
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .unwrap_or("");
-            let approved = args.get("approved").and_then(Value::as_bool) == Some(true);
             let mut argv = vec![
                 "kite".to_string(),
                 "dispatch".to_string(),
@@ -2087,9 +2369,6 @@ pub fn call_tool_with_permissions<'a>(
                     );
                 }
             }
-            if approved {
-                argv.push("--approved".to_string());
-            }
             let (code, output) = runner(&argv);
             tool_result(extract_text_from_cli_output(&output), code != 0)
         }
@@ -2099,7 +2378,6 @@ pub fn call_tool_with_permissions<'a>(
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .unwrap_or("");
-            let approved = args.get("approved").and_then(Value::as_bool) == Some(true);
             let mut argv = vec![
                 "kite".to_string(),
                 "dispatch".to_string(),
@@ -2198,9 +2476,6 @@ pub fn call_tool_with_permissions<'a>(
                     );
                 }
             }
-            if approved {
-                argv.push("--approved".to_string());
-            }
             let (code, output) = runner(&argv);
             tool_result(extract_text_from_cli_output(&output), code != 0)
         }
@@ -2210,7 +2485,6 @@ pub fn call_tool_with_permissions<'a>(
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .unwrap_or("");
-            let approved = args.get("approved").and_then(Value::as_bool) == Some(true);
             let mut argv = vec![
                 "kite".to_string(),
                 "dispatch".to_string(),
@@ -2247,11 +2521,87 @@ pub fn call_tool_with_permissions<'a>(
                     );
                 }
             }
-            if approved {
-                argv.push("--approved".to_string());
-            }
             let (code, output) = runner(&argv);
             tool_result(extract_text_from_cli_output(&output), code != 0)
+        }
+        "kite_browser" => {
+            let action = args
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            const VALID_ACTIONS: &[&str] = &[
+                "discover",
+                "tabs",
+                "open",
+                "close",
+                "snapshot",
+                "act",
+                "batch",
+                "replay",
+                "save_recipe",
+                "console",
+                "network",
+                "errors",
+                "screenshot",
+                "eval",
+                "takeover",
+                "resume",
+            ];
+            if !VALID_ACTIONS.contains(&action.as_str()) {
+                return tool_result(
+                    format!(
+                        "Unknown kite_browser action '{action}'. Expected one of: {}.",
+                        VALID_ACTIONS.join(", ")
+                    ),
+                    true,
+                );
+            }
+            let payload_str = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+            let argv = vec![
+                "kite".to_string(),
+                "dispatch".to_string(),
+                "agent".to_string(),
+                "browser".to_string(),
+                action.clone(),
+                "--payload".to_string(),
+                payload_str,
+            ];
+            let (code, output) = runner(&argv);
+            let extracted = extract_text_from_cli_output(&output);
+            if code == 0 && action == "screenshot" {
+                if let Ok(mut parsed) = serde_json::from_str::<Value>(&extracted) {
+                    let dedup = parsed
+                        .get("deduplicated")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let b64 = parsed
+                        .get("dataBase64")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let mime = parsed
+                        .get("mimeType")
+                        .and_then(Value::as_str)
+                        .unwrap_or("image/jpeg")
+                        .to_string();
+                    if !dedup {
+                        if let Some(data) = b64.filter(|s| !s.is_empty()) {
+                            if let Some(obj) = parsed.as_object_mut() {
+                                obj.remove("dataBase64");
+                            }
+                            return json!({
+                                "content": [
+                                    { "type": "text", "text": parsed.to_string() },
+                                    { "type": "image", "data": data, "mimeType": mime }
+                                ],
+                                "isError": false
+                            });
+                        }
+                    }
+                }
+            }
+            tool_result(extracted, code != 0)
         }
         other => tool_result(format!("Unknown tool '{other}'."), true),
     }
@@ -2424,13 +2774,17 @@ pub fn serve_mcp_stdio<R: BufRead, W: Write>(
     Ok(())
 }
 
+/// Default CLI runner bridging MCP tool calls through `cli_wire::execute_cli_captured`.
+pub fn default_cli_runner(argv: &[String]) -> (i32, String) {
+    super::execute_cli_captured(argv, None)
+}
+
 pub fn run_mcp_cli(_args: &[String]) -> i32 {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = stdout.lock();
-    let runner = |argv: &[String]| super::execute_cli_captured(argv, None);
-    match serve_mcp_stdio(&mut reader, &mut writer, &runner) {
+    match serve_mcp_stdio(&mut reader, &mut writer, &default_cli_runner) {
         Ok(()) => 0,
         Err(_) => 1,
     }
@@ -2452,7 +2806,7 @@ mod tests {
         });
         let resp = handle_jsonrpc_message(&req, &|_| (0, String::new())).expect("response");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 12);
+        assert_eq!(tools.len(), 13);
         let names: Vec<&str> = tools
             .iter()
             .filter_map(|t| t.get("name").and_then(Value::as_str))
@@ -2472,6 +2826,7 @@ mod tests {
                 "kite_tasks",
                 "kite_ctx",
                 "kite_diff",
+                "kite_browser",
             ]
         );
         for tool in tools {
@@ -3005,27 +3360,14 @@ mod tests {
             .unwrap()
             .contains("deny"));
 
-        // `ask` rejects until approved=true
-        let task_unapproved = call_tool_with_permissions(
-            "kite_tasks",
-            &json!({ "action": "list", "state": "Todo" }),
-            &perms,
-            &runner,
-        );
-        assert_eq!(task_unapproved["isError"], true);
-        assert!(task_unapproved["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Approval required"));
-        assert!(called.borrow().is_empty());
-
-        let task_approved = call_tool_with_permissions(
+        // `ask` keeps kite_tasks visible and forwards to wire server without self-bypass `--approved`
+        let task_ask_forward = call_tool_with_permissions(
             "kite_tasks",
             &json!({ "action": "create", "title": "QA follow-up", "approved": true }),
             &perms,
             &runner,
         );
-        assert_eq!(task_approved["isError"], false);
+        assert_eq!(task_ask_forward["isError"], false);
         assert_eq!(
             called.borrow()[0],
             vec![
@@ -3036,7 +3378,6 @@ mod tests {
                 "create",
                 "--title",
                 "QA follow-up",
-                "--approved"
             ]
         );
 
@@ -3076,5 +3417,272 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&authorized);
+    }
+
+    #[test]
+    fn thread_launch_schema_argv_singular_policy_alignment_and_local_denial_audit() {
+        // 1. Verify schemas: kite_thread includes launch + flags, tasks/ctx/diff do not expose `approved`
+        let defs = tool_definitions();
+        let thread_tool = defs.iter().find(|t| t["name"] == "kite_thread").unwrap();
+        let actions = thread_tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(actions.iter().any(|v| v == "launch"));
+        for prop in [
+            "title",
+            "prompt",
+            "workspace_id",
+            "provider",
+            "model",
+            "mode",
+            "effort",
+            "worktree",
+            "odd_path",
+            "open",
+            "orchestrate",
+        ] {
+            assert!(
+                thread_tool["inputSchema"]["properties"].get(prop).is_some(),
+                "kite_thread schema missing `{prop}`"
+            );
+        }
+        for name in ["kite_tasks", "kite_ctx", "kite_diff"] {
+            let tool = defs.iter().find(|t| t["name"] == name).unwrap();
+            assert!(
+                tool["inputSchema"]["properties"].get("approved").is_none(),
+                "{name} schema must not expose LLM self-bypass `approved` field"
+            );
+        }
+
+        // 2. Verify singular tool families and plural alias normalization
+        assert_eq!(ToolPermissions::tool_family_for_name("kite_thread"), "thread");
+        assert_eq!(ToolPermissions::tool_family_for_name("kite_routine"), "routine");
+        assert_eq!(ToolPermissions::tool_family_for_name("kite_teammate"), "teammate");
+        assert_eq!(ToolPermissions::tool_family_for_name("kite_memory"), "memory");
+        let normalized_policies = parse_tool_policies_env("threads=deny,routines=ask,teammates=allow");
+        assert_eq!(normalized_policies.get("thread").map(String::as_str), Some("deny"));
+        assert_eq!(normalized_policies.get("routine").map(String::as_str), Some("ask"));
+        assert_eq!(normalized_policies.get("teammate").map(String::as_str), Some("allow"));
+
+        // 3. Verify kite_thread action='launch' argv mapping
+        let called: RefCell<Vec<Vec<String>>> = RefCell::new(Vec::new());
+        let runner = |argv: &[String]| -> (i32, String) {
+            called.borrow_mut().push(argv.to_vec());
+            (0, r#"{"schema":"kite.thread-launch/v1","threadId":"t-1"}"#.to_string())
+        };
+        let launch_res = call_tool_with(
+            "kite_thread",
+            &json!({
+                "action": "launch",
+                "title": "Build V3",
+                "prompt": "Execute ODD",
+                "workspace_id": "ws-1",
+                "provider": "antigravity",
+                "model": "gemini-4-argon",
+                "mode": "fullAccess",
+                "effort": "high",
+                "worktree": true,
+                "odd_path": "odd/tasks/v3.md",
+                "open": true,
+                "orchestrate": true
+            }),
+            &runner,
+        );
+        assert_eq!(launch_res["isError"], false);
+        assert_eq!(
+            called.borrow()[0],
+            vec![
+                "kite",
+                "dispatch",
+                "agent",
+                "thread",
+                "launch",
+                "--prompt",
+                "Execute ODD",
+                "--title",
+                "Build V3",
+                "--workspace-id",
+                "ws-1",
+                "--provider",
+                "antigravity",
+                "--model",
+                "gemini-4-argon",
+                "--mode",
+                "fullAccess",
+                "--effort",
+                "high",
+                "--worktree",
+                "--odd-path",
+                "odd/tasks/v3.md",
+                "--open",
+                "--orchestrate",
+            ]
+        );
+
+        // 4. Local MCP policy denial logs to agent_audit_log when DB exists and silently skips when missing
+        let missing_db = std::env::temp_dir().join(format!(
+            "kite-mcp-missing-{}.sqlite",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let deny_perms = ToolPermissions {
+            agent_id: Some("agent-mcp-deny".to_string()),
+            tool_policies: normalized_policies,
+            ..ToolPermissions::default()
+        };
+        let denied_no_db = call_tool_with_permissions_at(
+            "kite_thread",
+            &json!({ "action": "list" }),
+            &deny_perms,
+            Some(&missing_db),
+            &runner,
+        );
+        assert_eq!(denied_no_db["isError"], true);
+        assert!(!missing_db.exists());
+
+        let audit_db = std::env::temp_dir().join(format!(
+            "kite-mcp-audit-{}.sqlite",
+            uuid::Uuid::new_v4().simple()
+        ));
+        {
+            let conn = rusqlite::Connection::open(&audit_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE agent_audit_log (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    tool_name TEXT NOT NULL,
+                    tool_family TEXT NOT NULL,
+                    verdict TEXT NOT NULL,
+                    reason TEXT,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    skill_event TEXT,
+                    created_at_unix_ms INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+        let denied_with_db = call_tool_with_permissions_at(
+            "kite_thread",
+            &json!({ "action": "list" }),
+            &deny_perms,
+            Some(&audit_db),
+            &runner,
+        );
+        assert_eq!(denied_with_db["isError"], true);
+        {
+            let conn = rusqlite::Connection::open(&audit_db).unwrap();
+            let (agent_id, tool_name, tool_family, verdict): (String, String, String, String) = conn
+                .query_row(
+                    "SELECT agent_id, tool_name, tool_family, verdict FROM agent_audit_log LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!(agent_id, "agent-mcp-deny");
+            assert_eq!(tool_name, "kite_thread");
+            assert_eq!(tool_family, "thread");
+            assert_eq!(verdict, "denied");
+        }
+        let _ = std::fs::remove_file(&audit_db);
+    }
+
+    #[test]
+    fn kite_subagent_run_wait_timeout_returns_non_error_still_running_with_subagent_id() {
+        let timeout_json = json!({
+            "schemaVersion": 1,
+            "id": "cli",
+            "op": "wait",
+            "status": "failed",
+            "address": "thread:child-timeout-42",
+            "submitted": false,
+            "error": "timeout"
+        })
+        .to_string();
+        let captured_argv: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let runner = |argv: &[String]| -> (i32, String) {
+            *captured_argv.borrow_mut() = argv.to_vec();
+            (1, timeout_json.clone())
+        };
+        let res = call_tool_with(
+            "kite_subagent_run",
+            &json!({
+                "role": "Deep Auditor",
+                "task": "Audit architecture",
+                "wait": true,
+                "timeout_ms": 120000,
+                "parent_thread_id": "parent-99"
+            }),
+            &runner,
+        );
+        assert_eq!(
+            res["isError"], false,
+            "wait slice timeout on kite_subagent_run must not fail the MCP tool call: {res:?}"
+        );
+        let text = res["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("[subagent_id: thread:child-timeout-42]"),
+            "response must keep subagent_id anchor: {text}"
+        );
+        assert!(
+            text.contains("still running after 120000ms wait slice"),
+            "response must guide orchestrator to continue waiting: {text}"
+        );
+        let argv = captured_argv.borrow();
+        let parent_pos = argv.iter().position(|a| a == "--parent");
+        assert_eq!(
+            parent_pos.and_then(|i| argv.get(i + 1)).map(String::as_str),
+            Some("thread:parent-99")
+        );
+    }
+
+    #[test]
+    fn kite_browser_tool_definition_routes_actions_and_formats_screenshots() {
+        let defs = tool_definitions();
+        let browser_def = defs
+            .iter()
+            .find(|d| d.get("name").and_then(Value::as_str) == Some("kite_browser"))
+            .expect("kite_browser tool must be registered in tools/list");
+        let actions = browser_def["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .expect("kite_browser action enum");
+        assert!(actions.iter().any(|v| v.as_str() == Some("discover")));
+        assert!(actions.iter().any(|v| v.as_str() == Some("batch")));
+        assert!(actions.iter().any(|v| v.as_str() == Some("replay")));
+
+        // Verify disabled plugin gating
+        let mut perms = ToolPermissions::default();
+        perms.disabled_plugins.push("kite-browser".to_string());
+        assert!(perms.is_tool_allowed("kite_browser").is_err());
+
+        // Verify screenshot response emits native MCP image block when not deduplicated
+        let captured_argv: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let runner = |argv: &[String]| -> (i32, String) {
+            *captured_argv.borrow_mut() = argv.to_vec();
+            (
+                0,
+                json!({
+                    "ok": true,
+                    "action": "screenshot",
+                    "surfaceId": "tab-1",
+                    "mimeType": "image/jpeg",
+                    "sha256": "deadbeef",
+                    "deduplicated": false,
+                    "dataBase64": "AAAA"
+                })
+                .to_string(),
+            )
+        };
+        let res = call_tool_with(
+            "kite_browser",
+            &json!({ "action": "screenshot", "surface_id": "tab-1" }),
+            &runner,
+        );
+        assert_eq!(res["isError"], false);
+        assert_eq!(res["content"].as_array().unwrap().len(), 2);
+        assert_eq!(res["content"][1]["type"], "image");
+        assert_eq!(res["content"][1]["data"], "AAAA");
+        assert_eq!(res["content"][1]["mimeType"], "image/jpeg");
+        assert_eq!(captured_argv.borrow()[3], "browser");
+        assert_eq!(captured_argv.borrow()[4], "screenshot");
     }
 }

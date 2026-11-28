@@ -97,6 +97,7 @@ pub fn recover_thread_with_snapshot(
 }
 
 pub fn stored_thread_snapshot(thread_id: &str) -> Option<Value> {
+    let _ = crate::persist::hydrate_thread(thread_id);
     crate::persist::threads()
         .lock()
         .ok()?

@@ -19,7 +19,8 @@ use crate::chat::threads::{blank_thread, chat_item, touch, upsert_item};
 use crate::chat::utils::now_ms;
 use crate::persist::{persist, threads, workspace_path};
 
-pub fn emit_subagent_event(payload: Value) {
+pub fn emit_subagent_event(mut payload: Value) {
+    slim_run_update_payload(&mut payload);
     if let Some(app) = crate::get_app_handle() {
         use tauri::Emitter;
         let _ = app.emit("chat-subagent-event", payload);
@@ -44,13 +45,91 @@ pub fn emit_swarm_event(thread_id: &str, state: &SwarmState) {
 }
 
 
+/// Run updates only carry run metadata for runs whose step transcript lives in a child
+/// thread or transcript file; the renderer hydrates steps from `subagentStepsUpdated`
+/// deltas or `get_thread_subagent_detail`.
+fn slim_run_update_payload(payload: &mut Value) {
+    if payload.get("kind").and_then(Value::as_str) != Some("subagentRunUpdated") {
+        return;
+    }
+    if let Some(run) = payload.get_mut("run") {
+        strip_external_run_items(run);
+    }
+}
+
+type StepFingerprints = std::collections::HashMap<String, std::collections::HashMap<String, u64>>;
+
+#[cfg(test)]
+pub(super) fn emit_slim_for_test(payload: &mut Value) {
+    slim_run_update_payload(payload);
+}
+
+const STEP_FINGERPRINT_MAX_RUNS: usize = 128;
+
+fn step_fingerprints() -> &'static Mutex<StepFingerprints> {
+    static CELL: OnceLock<Mutex<StepFingerprints>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(StepFingerprints::new()))
+}
+
+fn step_item_fingerprint(item: &Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    item.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Returns only the step items that are new or changed since the previous emission for
+/// this run, so each progress event stops re-serializing the whole accumulated transcript.
+/// Settled runs drop their fingerprints so the cache stays bounded.
+pub(super) fn delta_step_items(
+    thread_id: &str,
+    subagent_id: &str,
+    items: &[Value],
+    settled: bool,
+) -> Vec<Value> {
+    let key = format!("{thread_id}:{subagent_id}");
+    let mut cache = step_fingerprints().lock().unwrap();
+    if cache.len() >= STEP_FINGERPRINT_MAX_RUNS && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    let seen = cache.entry(key.clone()).or_default();
+    let mut delta = Vec::new();
+    for (idx, item) in items.iter().enumerate() {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("#{idx}"));
+        let fingerprint = step_item_fingerprint(item);
+        if seen.get(&id) != Some(&fingerprint) {
+            seen.insert(id, fingerprint);
+            delta.push(item.clone());
+        }
+    }
+    if settled {
+        cache.remove(&key);
+    }
+    delta
+}
+
 pub(super) fn emit_subagent_steps_event(thread_id: &str, subagent_id: &str, run: &Value) {
+    let settled = matches!(
+        run.get("status").and_then(Value::as_str),
+        Some("completed" | "failed" | "killed")
+    );
+    let all_items: &[Value] = run
+        .get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let delta = delta_step_items(thread_id, subagent_id, all_items, settled);
     emit_subagent_event(json!({
         "kind": "subagentStepsUpdated",
         "threadId": thread_id,
         "subagentId": subagent_id,
         "childThreadId": run.get("childThreadId").cloned().unwrap_or(Value::Null),
-        "items": run.get("items").cloned().unwrap_or_else(|| json!([])),
+        "items": delta,
+        "itemsDelta": true,
         "stepCount": run.get("stepCount").cloned().unwrap_or_else(|| json!(0)),
         "latestActivity": run.get("latestActivity").cloned().unwrap_or(Value::Null),
         "status": run.get("status").cloned().unwrap_or_else(|| json!("running")),

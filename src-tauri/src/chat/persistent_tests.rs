@@ -74,6 +74,43 @@
     }
 
     #[test]
+    fn antigravity_args_omits_effort_for_non_effort_models_and_normalizes_minimal() {
+        let declared = declaration("antigravity").expect("antigravity declaration");
+
+        for model in [
+            "gemini-pro-orchestrator-neon",
+            "gemini-pro-orchestrator",
+            "gemini-pro-orchestrator-argon",
+            "gpt-oss-120b",
+            "gpt-oss-120b-medium",
+        ] {
+            let args = antigravity_args(
+                &declared,
+                &controls(Some(model), Some("high"), Some("fullAccess")),
+                None,
+            );
+            assert!(
+                args.windows(2).any(|pair| pair == ["--model", model]),
+                "{model} must keep --model"
+            );
+            assert!(
+                !args.iter().any(|arg| arg == "--effort"),
+                "{model} must omit --effort, got: {args:?}"
+            );
+        }
+
+        let normalized = antigravity_args(
+            &declared,
+            &controls(Some("gemini-4-neon"), Some("minimal"), Some("fullAccess")),
+            None,
+        );
+        assert!(
+            normalized.windows(2).any(|pair| pair == ["--effort", "low"]),
+            "minimal must normalize to low for agy CLI, got: {normalized:?}"
+        );
+    }
+
+    #[test]
     fn declared_work_modes_map_to_the_observed_mode_flag() {
         let declared = declaration("antigravity").expect("antigravity declaration");
 

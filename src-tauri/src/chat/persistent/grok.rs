@@ -23,7 +23,20 @@ use super::controls::{
     GROK_DRIVER, GROK_HANDSHAKE_TIMEOUT, PersistentControls,
 };
 
-fn rpc_line(id: u64, method: &str, params: Value) -> String {
+/// Environment variable gating the shared `grok agent stdio` ACP multiplexer pool.
+pub const KITE_GROK_ACP_MUX_ENV: &str = "KITE_GROK_ACP_MUX";
+
+/// Shared Grok ACP multiplexing is enabled by default unless `KITE_GROK_ACP_MUX` is `"0"`.
+pub(crate) fn use_shared_grok_mux_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) != Some("0")
+}
+
+/// Returns whether the shared `grok agent stdio` ACP multiplexer pool should be used.
+pub fn use_shared_grok_mux() -> bool {
+    use_shared_grok_mux_from(std::env::var(KITE_GROK_ACP_MUX_ENV).ok().as_deref())
+}
+
+pub(super) fn rpc_line(id: u64, method: &str, params: Value) -> String {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -149,14 +162,14 @@ fn rpc_request_id(value: &Value) -> Option<String> {
 }
 
 
-fn json_id(value: &Value) -> Option<u64> {
+pub(super) fn json_id(value: &Value) -> Option<u64> {
     value.get("id").and_then(|id| {
         id.as_u64()
             .or_else(|| id.as_str().and_then(|text| text.parse().ok()))
     })
 }
 
-fn session_id_of(value: &Value) -> Option<String> {
+pub(super) fn session_id_of(value: &Value) -> Option<String> {
     ["/result/sessionId", "/params/sessionId"]
         .iter()
         .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
@@ -165,7 +178,7 @@ fn session_id_of(value: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn rpc_error_text(value: &Value) -> String {
+pub(super) fn rpc_error_text(value: &Value) -> String {
     value
         .get("error")
         .and_then(|error| {
@@ -688,6 +701,9 @@ impl SessionTransport for GrokSession {
         if self.eof.load(Ordering::SeqCst) {
             return Err("the grok session ended before the message was written".to_string());
         }
+        if let Ok(mut queue) = self.events.lock() {
+            queue.clear();
+        }
         if let Ok(mut id) = self.prompt_id.lock() {
             *id = Some(prompt_line_id);
         }
@@ -832,17 +848,19 @@ fn read_grok_stdout(
                         ready.notify_all();
                     }
                 }
-                if let Ok(mut queue) = events.lock() {
-                    for event in parsed.events {
-                        if matches!(
-                            event,
-                            TransportEvent::TurnEnded | TransportEvent::TurnFailed(_)
-                        ) {
-                            if let Ok(mut id) = prompt_id.lock() {
-                                *id = None;
+                if current.is_some() {
+                    if let Ok(mut queue) = events.lock() {
+                        for event in parsed.events {
+                            if matches!(
+                                event,
+                                TransportEvent::TurnEnded | TransportEvent::TurnFailed(_)
+                            ) {
+                                if let Ok(mut id) = prompt_id.lock() {
+                                    *id = None;
+                                }
                             }
+                            push_bounded(&mut queue, event);
                         }
-                        push_bounded(&mut queue, event);
                     }
                 }
             }
@@ -851,4 +869,153 @@ fn read_grok_stdout(
     }
     eof.store(true, Ordering::SeqCst);
     ready.notify_all();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_grok_mux_defaults_true_and_disables_on_zero() {
+        assert!(use_shared_grok_mux_from(None));
+        assert!(use_shared_grok_mux_from(Some("")));
+        assert!(use_shared_grok_mux_from(Some("1")));
+        assert!(use_shared_grok_mux_from(Some("true")));
+        assert!(!use_shared_grok_mux_from(Some("0")));
+        assert!(!use_shared_grok_mux_from(Some(" 0 ")));
+    }
+
+    #[test]
+    fn unprompted_session_load_replay_and_trailing_chunks_are_ignored_in_stdout_reader() {
+        use std::io::Cursor;
+
+        let replay_stream = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "grok-s-1",
+                    "update": {
+                        "sessionUpdate": "user_message_chunk",
+                        "content": { "text": "Prior prompt" }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "grok-s-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "text": "Prior reply M1" }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "grok-s-1",
+                    "update": {
+                        "sessionUpdate": "agent_thought_chunk",
+                        "content": { "text": "Prior thought" }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": { "sessionId": "grok-s-1" }
+            })
+            .to_string(),
+        ]
+        .join("\n")
+            + "\n";
+
+        let events = Arc::new(Mutex::new(VecDeque::new()));
+        let responses = Arc::new(Mutex::new(VecDeque::new()));
+        let ready = Arc::new(Condvar::new());
+        let resume = Arc::new(Mutex::new(None));
+        let prompt_id = Arc::new(Mutex::new(None));
+        let eof = Arc::new(AtomicBool::new(false));
+
+        read_grok_stdout(
+            Box::new(Cursor::new(replay_stream.into_bytes())),
+            Arc::clone(&events),
+            Arc::clone(&responses),
+            Arc::clone(&ready),
+            Arc::clone(&resume),
+            Arc::clone(&prompt_id),
+            Arc::clone(&eof),
+        );
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "session/load history replay must not enqueue events when no prompt is active"
+        );
+
+        let active_and_trailing = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "grok-s-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "text": "Fresh Turn 2 reply" }
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "grok-s-1",
+                    "update": {
+                        "sessionUpdate": "turn_completed"
+                    }
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "grok-s-1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "text": "Trailing stale update" }
+                    }
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n")
+            + "\n";
+
+        *prompt_id.lock().unwrap() = Some(42);
+        eof.store(false, Ordering::SeqCst);
+        read_grok_stdout(
+            Box::new(Cursor::new(active_and_trailing.into_bytes())),
+            Arc::clone(&events),
+            responses,
+            ready,
+            resume,
+            prompt_id,
+            eof,
+        );
+
+        let drained: Vec<TransportEvent> = events.lock().unwrap().drain(..).collect();
+        assert_eq!(
+            drained,
+            vec![
+                TransportEvent::Text("Fresh Turn 2 reply".to_string()),
+                TransportEvent::TurnEnded,
+            ]
+        );
+    }
 }

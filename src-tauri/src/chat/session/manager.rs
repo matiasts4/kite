@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +26,7 @@ pub struct SessionManager {
     pub(super) sessions: HashMap<String, ManagedSession>,
     pub(super) commands: HashMap<String, CommandRecord>,
     pub(super) command_order: VecDeque<String>,
+    pub(super) ephemeral_threads: HashSet<String>,
 }
 
 fn canon_driver(driver: &str) -> &str {
@@ -35,7 +36,7 @@ fn canon_driver(driver: &str) -> &str {
     }
 }
 
-fn capture_resume_handle(session: &mut ManagedSession) {
+pub(super) fn capture_resume_handle(session: &mut ManagedSession) {
     if let Some(handle) = session.transport.resume_handle() {
         if !handle.trim().is_empty() {
             session.record.resume_handle = Some(handle);
@@ -46,6 +47,22 @@ fn capture_resume_handle(session: &mut ManagedSession) {
 impl SessionManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Marks or unmarks `thread_id` as an ephemeral subagent session for immediate reaping.
+    pub fn set_ephemeral(&mut self, thread_id: &str, ephemeral: bool) {
+        if ephemeral {
+            if !thread_id.trim().is_empty() {
+                self.ephemeral_threads.insert(thread_id.to_string());
+            }
+        } else {
+            self.ephemeral_threads.remove(thread_id);
+        }
+    }
+
+    /// Returns whether `thread_id` is currently marked as an ephemeral subagent session.
+    pub fn is_ephemeral(&self, thread_id: &str) -> bool {
+        self.ephemeral_threads.contains(thread_id)
     }
 
     /// Binds a session to a thread. It never starts a process: the first send
@@ -393,7 +410,10 @@ impl SessionManager {
         session.record.state = SessionState::Closed;
         clear_heavy_session_payloads(session);
         push_event(session, "stopped", json!({}));
+        self.ephemeral_threads.remove(thread_id);
         self.prune_terminal_sessions(DEFAULT_MAX_TERMINAL_SESSIONS);
+        crate::chat::runtime::pipeline::clear_acp_approval_wire(thread_id);
+        crate::chat::runtime::pipeline::clear_session_auto_approved(thread_id);
         Ok(())
     }
 

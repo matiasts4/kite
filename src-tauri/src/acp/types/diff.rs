@@ -271,6 +271,41 @@ pub(super) fn value_failure_flag(val: &Value, depth: u8) -> bool {
     false
 }
 
+/// Returns `true` when `output` is a blocking `wait` slice timeout receipt (either
+/// raw JSON `{"op":"wait","status":"failed","error":"timeout",...}` or the non-error
+/// `"still running after ... wait slice"` handoff text). A wait-slice timeout means the
+/// child subagent is still alive, NOT that it failed.
+pub fn is_wait_timeout_receipt(output: Option<&str>) -> bool {
+    let Some(raw) = output.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("still running after ") && lower.contains("wait slice") {
+        return true;
+    }
+    if let Some(parsed) = parse_output_json(Some(raw)) {
+        let receipt = parsed.get("receipt").unwrap_or(&parsed);
+        let is_timeout_err = receipt
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|e| e.trim().eq_ignore_ascii_case("timeout"));
+        if is_timeout_err {
+            let op_is_wait = receipt
+                .get("op")
+                .and_then(Value::as_str)
+                .is_some_and(|op| op.trim().eq_ignore_ascii_case("wait"));
+            let has_thread_addr = receipt
+                .get("address")
+                .and_then(Value::as_str)
+                .is_some_and(|addr| addr.trim().starts_with("thread:"));
+            if op_is_wait || has_thread_addr {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Returns `true` when any status, exit code, ACP error flag, or JSON receipt indicates failure.
 pub fn response_indicates_failure(
     raw_status: &str,

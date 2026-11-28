@@ -1,6 +1,7 @@
 use crate::chat::drivers::{declaration, DriverVersion};
 use crate::chat::persistent::{
-    unsupported_wire, AntigravitySession, GrokSession, OpenCodeServerSession,
+    unsupported_wire, use_shared_acp_mux, use_shared_grok_mux, AgyAcpSessionHandle,
+    AntigravitySession, GrokPooledSessionHandle, GrokSession, OpenCodeServerSession,
     PersistentControls, ANTIGRAVITY_DRIVER, GROK_DRIVER, OPENCODE_DRIVER,
 };
 use crate::chat::session::{
@@ -287,9 +288,21 @@ pub fn select_persistent_transport(
         }
     };
     let transport: Box<dyn SessionTransport> = match kind {
-        TransportKind::Antigravity => Box::new(AntigravitySession::new(controls)),
+        TransportKind::Antigravity => {
+            if use_shared_acp_mux() {
+                Box::new(AgyAcpSessionHandle::new(controls))
+            } else {
+                Box::new(AntigravitySession::new(controls))
+            }
+        }
         TransportKind::OpenCodeServer => Box::new(OpenCodeServerSession::with_controls(controls)),
-        TransportKind::GrokAgent => Box::new(GrokSession::new(controls)),
+        TransportKind::GrokAgent => {
+            if use_shared_grok_mux() {
+                Box::new(GrokPooledSessionHandle::new(controls))
+            } else {
+                Box::new(GrokSession::new(controls))
+            }
+        }
     };
     Ok(SelectedTransport {
         driver: declared.driver,
@@ -297,6 +310,44 @@ pub fn select_persistent_transport(
         version,
         transport,
     })
+}
+
+/// Opt-in Native Rust Fast Lane selector strictly gated on `fast_lane_enabled`
+/// and verified official API-key / OpenCode Go gateway eligibility (explicitly
+/// rejecting consumer OAuth / cookie / CLI-only subscription drivers).
+#[allow(clippy::too_many_arguments)]
+pub fn try_select_fast_lane_transport(
+    provider: &str,
+    model: Option<&str>,
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+    auth_kind: &str,
+    session_id: Option<&str>,
+    controls: PersistentControls,
+) -> Option<Box<dyn SessionTransport>> {
+    let settings = crate::native_agent::load_runtime_resource_settings();
+    if !settings.fast_lane_enabled {
+        return None;
+    }
+    let model_id = model
+        .or(controls.model.as_deref())
+        .unwrap_or("")
+        .trim();
+    if crate::native_agent::types::resolve_fast_lane_endpoint(
+        provider,
+        model_id,
+        api_key,
+        base_url,
+        auth_kind,
+        session_id,
+    )
+    .is_err()
+    {
+        return None;
+    }
+    Some(Box::new(
+        crate::native_agent::transport::NativeFastLaneTransport::new(controls),
+    ))
 }
 
 /// The bounded statement a thread receives when the lasting route could not
@@ -433,4 +484,318 @@ pub fn is_thread_runtime_active(thread_id: &str) -> bool {
                     | crate::chat::session::SessionState::Waiting
             )
         })
+}
+
+const IN_FLIGHT_DISPATCH_TTL_MS: i64 = 45_000;
+
+/// Metadata for a live ACP/provider tool call invoking `kite-dispatch` (MCP or CLI),
+/// used to correlate loopback dispatch requests back to the originating thread when
+/// a shared multiplexed daemon scrubs per-thread `KITE_ADDRESS`.
+#[derive(Debug, Clone)]
+pub struct InFlightDispatchCall {
+    pub thread_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub role: Option<String>,
+    pub prompt: Option<String>,
+    pub tasks: Vec<String>,
+    pub command: Option<String>,
+    pub swarm_action: Option<String>,
+    pub swarm_member: Option<String>,
+    pub swarm_title: Option<String>,
+    pub created_at_ms: i64,
+    pub claimed: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DispatchCorrelationQuery {
+    pub expected_tools: Vec<String>,
+    pub role: Option<String>,
+    pub prompt: Option<String>,
+    pub tasks: Vec<String>,
+    pub command_hint: Option<String>,
+    pub swarm_action: Option<String>,
+    pub swarm_member: Option<String>,
+    pub swarm_title: Option<String>,
+    pub consume_claim: bool,
+}
+
+fn in_flight_dispatch_calls() -> &'static Mutex<Vec<InFlightDispatchCall>> {
+    static CELL: std::sync::OnceLock<Mutex<Vec<InFlightDispatchCall>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn normalize_match_text(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn register_in_flight_dispatch_call(mut call: InFlightDispatchCall) {
+    let now = now_ms();
+    if call.created_at_ms <= 0 {
+        call.created_at_ms = now;
+    }
+    let Ok(mut guard) = in_flight_dispatch_calls().lock() else {
+        return;
+    };
+    guard.retain(|entry| now.saturating_sub(entry.created_at_ms) <= IN_FLIGHT_DISPATCH_TTL_MS);
+    if let Some(existing) = guard
+        .iter_mut()
+        .find(|e| e.thread_id == call.thread_id && e.tool_call_id == call.tool_call_id)
+    {
+        let was_claimed = existing.claimed;
+        if call.role.is_some() {
+            existing.role = call.role;
+        }
+        if call.prompt.is_some() {
+            existing.prompt = call.prompt;
+        }
+        if !call.tasks.is_empty() {
+            existing.tasks = call.tasks;
+        }
+        if call.command.is_some() {
+            existing.command = call.command;
+        }
+        if call.swarm_action.is_some() {
+            existing.swarm_action = call.swarm_action;
+        }
+        if call.swarm_member.is_some() {
+            existing.swarm_member = call.swarm_member;
+        }
+        if call.swarm_title.is_some() {
+            existing.swarm_title = call.swarm_title;
+        }
+        if !call.tool_name.is_empty() {
+            existing.tool_name = call.tool_name;
+        }
+        existing.claimed = was_claimed;
+    } else {
+        guard.push(call);
+    }
+}
+
+pub fn finish_in_flight_dispatch_call(thread_id: &str, tool_call_id: &str) {
+    let Ok(mut guard) = in_flight_dispatch_calls().lock() else {
+        return;
+    };
+    guard.retain(|e| !(e.thread_id == thread_id && e.tool_call_id == tool_call_id));
+}
+
+#[cfg(test)]
+pub fn clear_in_flight_dispatch_calls_for_test() {
+    if let Ok(mut guard) = in_flight_dispatch_calls().lock() {
+        guard.clear();
+    }
+}
+
+/// Resolves the unique originating thread for an incoming multiplexed dispatch request
+/// by scoring live ACP tool calls. Returns `None` if no call matches or if two distinct
+/// threads tie with the same highest score (never guesses across siblings).
+pub fn claim_matching_in_flight_dispatch_thread(
+    query: &DispatchCorrelationQuery,
+) -> Option<String> {
+    let now = now_ms();
+    let Ok(mut guard) = in_flight_dispatch_calls().lock() else {
+        return None;
+    };
+    guard.retain(|entry| now.saturating_sub(entry.created_at_ms) <= IN_FLIGHT_DISPATCH_TTL_MS);
+    if guard.is_empty() {
+        return None;
+    }
+
+    let q_prompt = query
+        .prompt
+        .as_deref()
+        .map(normalize_match_text)
+        .filter(|s| !s.is_empty());
+    let q_tasks: Vec<String> = query
+        .tasks
+        .iter()
+        .map(|t| normalize_match_text(t))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let q_role = query
+        .role
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("subagent"))
+        .map(|s| s.to_ascii_lowercase());
+    let q_cmd = query
+        .command_hint
+        .as_deref()
+        .map(normalize_match_text)
+        .filter(|s| !s.is_empty());
+    let q_swarm_action = query
+        .swarm_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase());
+    let q_swarm_member = query
+        .swarm_member
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase());
+    let q_swarm_title = query
+        .swarm_title
+        .as_deref()
+        .map(normalize_match_text)
+        .filter(|s| !s.is_empty());
+
+    let mut scored: Vec<(usize, u32, i64)> = Vec::new();
+    for (idx, entry) in guard.iter().enumerate() {
+        if query.consume_claim && entry.claimed {
+            continue;
+        }
+        let tool_lower = entry.tool_name.trim().to_ascii_lowercase();
+        let tool_matches = query.expected_tools.is_empty()
+            || query
+                .expected_tools
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(&tool_lower));
+        let is_shell = matches!(
+            tool_lower.as_str(),
+            "run_command" | "bash" | "shell" | "commandexecution"
+        );
+        if !tool_matches && !is_shell {
+            continue;
+        }
+
+        let mut score: u32 = 0;
+
+        if let (Some(qp), Some(ep)) = (
+            q_prompt.as_deref(),
+            entry.prompt.as_deref().map(normalize_match_text),
+        ) {
+            if !ep.is_empty() && (ep == qp || ep.contains(qp) || qp.contains(&ep)) {
+                score += 100;
+            }
+        }
+        if !q_tasks.is_empty() && !entry.tasks.is_empty() {
+            let e_tasks: Vec<String> = entry
+                .tasks
+                .iter()
+                .map(|t| normalize_match_text(t))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let all_match = q_tasks
+                .iter()
+                .all(|qt| e_tasks.iter().any(|et| et == qt || et.contains(qt)));
+            if all_match {
+                score += 110;
+            }
+        } else if let Some(first_task) = q_tasks.first() {
+            if let Some(ep) = entry.prompt.as_deref().map(normalize_match_text) {
+                if !ep.is_empty() && (ep == *first_task || ep.contains(first_task)) {
+                    score += 95;
+                }
+            }
+        }
+
+        if let (Some(qr), Some(er)) = (
+            q_role.as_deref(),
+            entry
+                .role
+                .as_deref()
+                .map(|r| r.trim().to_ascii_lowercase()),
+        ) {
+            if er == qr {
+                score += 60;
+            }
+        }
+
+        if let (Some(qc), Some(ec)) = (
+            q_cmd.as_deref(),
+            entry.command.as_deref().map(normalize_match_text),
+        ) {
+            if !ec.is_empty() && (ec == qc || ec.contains(qc)) {
+                score += 95;
+            }
+        }
+
+        if let (Some(qa), Some(ea)) = (
+            q_swarm_action.as_deref(),
+            entry
+                .swarm_action
+                .as_deref()
+                .map(|a| a.trim().to_ascii_lowercase()),
+        ) {
+            if ea == qa {
+                score += 40;
+            }
+        }
+        if let (Some(qm), Some(em)) = (
+            q_swarm_member.as_deref(),
+            entry
+                .swarm_member
+                .as_deref()
+                .map(|m| m.trim().to_ascii_lowercase()),
+        ) {
+            if em == qm {
+                score += 45;
+            }
+        }
+        if let (Some(qt), Some(et)) = (
+            q_swarm_title.as_deref(),
+            entry.swarm_title.as_deref().map(normalize_match_text),
+        ) {
+            if !et.is_empty() && et == qt {
+                score += 45;
+            }
+        }
+
+        if score == 0 && tool_matches {
+            score = 25;
+        }
+        if score > 0 {
+            scored.push((idx, score, entry.created_at_ms));
+        }
+    }
+
+    if scored.is_empty() {
+        return None;
+    }
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+    let best_score = scored[0].1;
+    let best_idx = scored[0].0;
+    let best_thread = guard[best_idx].thread_id.clone();
+
+    let distinct_tied_threads: std::collections::HashSet<&str> = scored
+        .iter()
+        .filter(|(_, s, _)| *s == best_score)
+        .map(|(i, _, _)| guard[*i].thread_id.as_str())
+        .collect();
+    if distinct_tied_threads.len() > 1 {
+        return None;
+    }
+
+    if query.consume_claim {
+        guard[best_idx].claimed = true;
+    }
+    Some(best_thread)
+}
+
+/// Returns the thread ID when **exactly one** unfinished live turn is currently active
+/// in this process; returns `None` when zero or multiple turns are active concurrently.
+pub fn single_active_live_thread_id() -> Option<String> {
+    let Ok(live) = live_turns().lock() else {
+        return None;
+    };
+    let mut active_threads: Vec<String> = live
+        .by_thread
+        .iter()
+        .filter_map(|(tid, rid)| {
+            live.runs
+                .get(rid)
+                .filter(|run| !run.finished)
+                .map(|_| tid.clone())
+        })
+        .collect();
+    active_threads.sort();
+    active_threads.dedup();
+    if active_threads.len() == 1 {
+        active_threads.into_iter().next()
+    } else {
+        None
+    }
 }

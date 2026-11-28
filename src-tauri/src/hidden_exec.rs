@@ -32,6 +32,10 @@ impl HiddenOutput {
     pub fn stdout_lossy(&self) -> String {
         String::from_utf8_lossy(&self.stdout).into_owned()
     }
+
+    pub fn stderr_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
 }
 
 impl std::fmt::Debug for HiddenOutput {
@@ -145,13 +149,24 @@ impl Drop for HiddenChild {
 /// On Windows the process tree is attached to a hidden console; on every other
 /// platform this degrades to a plain piped `Command`.
 pub fn run(program: &Path, args: &[&str], timeout: Duration) -> std::io::Result<HiddenOutput> {
+    run_in_dir(program, args, None, timeout)
+}
+
+/// Runs `program` with `args` in an optional working directory `cwd` for at
+/// most `timeout`, capturing its output.
+pub fn run_in_dir(
+    program: &Path,
+    args: &[&str],
+    cwd: Option<&Path>,
+    timeout: Duration,
+) -> std::io::Result<HiddenOutput> {
     #[cfg(windows)]
     {
-        windows_impl::run(program, args, timeout)
+        windows_impl::run(program, args, cwd, timeout)
     }
     #[cfg(not(windows))]
     {
-        portable_impl::run(program, args, timeout)
+        portable_impl::run(program, args, cwd, timeout)
     }
 }
 
@@ -412,20 +427,36 @@ mod windows_impl {
         out
     }
 
-    fn command_line(program: &Path, args: &[&str]) -> Vec<u16> {
-        let is_batch = program.extension().map_or(false, |ext| {
+    pub(super) fn needs_cmd_wrapper(program: &Path) -> bool {
+        if program.extension().map_or(false, |ext| {
             ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
-        });
-        if is_batch {
+        }) {
+            return true;
+        }
+        if program.extension().is_none() {
+            if let Some(name) = program.file_name().and_then(|n| n.to_str()) {
+                return name.eq_ignore_ascii_case("npm") || name.eq_ignore_ascii_case("npx");
+            }
+        }
+        false
+    }
+
+    pub(super) fn command_line(program: &Path, args: &[&str]) -> Vec<u16> {
+        if needs_cmd_wrapper(program) {
+            let mut inner = quote_arg(program.as_os_str());
+            for arg in args {
+                inner.push(b' ' as u16);
+                inner.extend(quote_arg(OsStr::new(arg)));
+            }
             let mut line = quote_arg(OsStr::new("cmd.exe"));
             line.push(b' ' as u16);
-            line.extend(quote_arg(OsStr::new("/c")));
+            line.extend(quote_arg(OsStr::new("/S")));
             line.push(b' ' as u16);
-            line.extend(quote_arg(program.as_os_str()));
-            for arg in args {
-                line.push(b' ' as u16);
-                line.extend(quote_arg(OsStr::new(arg)));
-            }
+            line.extend(quote_arg(OsStr::new("/C")));
+            line.push(b' ' as u16);
+            line.push(b'"' as u16);
+            line.extend(inner);
+            line.push(b'"' as u16);
             line.push(0);
             return line;
         }
@@ -501,6 +532,7 @@ mod windows_impl {
     pub(super) fn run(
         program: &Path,
         args: &[&str],
+        cwd: Option<&Path>,
         timeout: Duration,
     ) -> io::Result<HiddenOutput> {
         std::env::set_var("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
@@ -550,6 +582,9 @@ mod windows_impl {
                 dw_thread_id: 0,
             };
 
+            let cwd_wide = cwd.map(|c| wide(c.as_os_str()));
+            let cwd_ptr = cwd_wide.as_ref().map(|w| w.as_ptr()).unwrap_or(null());
+
             let created = CreateProcessW(
                 null(),
                 line.as_mut_ptr(),
@@ -558,7 +593,7 @@ mod windows_impl {
                 1,
                 CREATE_NO_WINDOW,
                 null_mut(),
-                null(),
+                cwd_ptr,
                 &mut startup,
                 &mut process_info,
             );
@@ -792,14 +827,18 @@ mod portable_impl {
     pub(super) fn run(
         program: &Path,
         args: &[&str],
+        cwd: Option<&Path>,
         timeout: Duration,
     ) -> io::Result<HiddenOutput> {
-        let mut child = Command::new(program)
-            .args(args)
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let mut child = cmd.spawn()?;
 
         let started = Instant::now();
         let mut timed_out = false;
@@ -1105,5 +1144,36 @@ mod tests {
             !is_pid_alive(descendant_pid),
             "leaked descendant (pid {descendant_pid}) survived hidden_exec::run()"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_in_dir_uses_requested_working_directory_and_wraps_batch_or_npm_commands() {
+        let dir = std::env::temp_dir().join(format!("kite-hidden-cwd-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run_in_dir(
+            Path::new("cmd.exe"),
+            &["/c", "cd"],
+            Some(&dir),
+            Duration::from_secs(10),
+        )
+        .expect("run_in_dir should succeed");
+        assert!(out.success());
+        let reported = out.stdout_lossy().trim().to_string();
+        let canon_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+        let canon_rep = Path::new(&reported).canonicalize().unwrap_or_else(|_| std::path::PathBuf::from(&reported));
+        assert_eq!(canon_rep, canon_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(windows_impl::needs_cmd_wrapper(Path::new("npx")));
+        assert!(windows_impl::needs_cmd_wrapper(Path::new("npm")));
+        assert!(windows_impl::needs_cmd_wrapper(Path::new("C:\\tools\\claude.cmd")));
+        assert!(windows_impl::needs_cmd_wrapper(Path::new("script.BAT")));
+        assert!(!windows_impl::needs_cmd_wrapper(Path::new("git.exe")));
+        assert!(!windows_impl::needs_cmd_wrapper(Path::new("cargo")));
+
+        let cmd_utf16 = windows_impl::command_line(Path::new("npx"), &["tsc", "--noEmit"]);
+        let decoded = String::from_utf16_lossy(&cmd_utf16);
+        assert!(decoded.starts_with("cmd.exe /S /C \"npx tsc --noEmit\""), "got: {decoded}");
     }
 }

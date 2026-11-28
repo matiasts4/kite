@@ -21,6 +21,60 @@ pub struct ToolCallTracker {
     last_anon_id: Option<String>,
 }
 
+fn is_clean_tool_identifier(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !trimmed.is_empty()
+        && !trimmed.chars().any(char::is_whitespace)
+        && !trimmed.eq_ignore_ascii_case("subagent")
+        && !trimmed.eq_ignore_ascii_case("tool")
+        && !trimmed.eq_ignore_ascii_case("other")
+        && !trimmed.eq_ignore_ascii_case("dynamictoolcall")
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '/'))
+}
+
+/// Normalizes an ACP tool name or human title (for example `"Run invoke_subagent"`,
+/// `"MCP Tool kite_subagent_run"`, or `"kite-dispatch · kite_subagent_run"`) into a clean
+/// tool identifier when one is present.
+pub(crate) fn normalize_acp_tool_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some((left, right)) = trimmed.split_once('·') {
+        let r = right.trim();
+        if is_clean_tool_identifier(r) {
+            return Some(r.to_string());
+        }
+        let l = left.trim();
+        if is_clean_tool_identifier(l) {
+            return Some(l.to_string());
+        }
+    }
+    for prefix in [
+        "MCP Tool ",
+        "mcp tool ",
+        "Run ",
+        "run ",
+        "Call ",
+        "call ",
+        "Execute ",
+        "execute ",
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let candidate = rest.trim();
+            if is_clean_tool_identifier(candidate) {
+                return Some(candidate.to_string());
+            }
+        }
+    }
+    if is_clean_tool_identifier(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 impl ToolCallTracker {
     pub fn snapshot(&self, id: &str) -> Option<&ToolCallSnapshot> {
         self.calls.get(id)
@@ -105,6 +159,7 @@ impl ToolCallTracker {
         let entry = self.calls.entry(id.clone()).or_insert_with(|| ToolCallSnapshot {
             id: id.clone(),
             kind: "tool".into(),
+            tool_name: None,
             title: String::new(),
             status: "inProgress".into(),
             path: None,
@@ -116,17 +171,44 @@ impl ToolCallTracker {
             subagent_meta: None,
             swarm_meta: None,
             parent_tool_use_id: None,
+            raw_input: None,
         });
-        let incoming_name = src
+        let explicit_name = src
             .get("name")
             .or_else(|| src.get("tool"))
             .or_else(|| src.get("tool_name"))
             .or_else(|| src.get("toolName"))
-            .or_else(|| src.get("title"))
             .or_else(|| update.get("name"))
+            .or_else(|| update.get("tool"))
+            .or_else(|| update.get("tool_name"))
             .or_else(|| update.get("toolName"))
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let title_derived_name = src
+            .get("title")
+            .or_else(|| update.get("title"))
+            .and_then(Value::as_str)
+            .and_then(normalize_acp_tool_name);
+        let resolved_tool_name = explicit_name.clone().or(title_derived_name);
+        if let Some(ref tn) = resolved_tool_name {
+            if entry
+                .tool_name
+                .as_deref()
+                .is_none_or(|cur| crate::chat::subagents::is_generic_tool_field("toolName", cur))
+            {
+                entry.tool_name = Some(tn.clone());
+            }
+        }
+        let incoming_name = resolved_tool_name.or_else(|| {
+            src.get("title")
+                .or_else(|| update.get("title"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
         if let Some(kind) = src
             .get("kind")
             .or_else(|| update.get("kind"))
@@ -269,6 +351,7 @@ impl ToolCallTracker {
         if let Some(inp) = input {
             if !inp.is_null() {
                 *stored_input = inp.clone();
+                entry.raw_input = Some(inp.clone());
             }
         }
         let eval_name = if stored_name.is_empty() {
@@ -304,6 +387,7 @@ impl ToolCallTracker {
             entry.deletions = classified_del.map(|n| n as i64);
         }
         if entry.status != "killed"
+            && !crate::acp::is_wait_timeout_receipt(Some(entry.output.as_str()))
             && (response_indicates_failure(
                 &entry.status,
                 Some(src),
@@ -361,6 +445,7 @@ impl ToolCallTracker {
         let entry = self.calls.entry(id.clone()).or_insert_with(|| ToolCallSnapshot {
             id,
             kind: "tool".into(),
+            tool_name: None,
             title: String::new(),
             status: "inProgress".into(),
             path: None,
@@ -372,6 +457,7 @@ impl ToolCallTracker {
             subagent_meta: None,
             swarm_meta: None,
             parent_tool_use_id: None,
+            raw_input: None,
         });
         entry.output.push_str(chunk);
         if entry.status != "killed"

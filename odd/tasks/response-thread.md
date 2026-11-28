@@ -255,15 +255,16 @@ Acceptance:
 - Up to 100 files per message. Each image is at most 10 MiB, and images in one message are at most 80 MiB. Other files are at most 50 MiB. Uploads finish before send.
 Checks: a paste test at 32 KiB and a test that a 120,001-character draft does not send.
 
-### S24. The thread sidebar
+### S24. The thread sidebar (Superseded by `odd/tasks/thread-composer-and-navigation.md` `S8`)
 Acceptance:
-- The list has search, New thread, and shelves for pinned, active, working, snoozed, and settled threads.
+- The list has search, New thread, `Pinned threads`, per-project workspace branches (showing up to 6 threads when collapsed with `+N more` / `Show less` per project), `Other threads`, `Snoozed`, and collapsible `Settled` threads.
+- Working/waiting threads stay inside their project (or `Other threads` / `Pinned`) using the inline status indicator instead of a separate top `Working` shelf.
+- All sections order newest-first by recency (`lastTurnAtUnixMs`, falling back to `updatedAtUnixMs` / `createdAtUnixMs`), keeping concurrent working threads stably ordered without swapping places on stream updates.
 - Pin, settle, snooze, and archive can be undone for five seconds. Dragging between sections pins, unpins, settles, or wakes. Reduced motion drops the row transition.
-- A working or waiting thread can fold into Working. It returns to the top of active when it finishes, fails, or needs an approval or an answer. Pinned threads stay pinned.
 - A limited thread keeps the provider's explanation and offers Resume, as in S13.
 - Regenerate title asks for a fresh title from the conversation. It is unavailable while a title is already being written.
 - A failed thread is marked failed. An empty catalog or a signed-out provider does not look like a failed thread.
-Checks: a sidebar test for pin, settle, and the working shelf.
+Checks: `ThreadRoster.test.tsx`, `threadInteraction.test.ts`, Rust `chat::` summary ordering tests, and desktop E2E layout/streaming verification.
 
 ### S25. Subagents and a side chat
 Acceptance:

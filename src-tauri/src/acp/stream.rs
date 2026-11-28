@@ -362,6 +362,11 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
                         let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("running").to_string();
                         return Some(AcpStreamEvent::PlanUpdate { step, status });
                     }
+                    "usage_update" | "tool_call_content_chunk" => {
+                        return Some(AcpStreamEvent::Raw {
+                            line: line.to_string(),
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -874,25 +879,117 @@ pub fn parse_acp_stream_line(thread_id: &str, run_id: &str, line: &str) -> Optio
     None
 }
 
-/// Formats an approval response payload to write to the child process `stdin` via JSON-RPC 2.0 / ACP.
-pub fn format_acp_approval_response(request_id: &str, decision: &str) -> String {
-    let normalized = decision.trim().to_lowercase();
-    let approved = matches!(
-        normalized.as_str(),
-        "accept" | "accepted" | "approve" | "approved" | "allow" | "allow_once" | "accept_for_session" | "allow_always"
-    );
-    let outcome = if normalized == "accept_for_session" || normalized == "allow_always" {
-        "allow_always"
-    } else if approved {
-        "allow_once"
-    } else {
-        "reject_once"
+/// Option advertised by an ACP `session/request_permission` prompt.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpApprovalOption {
+    pub option_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+fn select_acp_approval_option_id(
+    approved: bool,
+    for_session: bool,
+    options: &[AcpApprovalOption],
+) -> String {
+    let find_by_kind = |wanted: &[&str]| -> Option<String> {
+        options.iter().find_map(|opt| {
+            let kind = opt
+                .kind
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            wanted.contains(&kind.as_str()).then(|| opt.option_id.clone())
+        })
+    };
+    let find_by_id = |wanted: &[&str]| -> Option<String> {
+        options.iter().find_map(|opt| {
+            let id = opt.option_id.trim().to_ascii_lowercase();
+            wanted.contains(&id.as_str()).then(|| opt.option_id.clone())
+        })
     };
 
-    let rpc_id: Value = if let Ok(num) = request_id.parse::<i64>() {
-        json!(num)
-    } else {
-        json!(request_id)
+    if for_session {
+        if let Some(id) = find_by_kind(&["allow_always"])
+            .or_else(|| find_by_kind(&["allow_once"]))
+            .or_else(|| find_by_id(&["allow_always", "accept_for_session", "allow", "allow_once"]))
+        {
+            return id;
+        }
+        return "allow_always".to_string();
+    }
+    if approved {
+        if let Some(id) = find_by_kind(&["allow_once"])
+            .or_else(|| find_by_kind(&["allow_always"]))
+            .or_else(|| find_by_id(&["allow", "allow_once", "accept", "approve"]))
+        {
+            return id;
+        }
+        return "allow_once".to_string();
+    }
+    if let Some(id) = find_by_kind(&["reject_once"])
+        .or_else(|| find_by_kind(&["reject_always"]))
+        .or_else(|| find_by_id(&["deny", "reject_once", "reject", "cancel"]))
+    {
+        return id;
+    }
+    "reject_once".to_string()
+}
+
+/// Formats an approval response payload for ACP stdin preserving JSON-RPC `id` type
+/// and mapping Kite UI decisions onto the server's advertised `options[].optionId`.
+pub fn format_acp_approval_response_with_wire(
+    request_id: &str,
+    decision: &str,
+    wire_id_is_string: Option<bool>,
+    options: &[AcpApprovalOption],
+) -> String {
+    let normalized = decision.trim().to_ascii_lowercase();
+    let approved = matches!(
+        normalized.as_str(),
+        "accept"
+            | "accepted"
+            | "approve"
+            | "approved"
+            | "allow"
+            | "allow_once"
+            | "allowonce"
+            | "accept_for_session"
+            | "acceptforsession"
+            | "allow_for_session"
+            | "allowforsession"
+            | "allow_always"
+            | "allowalways"
+            | "always_allow"
+            | "alwaysallow"
+    );
+    let for_session = matches!(
+        normalized.as_str(),
+        "accept_for_session"
+            | "acceptforsession"
+            | "allow_for_session"
+            | "allowforsession"
+            | "allow_always"
+            | "allowalways"
+            | "always_allow"
+            | "alwaysallow"
+    );
+    let outcome = select_acp_approval_option_id(approved, for_session, options);
+
+    let rpc_id: Value = match wire_id_is_string {
+        Some(true) => json!(request_id),
+        Some(false) => request_id
+            .parse::<i64>()
+            .map(|num| json!(num))
+            .unwrap_or_else(|_| json!(request_id)),
+        None => request_id
+            .parse::<i64>()
+            .map(|num| json!(num))
+            .unwrap_or_else(|_| json!(request_id)),
     };
 
     let payload = json!({
@@ -909,4 +1006,9 @@ pub fn format_acp_approval_response(request_id: &str, decision: &str) -> String 
     });
 
     format!("{}\n", payload.to_string())
+}
+
+/// Formats an approval response payload to write to the child process `stdin` via JSON-RPC 2.0 / ACP.
+pub fn format_acp_approval_response(request_id: &str, decision: &str) -> String {
+    format_acp_approval_response_with_wire(request_id, decision, None, &[])
 }

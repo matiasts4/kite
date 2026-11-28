@@ -525,6 +525,107 @@ pub fn analyze_turn_verdict(
     TranscriptVerdict::ActiveProgress
 }
 
+fn normalize_fallback_command(raw: &str) -> String {
+    raw.replace("kite ctx exec --", " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn collect_turn_acp_tools(
+    thread_id: &str,
+    turn_started_at_ms: i64,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    let Ok(items) = threads().lock() else {
+        return Vec::new();
+    };
+    let Some(thread) = items
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))
+    else {
+        return Vec::new();
+    };
+    let Some(thread_items) = thread.get("items").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    thread_items
+        .iter()
+        .filter_map(|it| {
+            let id = it.get("id").and_then(Value::as_str)?;
+            if !id.starts_with("call_") {
+                return None;
+            }
+            let created_ms = it
+                .get("createdAtUnixMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if created_ms + 5_000 < turn_started_at_ms {
+                return None;
+            }
+            let tool_name = it
+                .get("toolName")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| crate::acp::strip_mcp_prefix(s, it).1)
+                .or_else(|| {
+                    it.get("title")
+                        .and_then(Value::as_str)
+                        .and_then(crate::chat::normalize::normalize_acp_tool_name)
+                        .map(|s| crate::acp::strip_mcp_prefix(&s, it).1)
+                })
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            let file_path = it
+                .get("filePath")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let cmd = it
+                .get("command")
+                .and_then(Value::as_str)
+                .map(normalize_fallback_command)
+                .filter(|s| !s.is_empty());
+            Some((tool_name, file_path, cmd))
+        })
+        .collect()
+}
+
+fn has_live_acp_tool_match(
+    live_acp_tools: &[(String, Option<String>, Option<String>)],
+    tc: &TranscriptToolCall,
+) -> bool {
+    if live_acp_tools.is_empty() {
+        return false;
+    }
+    let (_kind, _srv, _title, cmd, path, _, _) =
+        crate::acp::classify_tool_metadata(&tc.name, &tc.args);
+    let norm_cmd = cmd
+        .as_deref()
+        .map(normalize_fallback_command)
+        .filter(|s| !s.is_empty());
+    let norm_path = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let tc_clean = crate::acp::strip_mcp_prefix(&tc.name, &tc.args).1;
+    live_acp_tools.iter().any(|(item_name, item_path, item_cmd)| {
+        if let (Some(c), Some(ic)) = (norm_cmd.as_ref(), item_cmd.as_ref()) {
+            return ic == c;
+        }
+        if let (Some(p), Some(ip)) = (norm_path, item_path.as_deref()) {
+            return ip.eq_ignore_ascii_case(p);
+        }
+        !tc_clean.is_empty()
+            && !item_name.is_empty()
+            && item_name.eq_ignore_ascii_case(&tc_clean)
+            && norm_cmd.is_none()
+            && norm_path.is_none()
+    })
+}
+
 fn record_tool_step(
     thread_id: &str,
     run_id: &str,
@@ -849,10 +950,14 @@ pub fn poll_transcript_catchup_in_dir(
 
     let mut projected = false;
     let mut saw_system_or_subagent = false;
+    let live_acp_tools = collect_turn_acp_tools(thread_id, turn_started_at_ms);
 
     for step in turn_slice {
         if step.step_type == "PLANNER_RESPONSE" && !step.tool_calls.is_empty() {
             for (idx, tc) in step.tool_calls.iter().enumerate() {
+                if has_live_acp_tool_match(&live_acp_tools, tc) {
+                    continue;
+                }
                 let expected_step = step.step_index + 1 + idx as i64;
                 let tool_id = format!("t_{run_id}_{expected_step}");
                 state
@@ -862,6 +967,9 @@ pub fn poll_transcript_catchup_in_dir(
             }
         }
     }
+    state
+        .pending_tool_map
+        .retain(|_, (_, tc)| !has_live_acp_tool_match(&live_acp_tools, tc));
 
     for step in turn_slice {
         if step.step_type == "GENERIC" && !state.completed_generic_steps.contains(&step.step_index) {
@@ -2095,5 +2203,112 @@ mod tests {
             verify_completed_turn_on_disk_in_dir(&dir, None, t_base, Some(120)),
             Some(120)
         );
+    }
+
+    #[test]
+    fn fallback_catchup_skips_tool_already_streamed_by_acp() {
+        let uid = uuid::Uuid::new_v4().simple().to_string();
+        let tid = format!("fb-dedup-t-{uid}");
+        let rid = format!("fb-dedup-r-{uid}");
+        let asst_id = format!("fb-dedup-a-{uid}");
+        let dir = std::env::temp_dir().join(format!("kite-agy-fb-dedup-{uid}"));
+        fs::create_dir_all(&dir).unwrap();
+        let _guard = CleanupGuard {
+            tid: tid.clone(),
+            rid: rid.clone(),
+            dir: dir.clone(),
+        };
+
+        let turn_start_ms = now_ms();
+        threads().lock().unwrap().push(json!({
+            "id": tid,
+            "status": "idle",
+            "title": "Dedup Test",
+            "provider": "antigravity",
+            "items": [
+                { "id": "u1", "kind": "user", "text": "check" },
+                {
+                    "id": "call_2415074881387755261",
+                    "kind": "tool",
+                    "toolKind": "commandExecution",
+                    "toolName": "run_command",
+                    "command": "Test-Path .codegraph; kite ctx exec -- git log -n 15 --oneline",
+                    "status": "failed",
+                    "createdAtUnixMs": turn_start_ms + 100
+                }
+            ]
+        }));
+        live_turns().lock().unwrap().runs.insert(
+            rid.clone(),
+            TurnRun {
+                revision: "rev-dedup".into(),
+                events: Vec::new(),
+                next_sequence: 0,
+                assistant_id: asst_id.clone(),
+                assistant_text: String::new(),
+                child: None,
+                stdin: None,
+                closing: false,
+                finished: false,
+                started_at_ms: turn_start_ms,
+                finished_at_ms: None,
+                routine_id: None,
+                delivered_through: 0,
+                file_baselines: HashMap::new(),
+            },
+        );
+        live_turns()
+            .lock()
+            .unwrap()
+            .by_thread
+            .insert(tid.clone(), rid.clone());
+
+        let rows = [
+            json!({ "step_index": 0, "type": "USER_INPUT", "status": "DONE", "content": "check" }),
+            json!({
+                "step_index": 8,
+                "type": "PLANNER_RESPONSE",
+                "status": "DONE",
+                "tool_calls": [{
+                    "name": "run_command",
+                    "args": { "CommandLine": "Test-Path .codegraph; git log -n 15 --oneline" }
+                }],
+                "content": ""
+            }),
+            json!({ "step_index": 9, "type": "GENERIC", "status": "ERROR", "content": "user denied permission" }),
+        ];
+        fs::write(
+            dir.join("transcript_full.jsonl"),
+            rows.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\n",
+        )
+        .unwrap();
+
+        let mut state = TranscriptCatchupState::default();
+        let _ = poll_transcript_catchup_in_dir(
+            &tid,
+            &rid,
+            &asst_id,
+            None,
+            &dir,
+            turn_start_ms,
+            None,
+            &mut state,
+            true,
+        );
+
+        let stored = threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+            .cloned()
+            .unwrap();
+        let items = stored["items"].as_array().unwrap();
+        let tool_ids: Vec<&str> = items
+            .iter()
+            .filter(|i| i.get("kind").and_then(Value::as_str) == Some("tool"))
+            .filter_map(|i| i.get("id").and_then(Value::as_str))
+            .collect();
+        assert_eq!(tool_ids, vec!["call_2415074881387755261"]);
     }
 }

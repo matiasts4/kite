@@ -304,8 +304,23 @@ pub fn extract_subagent_meta(
                 clean_name.replace('_', " ")
             }
         });
+    let is_wait_timeout = is_wait_timeout_receipt(output);
+    let child_thread_id = child_thread_id.or_else(|| {
+        if !is_wait_timeout {
+            return None;
+        }
+        parsed_out
+            .as_ref()
+            .and_then(|o| lookup_text(o, &["address"]))
+            .and_then(|a| a.strip_prefix("thread:").map(str::trim).map(str::to_string))
+            .filter(|s| !s.is_empty())
+    });
     let mut status = normalize_subagent_status(raw_status, action.as_deref());
-    if status != "killed"
+    if is_wait_timeout {
+        if status == "failed" || status == "completed" {
+            status = "running".to_string();
+        }
+    } else if status != "killed"
         && response_indicates_failure(raw_status, Some(params), parsed_out.as_ref(), output)
     {
         status = "failed".to_string();

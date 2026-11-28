@@ -34,8 +34,21 @@ pub enum ProviderTurnEvent {
     },
     ApprovalRequested {
         request_id: String,
+        rpc_id_is_string: bool,
         tool_name: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        risk: Option<String>,
+        #[serde(default)]
+        parameters: Value,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<crate::acp::AcpApprovalOption>,
     },
     UserInputRequested {
         request: UserInputRequest,
@@ -57,6 +70,8 @@ pub enum ProviderTurnEvent {
 pub struct ToolCallSnapshot {
     pub id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
     pub title: String,
     pub status: String,
     pub path: Option<String>,
@@ -71,6 +86,8 @@ pub struct ToolCallSnapshot {
     pub swarm_meta: Option<SwarmMeta>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_tool_use_id: Option<String>,
+    #[serde(skip)]
+    pub raw_input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

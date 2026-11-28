@@ -954,3 +954,117 @@ fn children_wait_any_suppresses_only_settled_children() {
         svc.port_mut().writes
     );
 }
+
+#[test]
+fn restore_parent_notices_for_active_children_rearms_running_child_and_queues_until_parent_settles() {
+    let mut svc = service();
+    svc.attach(Family::Thread, "parent-steer-1", None, None, false)
+        .unwrap();
+    svc.publish_reported(
+        "thread:parent-steer-1",
+        PresenceState::Working,
+        None,
+        1,
+        1_000,
+    )
+    .unwrap();
+
+    // Active child spawned under a blocking `--wait` (so parent notice was suppressed).
+    svc.attach(
+        Family::Thread,
+        "child-steer-active",
+        None,
+        Some("thread:parent-steer-1"),
+        false,
+    )
+    .unwrap();
+    svc.publish_reported(
+        "thread:child-steer-active",
+        PresenceState::Working,
+        None,
+        1,
+        1_010,
+    )
+    .unwrap();
+    svc.suppress_parent_notice_for("thread:child-steer-active");
+
+    // Already-settled child whose notice was suppressed after an earlier completed wait.
+    svc.attach(
+        Family::Thread,
+        "child-steer-settled",
+        None,
+        Some("thread:parent-steer-1"),
+        false,
+    )
+    .unwrap();
+    svc.publish_reported(
+        "thread:child-steer-settled",
+        PresenceState::Done,
+        None,
+        1,
+        1_020,
+    )
+    .unwrap();
+    svc.suppress_parent_notice_for("thread:child-steer-settled");
+
+    // Parent gets steered: restore notices for active children only.
+    svc.restore_parent_notices_for_active_children("thread:parent-steer-1");
+
+    // Parent settles briefly and immediately starts the steered turn (`Working`).
+    svc.publish_reported(
+        "thread:parent-steer-1",
+        PresenceState::Done,
+        None,
+        2,
+        1_030,
+    )
+    .unwrap();
+    svc.publish_reported(
+        "thread:parent-steer-1",
+        PresenceState::Working,
+        None,
+        3,
+        1_040,
+    )
+    .unwrap();
+
+    // Active child completes while parent is still Working on the steered turn -> notice must QUEUE, not fire yet.
+    svc.port_mut().buffers.push((
+        (Family::Thread, "child-steer-active".into()),
+        "Subagent final answer".into(),
+    ));
+    svc.publish_reported(
+        "thread:child-steer-active",
+        PresenceState::Done,
+        None,
+        2,
+        1_050,
+    )
+    .unwrap();
+    assert_eq!(
+        svc.port_mut().writes.len(),
+        0,
+        "completion notice must queue while parent is Working on steered turn"
+    );
+
+    // Parent finishes its steered turn (`Done`) -> queued completion notice flushes cleanly to parent!
+    svc.publish_reported(
+        "thread:parent-steer-1",
+        PresenceState::Done,
+        None,
+        4,
+        1_060,
+    )
+    .unwrap();
+    assert_eq!(
+        svc.port_mut().writes.len(),
+        1,
+        "queued child completion notice must deliver once parent settles"
+    );
+    assert_eq!(svc.port_mut().writes[0].id, "parent-steer-1");
+    assert!(svc.port_mut().writes[0].text.contains("Subagent final answer"));
+    assert!(
+        !svc.port_mut().writes[0].text.contains("child-steer-settled"),
+        "already-settled child must stay suppressed"
+    );
+}

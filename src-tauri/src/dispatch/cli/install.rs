@@ -1,9 +1,81 @@
+use serde_json::{json, Value};
+
 use crate::dispatch::address::is_caller_endpoint;
 use crate::dispatch::policy::{ChildrenMode, RunInput, SendInput, Service, WaitInput};
 use crate::dispatch::port::Port;
 use crate::dispatch::presence::PresenceState;
 use crate::dispatch::types::{exit_code, Caller, DispatchError, Family, Receipt, ReceiptStatus};
 use super::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpProfile {
+    Full,
+    DispatchOnly,
+    None,
+}
+
+/// Pure helper backing [`mcp_entry_for_profile`] for deterministic testing without mutating env vars.
+pub fn mcp_entry_for_profile_with_http(
+    profile: McpProfile,
+    hub_info: Option<(u16, &str)>,
+    use_http_hub: bool,
+) -> Option<Value> {
+    if profile == McpProfile::None {
+        return None;
+    }
+    if use_http_hub {
+        if let Some((port, token)) = hub_info {
+            let trimmed = token.trim();
+            if port > 0 && !trimmed.is_empty() {
+                return Some(json!({
+                    "type": "http",
+                    "url": format!("http://127.0.0.1:{port}/mcp"),
+                    "headers": {
+                        "Authorization": format!("Bearer {trimmed}")
+                    }
+                }));
+            }
+        }
+    }
+    Some(json!({
+        "command": "kite",
+        "args": ["dispatch", "mcp"]
+    }))
+}
+
+/// Builds the `mcpServers["kite-dispatch"]` JSON config entry for the requested [`McpProfile`].
+///
+/// Emits `{ "type": "http", "url": "http://127.0.0.1:<port>/mcp", "headers": { "Authorization": "Bearer <token>" } }`
+/// when `hub_info` is `Some` and `KITE_MCP_HTTP_HUB=1`, falls back to `{ "command": "kite", "args": ["dispatch", "mcp"] }`
+/// otherwise, or returns `None` for [`McpProfile::None`].
+pub fn mcp_entry_for_profile(
+    profile: McpProfile,
+    hub_info: Option<(u16, &str)>,
+) -> Option<Value> {
+    let use_http_hub = std::env::var("KITE_MCP_HTTP_HUB")
+        .ok()
+        .is_some_and(|v| v.trim() == "1");
+    mcp_entry_for_profile_with_http(profile, hub_info, use_http_hub)
+}
+
+fn read_disk_mcp_hub_info() -> Option<(u16, String)> {
+    let path = crate::persist::roaming_app_dir().join("mcp-hub.json");
+    let bytes = std::fs::read(path).ok()?;
+    let parsed = serde_json::from_slice::<Value>(&bytes).ok()?;
+    let token = parsed.get("token").and_then(Value::as_str)?.trim().to_string();
+    if token.is_empty() {
+        return None;
+    }
+    let port = parsed
+        .get("url")
+        .and_then(Value::as_str)
+        .and_then(|url| url.rsplit(':').next())
+        .and_then(|tail| tail.split('/').next())
+        .and_then(|raw| raw.parse::<u16>().ok())
+        .or_else(|| parsed.get("port").and_then(Value::as_u64).map(|p| p as u16))
+        .filter(|&p| p > 0)?;
+    Some((port, token))
+}
 
 pub fn check_token(expected: &str, presented: &str) -> bool {
     !expected.is_empty() && expected == presented
@@ -123,7 +195,8 @@ pub(crate) fn write_shim_to_dir(dir: &std::path::Path, current_exe: &std::path::
     }
 }
 
-/// Writes `kite.cmd` (and copies companion console `kite.exe`) next to app data so a terminal can call `kite` with synchronous stdio.
+/// Writes `kite.cmd` (and copies companion console `kite.exe`) next to app data so a terminal can call `kite` with synchronous stdio,
+/// and ensures the shim `bin` folder is registered on Windows User `PATH`.
 pub fn install_kite_shim() -> std::path::PathBuf {
     let dir = crate::persist::roaming_app_dir().join("bin");
     if running_under_test() {
@@ -132,6 +205,7 @@ pub fn install_kite_shim() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         write_shim_to_dir(&dir, &exe);
     }
+    let _ = crate::user_path::ensure_kite_bin_on_user_path(&dir);
     dir
 }
 
@@ -239,15 +313,53 @@ fn upsert_managed_rule_block(path: &std::path::Path, rules_markdown: &str) {
     write_if_changed(path, &format!("{block}\n"));
 }
 
+fn format_dispatch_hook_command(raw_cmd: &str, fallback_json: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        let fb_stmt = match fallback_json {
+            Some(fb) => format!("echo {fb}"),
+            None => "ver >nul".to_string(),
+        };
+        let run_stmt = if let Some(sub_args) = raw_cmd.strip_prefix("kite ") {
+            format!(
+                r#"if exist "%APPDATA%\Kite Code\bin\kite.exe" ("%APPDATA%\Kite Code\bin\kite.exe" {sub_args}) else (where /q kite >nul 2>nul & if errorlevel 1 ({fb_stmt}) else ({raw_cmd}))"#
+            )
+        } else {
+            format!(
+                "where /q kite >nul 2>nul & if errorlevel 1 ({fb_stmt}) else ({raw_cmd})"
+            )
+        };
+        format!(
+            r#"set _K=& (if "%KITE_DISPATCH%"=="1" set _K=1) & (if defined KITE_AGENT_ID set _K=1) & if defined _K ({run_stmt}) else ({fb_stmt})"#
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let fb_stmt = match fallback_json {
+            Some(fb) => format!("printf '%s\\n' '{fb}'"),
+            None => "true".to_string(),
+        };
+        format!(
+            r#"if [ "$KITE_DISPATCH" = "1" ] || [ -n "$KITE_AGENT_ID" ]; then if command -v kite >/dev/null 2>&1; then {raw_cmd}; else {fb_stmt}; fi; else {fb_stmt}; fi"#
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum McpServerAction<'a> {
+    Keep,
+    Set(&'a Value),
+    Remove,
+}
+
 fn merge_nested_hook_and_mcp_json(
     json_path: &std::path::Path,
     event_key: &str,
     matcher: &str,
     hook_cmd: &str,
-    include_mcp_server: bool,
+    timeout_secs: Option<u64>,
+    mcp_action: McpServerAction<'_>,
 ) -> String {
-    use serde_json::{json, Value};
-
     let mut root: Value = if json_path.is_file() {
         std::fs::read_to_string(json_path)
             .ok()
@@ -280,34 +392,38 @@ fn merge_nested_hook_and_mcp_json(
                     entry
                         .get("command")
                         .and_then(Value::as_str)
-                        .is_some_and(|c| c.starts_with("kite dispatch hook-subagent"))
+                        .is_some_and(|c| c.contains("kite dispatch hook-subagent"))
                 })
             })
             .unwrap_or(false)
     });
+    let mut hook_item = json!({
+        "type": "command",
+        "command": hook_cmd
+    });
+    if let Some(t) = timeout_secs {
+        hook_item["timeout"] = json!(t);
+    }
     event_arr.push(json!({
         "matcher": matcher,
-        "hooks": [
-            {
-                "type": "command",
-                "command": hook_cmd
-            }
-        ]
+        "hooks": [hook_item]
     }));
 
-    if include_mcp_server {
-        let mcp_val = obj.entry("mcpServers").or_insert_with(|| json!({}));
-        if !mcp_val.is_object() {
-            *mcp_val = json!({});
+    match mcp_action {
+        McpServerAction::Keep => {}
+        McpServerAction::Set(entry) => {
+            let mcp_val = obj.entry("mcpServers").or_insert_with(|| json!({}));
+            if !mcp_val.is_object() {
+                *mcp_val = json!({});
+            }
+            if let Some(mcp_obj) = mcp_val.as_object_mut() {
+                mcp_obj.insert("kite-dispatch".to_string(), entry.clone());
+            }
         }
-        if let Some(mcp_obj) = mcp_val.as_object_mut() {
-            mcp_obj.insert(
-                "kite-dispatch".to_string(),
-                json!({
-                    "command": "kite",
-                    "args": ["dispatch", "mcp"]
-                }),
-            );
+        McpServerAction::Remove => {
+            if let Some(mcp_obj) = obj.get_mut("mcpServers").and_then(Value::as_object_mut) {
+                mcp_obj.remove("kite-dispatch");
+            }
         }
     }
 
@@ -316,12 +432,31 @@ fn merge_nested_hook_and_mcp_json(
     serialized
 }
 
-fn upsert_codex_config_toml(config_path: &std::path::Path, hooks_sha256: &str) {
+fn upsert_codex_config_toml(
+    config_path: &std::path::Path,
+    hooks_sha256: &str,
+    mcp_entry: Option<&Value>,
+) {
     const START_MARKER: &str = "# kite-dispatch:start";
     const END_MARKER: &str = "# kite-dispatch:end";
-    let block = format!(
-        "{START_MARKER}\n[mcp_servers.kite-dispatch]\ncommand = \"kite\"\nargs = [\"dispatch\", \"mcp\"]\napproval_mode = \"approve\"\ntrusted_hash = \"{hooks_sha256}\"\n{END_MARKER}"
-    );
+    let block = match mcp_entry {
+        Some(entry) if entry.get("type").and_then(Value::as_str) == Some("http") => {
+            let url = entry.get("url").and_then(Value::as_str).unwrap_or("");
+            let auth = entry
+                .pointer("/headers/Authorization")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            format!(
+                "{START_MARKER}\n[mcp_servers.kite-dispatch]\nurl = \"{url}\"\nhttp_headers = {{ Authorization = \"{auth}\" }}\napproval_mode = \"approve\"\ntrusted_hash = \"{hooks_sha256}\"\n{END_MARKER}"
+            )
+        }
+        Some(_) => format!(
+            "{START_MARKER}\n[mcp_servers.kite-dispatch]\ncommand = \"kite\"\nargs = [\"dispatch\", \"mcp\"]\napproval_mode = \"approve\"\ntrusted_hash = \"{hooks_sha256}\"\n{END_MARKER}"
+        ),
+        None => format!(
+            "{START_MARKER}\n# kite-dispatch MCP disabled (McpProfile::None)\n{END_MARKER}"
+        ),
+    };
 
     if config_path.is_file() {
         if let Ok(existing) = std::fs::read_to_string(config_path) {
@@ -361,14 +496,22 @@ function evaluateDispatchHook(tool: string, args: Record<string, unknown>): Reco
     const out = execFileSync(
       "kite",
       ["dispatch", "hook-subagent", "--agent", "opencode", "--input", payload],
-      { encoding: "utf8", timeout: 4000, stdio: ["ignore", "pipe", "ignore"] }
+      { encoding: "utf8", timeout: 4000, stdio: ["ignore", "pipe", "pipe"] }
     );
     const parsed = JSON.parse(out.trim() || "{}");
     if (parsed && typeof parsed.overwrite === "object" && parsed.overwrite !== null) {
       return parsed.overwrite as Record<string, unknown>;
     }
-  } catch {
-    // Fail-open passthrough
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return null;
+    }
+    const status = typeof err?.status === "number" ? err.status : 0;
+    const stderr = String(err?.stderr ?? "").trim();
+    const stdout = String(err?.stdout ?? "").trim();
+    if (status === 2 || stderr || stdout) {
+      throw new Error(stderr || stdout || `Blocked by Kite policy hook (exit ${status}).`);
+    }
   }
   return null;
 }
@@ -394,8 +537,43 @@ export default {
 /// the unified `kite-dispatch` plugin, hooks, MCP config, and `<2 KB` `rules/AGENTS.md`
 /// across all detected agent roots under `home`.
 pub fn install_dispatch_integrations_at(home: &std::path::Path, rules_markdown: &str) {
-    use serde_json::{json, Value};
+    let hub_info = if !running_under_test()
+        && std::env::var("KITE_MCP_HTTP_HUB")
+            .ok()
+            .is_some_and(|v| v.trim() == "1")
+    {
+        read_disk_mcp_hub_info()
+    } else {
+        None
+    };
+    let use_http_hub = std::env::var("KITE_MCP_HTTP_HUB")
+        .ok()
+        .is_some_and(|v| v.trim() == "1");
+    let hub_ref = hub_info.as_ref().map(|(p, t)| (*p, t.as_str()));
+    install_dispatch_integrations_with_profile_at(
+        home,
+        rules_markdown,
+        McpProfile::Full,
+        hub_ref,
+        use_http_hub,
+    );
+}
+
+/// Provisions `kite-dispatch` plugin, hooks, rules, and MCP registration according to `profile`.
+pub fn install_dispatch_integrations_with_profile_at(
+    home: &std::path::Path,
+    rules_markdown: &str,
+    profile: McpProfile,
+    hub_info: Option<(u16, &str)>,
+    use_http_hub: bool,
+) {
     use sha2::{Digest, Sha256};
+
+    let mcp_entry = mcp_entry_for_profile_with_http(profile, hub_info, use_http_hub);
+    let mcp_action = match mcp_entry.as_ref() {
+        Some(entry) => McpServerAction::Set(entry),
+        None => McpServerAction::Remove,
+    };
 
     // 1. Remove legacy loose `skills/kite-dispatch/SKILL.md` pollution.
     cleanup_legacy_dispatch_skills(home);
@@ -414,15 +592,20 @@ pub fn install_dispatch_integrations_at(home: &std::path::Path, rules_markdown: 
         "mcpServers": "./mcp_config.json"
     }))
     .unwrap_or_default();
+    let agy_hook_cmd = format_dispatch_hook_command(
+        "kite dispatch hook-subagent --agent antigravity",
+        Some(r#"{"decision":"allow"}"#),
+    );
     let hooks_json = serde_json::to_string_pretty(&json!({
-        "hooks": {
+        "kite-dispatch": {
             "PreToolUse": [
                 {
-                    "matcher": "invoke_subagent|define_subagent|run_command",
+                    "matcher": "invoke_subagent|define_subagent|run_command|write_to_file|replace_file_content|multi_replace_file_content|edit_file|write_file",
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "kite dispatch hook-subagent --agent antigravity"
+                            "timeout": 5,
+                            "command": agy_hook_cmd
                         }
                     ]
                 }
@@ -430,15 +613,18 @@ pub fn install_dispatch_integrations_at(home: &std::path::Path, rules_markdown: 
         }
     }))
     .unwrap_or_default();
-    let mcp_config_json = serde_json::to_string_pretty(&json!({
-        "mcpServers": {
-            "kite-dispatch": {
-                "command": "kite",
-                "args": ["dispatch", "mcp"]
+    let mcp_config_json = match mcp_entry.as_ref() {
+        Some(entry) => serde_json::to_string_pretty(&json!({
+            "mcpServers": {
+                "kite-dispatch": entry
             }
-        }
-    }))
-    .unwrap_or_default();
+        }))
+        .unwrap_or_default(),
+        None => serde_json::to_string_pretty(&json!({
+            "mcpServers": {}
+        }))
+        .unwrap_or_default(),
+    };
     let rules_body = format!("{}\n", rules_markdown.trim());
 
     write_if_changed(&agy_plugin_dir.join("plugin.json"), &plugin_json);
@@ -453,12 +639,15 @@ pub fn install_dispatch_integrations_at(home: &std::path::Path, rules_markdown: 
     // Claude (`~/.claude/settings.json` + `~/.claude/CLAUDE.md`)
     let claude_dir = home.join(".claude");
     if claude_dir.is_dir() {
+        let claude_cmd =
+            format_dispatch_hook_command("kite dispatch hook-subagent --agent claude", None);
         merge_nested_hook_and_mcp_json(
             &claude_dir.join("settings.json"),
             "PreToolUse",
-            "Task|Agent|Bash",
-            "kite dispatch hook-subagent --agent claude",
-            true,
+            "Task|Agent|Bash|Write|Edit|MultiEdit|NotebookEdit",
+            &claude_cmd,
+            Some(5),
+            mcp_action,
         );
         upsert_managed_rule_block(&claude_dir.join("CLAUDE.md"), rules_markdown);
     }
@@ -466,34 +655,46 @@ pub fn install_dispatch_integrations_at(home: &std::path::Path, rules_markdown: 
     // Codex (`~/.codex/hooks.json` + `~/.codex/config.toml` + `~/.codex/AGENTS.md`)
     let codex_dir = home.join(".codex");
     if codex_dir.is_dir() {
+        let codex_cmd =
+            format_dispatch_hook_command("kite dispatch hook-subagent --agent codex", None);
         let hooks_raw = merge_nested_hook_and_mcp_json(
             &codex_dir.join("hooks.json"),
             "PreToolUse",
-            "Task|Agent|Bash",
-            "kite dispatch hook-subagent --agent codex",
-            false,
+            "Task|Agent|Bash|Write|Edit|MultiEdit|apply_patch",
+            &codex_cmd,
+            None,
+            McpServerAction::Keep,
         );
         let mut hasher = Sha256::new();
         hasher.update(hooks_raw.as_bytes());
         let hooks_sha256 = format!("{:x}", hasher.finalize());
-        upsert_codex_config_toml(&codex_dir.join("config.toml"), &hooks_sha256);
+        upsert_codex_config_toml(
+            &codex_dir.join("config.toml"),
+            &hooks_sha256,
+            mcp_entry.as_ref(),
+        );
         upsert_managed_rule_block(&codex_dir.join("AGENTS.md"), rules_markdown);
     }
 
     // Gemini CLI (`~/.gemini/settings.json` + `~/.gemini/GEMINI.md`)
     let gemini_dir = home.join(".gemini");
     if gemini_dir.is_dir() {
+        let gemini_cmd = format_dispatch_hook_command(
+            "kite dispatch hook-subagent --agent gemini",
+            Some(r#"{"decision":"allow"}"#),
+        );
         merge_nested_hook_and_mcp_json(
             &gemini_dir.join("settings.json"),
             "BeforeTool",
-            "run_shell_command|Task|Agent",
-            "kite dispatch hook-subagent --agent gemini",
-            true,
+            "run_shell_command|Task|Agent|write_file|replace|edit_file",
+            &gemini_cmd,
+            Some(5),
+            mcp_action,
         );
         upsert_managed_rule_block(&gemini_dir.join("GEMINI.md"), rules_markdown);
     }
 
-    // Cursor (`~/.cursor/hooks.json` + `~/.cursor/rules/kite-dispatch.mdc`)
+    // Cursor (`~/.cursor/hooks.json` + `~/.cursor/mcp.json` + `~/.cursor/rules/kite-dispatch.mdc`)
     let cursor_dir = home.join(".cursor");
     if cursor_dir.is_dir() {
         let cursor_hooks_path = cursor_dir.join("hooks.json");
@@ -527,14 +728,49 @@ pub fn install_dispatch_integrations_at(home: &std::path::Path, rules_markdown: 
             !entry
                 .get("command")
                 .and_then(Value::as_str)
-                .is_some_and(|c| c.starts_with("kite dispatch hook-subagent"))
+                .is_some_and(|c| c.contains("kite dispatch hook-subagent"))
         });
+        let cursor_cmd =
+            format_dispatch_hook_command("kite dispatch hook-subagent --agent cursor", Some("{}"));
         pre_arr.push(json!({
-            "matcher": "Shell|Task|Agent",
-            "command": "kite dispatch hook-subagent --agent cursor"
+            "matcher": "Shell|Task|Agent|Write|Edit|Delete|edit_file|write_file",
+            "command": cursor_cmd
         }));
         if let Ok(serialized) = serde_json::to_string_pretty(&root) {
             write_if_changed(&cursor_hooks_path, &serialized);
+        }
+        let cursor_mcp_path = cursor_dir.join("mcp.json");
+        let mut mcp_root: Value = if cursor_mcp_path.is_file() {
+            std::fs::read_to_string(&cursor_mcp_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok())
+                .unwrap_or_else(|| json!({}))
+        } else {
+            json!({})
+        };
+        if !mcp_root.is_object() {
+            mcp_root = json!({});
+        }
+        let mcp_servers = mcp_root
+            .as_object_mut()
+            .expect("object")
+            .entry("mcpServers")
+            .or_insert_with(|| json!({}));
+        if !mcp_servers.is_object() {
+            *mcp_servers = json!({});
+        }
+        if let Some(servers_obj) = mcp_servers.as_object_mut() {
+            match mcp_entry.as_ref() {
+                Some(entry) => {
+                    servers_obj.insert("kite-dispatch".to_string(), entry.clone());
+                }
+                None => {
+                    servers_obj.remove("kite-dispatch");
+                }
+            }
+        }
+        if let Ok(serialized) = serde_json::to_string_pretty(&mcp_root) {
+            write_if_changed(&cursor_mcp_path, &serialized);
         }
         write_if_changed(
             &cursor_dir.join("rules").join("kite-dispatch.mdc"),
@@ -555,13 +791,15 @@ pub fn install_dispatch_integrations_at(home: &std::path::Path, rules_markdown: 
     // Copilot (`~/.copilot/hooks/kite-dispatch.json`)
     let copilot_dir = home.join(".copilot");
     if copilot_dir.is_dir() {
+        let copilot_cmd =
+            format_dispatch_hook_command("kite dispatch hook-subagent --agent copilot", None);
         let copilot_hook = serde_json::to_string_pretty(&json!({
             "version": 1,
             "hooks": {
                 "PreToolUse": [
                     {
                         "type": "command",
-                        "command": "kite dispatch hook-subagent --agent copilot",
+                        "command": copilot_cmd,
                         "cwd": ".",
                         "timeout": 5
                     }
@@ -698,6 +936,11 @@ mod install_tests {
         // Seed existing agent directories
         std::fs::create_dir_all(home.join(".codex")).unwrap();
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::write(
+            home.join(".cursor").join("mcp.json"),
+            r#"{"mcpServers":{"existing-tool":{"command":"node","args":["tool.js"]}}}"#,
+        )
+        .unwrap();
         std::fs::create_dir_all(home.join(".config").join("opencode")).unwrap();
         std::fs::create_dir_all(home.join(".copilot")).unwrap();
 
@@ -798,6 +1041,16 @@ mod install_tests {
         assert!(home.join(".gemini").join("settings.json").is_file());
         assert!(home.join(".gemini").join("GEMINI.md").is_file());
         assert!(home.join(".cursor").join("hooks.json").is_file());
+        let cursor_mcp: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".cursor").join("mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cursor_mcp["mcpServers"]["kite-dispatch"]["command"], "kite");
+        assert_eq!(
+            cursor_mcp["mcpServers"]["kite-dispatch"]["args"],
+            serde_json::json!(["dispatch", "mcp"])
+        );
+        assert_eq!(cursor_mcp["mcpServers"]["existing-tool"]["command"], "node");
         assert!(home
             .join(".cursor")
             .join("rules")
@@ -814,6 +1067,318 @@ mod install_tests {
             .join("hooks")
             .join("kite-dispatch.json")
             .is_file());
+
+        // Antigravity kite-dispatch hooks.json uses named "kite-dispatch" key, timeout, KITE_DISPATCH/KITE_AGENT_ID gate, exit-2 preserving invocation, and filesystem_write matchers
+        let agy_hooks_val: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(plugin_dir.join("hooks.json")).unwrap(),
+        )
+        .unwrap();
+        let agy_pre = &agy_hooks_val["kite-dispatch"]["PreToolUse"][0];
+        let agy_matcher = agy_pre["matcher"].as_str().unwrap();
+        assert!(agy_matcher.contains("write_to_file"));
+        assert!(agy_matcher.contains("edit_file"));
+        let agy_entry = &agy_pre["hooks"][0];
+        assert_eq!(agy_entry["timeout"], 5);
+        let agy_cmd = agy_entry["command"].as_str().unwrap();
+        assert!(agy_cmd.contains("kite dispatch hook-subagent --agent antigravity"));
+        assert!(agy_cmd.contains("KITE_DISPATCH"));
+        assert!(agy_cmd.contains("KITE_AGENT_ID"));
+        assert!(agy_cmd.contains("{\"decision\":\"allow\"}"));
+        assert!(
+            !agy_cmd.contains("|| echo") && !agy_cmd.contains("|| exit /b 0") && !agy_cmd.contains("|| true"),
+            "hook wrapper must not swallow exit 2 denials: {agy_cmd}"
+        );
+
+        let claude_hooks: serde_json::Value = serde_json::from_str(&claude_settings).unwrap();
+        assert!(claude_hooks["hooks"]["PreToolUse"][0]["matcher"]
+            .as_str()
+            .unwrap()
+            .contains("Write|Edit"));
+        let codex_hooks: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".codex").join("hooks.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(codex_hooks["hooks"]["PreToolUse"][0]["matcher"]
+            .as_str()
+            .unwrap()
+            .contains("apply_patch"));
+        let cursor_hooks: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".cursor").join("hooks.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(cursor_hooks["hooks"]["preToolUse"][0]["matcher"]
+            .as_str()
+            .unwrap()
+            .contains("edit_file|write_file"));
+        let opencode_plugin = std::fs::read_to_string(
+            home.join(".config")
+                .join("opencode")
+                .join("plugins")
+                .join("kite-dispatch.ts"),
+        )
+        .unwrap();
+        assert!(opencode_plugin.contains("status === 2"));
+
+        // Re-installing over legacy bare hook commands replaces without duplicating
+        std::fs::write(
+            home.join(".gemini").join("settings.json"),
+            r#"{"hooks":{"BeforeTool":[{"matcher":"run_shell_command|Task|Agent","hooks":[{"type":"command","command":"kite dispatch hook-subagent --agent gemini"}]}]}}"#,
+        )
+        .unwrap();
+        install_dispatch_integrations_at(&home, &rules_md);
+        let gem_val: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".gemini").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gem_val["hooks"]["BeforeTool"].as_array().unwrap().len(), 1);
+        assert!(gem_val["hooks"]["BeforeTool"][0]["matcher"]
+            .as_str()
+            .unwrap()
+            .contains("write_file"));
+        let gem_cmd = gem_val["hooks"]["BeforeTool"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(gem_cmd.contains("KITE_DISPATCH"));
+        assert!(gem_cmd.contains("KITE_AGENT_ID"));
+        assert!(gem_cmd.contains("{\"decision\":\"allow\"}"));
+        assert!(
+            !gem_cmd.contains("|| echo") && !gem_cmd.contains("|| exit /b 0") && !gem_cmd.contains("|| true"),
+            "gemini hook wrapper must not swallow exit 2 denials: {gem_cmd}"
+        );
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_dispatch_hook_command_preserves_exit_2_when_kite_present_and_allows_when_inactive() {
+        use std::os::windows::process::CommandExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "kite-hook-cmd-exit2-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fake_kite = tmp.join("kite.cmd");
+        std::fs::write(&fake_kite, "@echo off\r\nexit /b 2\r\n").unwrap();
+
+        let wrapped = format_dispatch_hook_command(
+            "kite dispatch hook-subagent --agent antigravity",
+            Some(r#"{"decision":"allow"}"#),
+        );
+        let cmdline = format!(r#""{wrapped}""#);
+        let path_with_fake = format!(
+            "{};{}",
+            tmp.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        // 1. Active KITE_AGENT_ID with fake kite on PATH must propagate exit 2
+        let active_out = std::process::Command::new("cmd")
+            .args(["/D", "/C"])
+            .raw_arg(&cmdline)
+            .env("PATH", &path_with_fake)
+            .env("APPDATA", tmp.join("empty-appdata"))
+            .env_remove("KITE_DISPATCH")
+            .env("KITE_AGENT_ID", "agent-123")
+            .output()
+            .unwrap();
+        assert_eq!(
+            active_out.status.code(),
+            Some(2),
+            "exit 2 must propagate when KITE_AGENT_ID is active; stdout={}, stderr={}",
+            String::from_utf8_lossy(&active_out.stdout),
+            String::from_utf8_lossy(&active_out.stderr),
+        );
+
+        // 2. Inactive (neither KITE_DISPATCH nor KITE_AGENT_ID) must fail open with exit 0 + allow JSON
+        let inactive_out = std::process::Command::new("cmd")
+            .args(["/D", "/C"])
+            .raw_arg(&cmdline)
+            .env("PATH", &path_with_fake)
+            .env("APPDATA", tmp.join("empty-appdata"))
+            .env_remove("KITE_DISPATCH")
+            .env_remove("KITE_AGENT_ID")
+            .output()
+            .unwrap();
+        assert_eq!(
+            inactive_out.status.code(),
+            Some(0),
+            "inactive wrapper must exit 0; stdout={}, stderr={}",
+            String::from_utf8_lossy(&inactive_out.stdout),
+            String::from_utf8_lossy(&inactive_out.stderr),
+        );
+        assert!(String::from_utf8_lossy(&inactive_out.stdout).contains(r#"{"decision":"allow"}"#));
+
+        // 3. Active KITE_AGENT_ID with missing kite binary (no APPDATA bin, no PATH kite) fails open gracefully
+        let missing_bin_out = std::process::Command::new("cmd")
+            .args(["/D", "/C"])
+            .raw_arg(&cmdline)
+            .env("PATH", std::env::temp_dir())
+            .env("APPDATA", tmp.join("empty-appdata"))
+            .env_remove("KITE_DISPATCH")
+            .env("KITE_AGENT_ID", "agent-123")
+            .output()
+            .unwrap();
+        assert_eq!(missing_bin_out.status.code(), Some(0));
+        assert!(String::from_utf8_lossy(&missing_bin_out.stdout).contains(r#"{"decision":"allow"}"#));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn mcp_entry_for_profile_supports_http_hub_opt_in_stdio_fallback_and_none() {
+        // 1. None always suppresses MCP entry
+        assert_eq!(mcp_entry_for_profile_with_http(McpProfile::None, None, false), None);
+        assert_eq!(
+            mcp_entry_for_profile_with_http(McpProfile::None, Some((43210, "tok-1")), true),
+            None
+        );
+
+        // 2. Stdio fallback when HTTP hub is disabled or hub_info is absent/invalid
+        let expected_stdio = serde_json::json!({
+            "command": "kite",
+            "args": ["dispatch", "mcp"]
+        });
+        assert_eq!(
+            mcp_entry_for_profile_with_http(McpProfile::Full, None, false),
+            Some(expected_stdio.clone())
+        );
+        assert_eq!(
+            mcp_entry_for_profile_with_http(McpProfile::DispatchOnly, Some((43210, "tok-1")), false),
+            Some(expected_stdio.clone())
+        );
+        assert_eq!(
+            mcp_entry_for_profile_with_http(McpProfile::Full, None, true),
+            Some(expected_stdio.clone())
+        );
+        assert_eq!(
+            mcp_entry_for_profile_with_http(McpProfile::Full, Some((0, "tok-1")), true),
+            Some(expected_stdio.clone())
+        );
+        assert_eq!(
+            mcp_entry_for_profile_with_http(McpProfile::Full, Some((43210, "   ")), true),
+            Some(expected_stdio.clone())
+        );
+
+        // 3. HTTP Hub entry when hub_info is Some and KITE_MCP_HTTP_HUB=1
+        let expected_http = serde_json::json!({
+            "type": "http",
+            "url": "http://127.0.0.1:43210/mcp",
+            "headers": {
+                "Authorization": "Bearer secret-token-256"
+            }
+        });
+        assert_eq!(
+            mcp_entry_for_profile_with_http(McpProfile::Full, Some((43210, "secret-token-256")), true),
+            Some(expected_http.clone())
+        );
+        assert_eq!(
+            mcp_entry_for_profile_with_http(
+                McpProfile::DispatchOnly,
+                Some((43210, "secret-token-256")),
+                true
+            ),
+            Some(expected_http.clone())
+        );
+
+        // 4. Verify env-backed `mcp_entry_for_profile` with `KITE_MCP_HTTP_HUB=1`
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("KITE_MCP_HTTP_HUB");
+        std::env::set_var("KITE_MCP_HTTP_HUB", "1");
+        let env_http = mcp_entry_for_profile(McpProfile::Full, Some((43210, "secret-token-256")));
+        std::env::remove_var("KITE_MCP_HTTP_HUB");
+        let env_stdio = mcp_entry_for_profile(McpProfile::Full, Some((43210, "secret-token-256")));
+        if let Some(old) = prev {
+            std::env::set_var("KITE_MCP_HTTP_HUB", old);
+        }
+        assert_eq!(env_http, Some(expected_http));
+        assert_eq!(env_stdio, Some(expected_stdio));
+    }
+
+    #[test]
+    fn install_dispatch_integrations_with_profile_writes_http_hub_and_handles_none() {
+        let home = std::env::temp_dir().join(format!(
+            "kite-dispatch-http-profile-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::write(
+            home.join(".cursor").join("mcp.json"),
+            r#"{"mcpServers":{"existing":{"command":"node","args":["s.js"]}}}"#,
+        )
+        .unwrap();
+
+        install_dispatch_integrations_with_profile_at(
+            &home,
+            "<!-- kite-dispatch:start -->\nrules\n<!-- kite-dispatch:end -->",
+            McpProfile::Full,
+            Some((49152, "hub-secret-abc")),
+            true,
+        );
+
+        let agy_mcp: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                home.join(".gemini")
+                    .join("config")
+                    .join("plugins")
+                    .join("kite-dispatch")
+                    .join("mcp_config.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(agy_mcp["mcpServers"]["kite-dispatch"]["type"], "http");
+        assert_eq!(
+            agy_mcp["mcpServers"]["kite-dispatch"]["url"],
+            "http://127.0.0.1:49152/mcp"
+        );
+        assert_eq!(
+            agy_mcp["mcpServers"]["kite-dispatch"]["headers"]["Authorization"],
+            "Bearer hub-secret-abc"
+        );
+
+        let cursor_mcp: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".cursor").join("mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cursor_mcp["mcpServers"]["kite-dispatch"]["type"], "http");
+        assert_eq!(cursor_mcp["mcpServers"]["existing"]["command"], "node");
+
+        let claude_settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".claude").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            claude_settings["mcpServers"]["kite-dispatch"]["url"],
+            "http://127.0.0.1:49152/mcp"
+        );
+
+        let codex_toml =
+            std::fs::read_to_string(home.join(".codex").join("config.toml")).unwrap();
+        assert!(codex_toml.contains("url = \"http://127.0.0.1:49152/mcp\""));
+        assert!(codex_toml.contains("Authorization = \"Bearer hub-secret-abc\""));
+
+        // Re-running with McpProfile::None strips kite-dispatch while keeping existing servers
+        install_dispatch_integrations_with_profile_at(
+            &home,
+            "<!-- kite-dispatch:start -->\nrules\n<!-- kite-dispatch:end -->",
+            McpProfile::None,
+            None,
+            false,
+        );
+        let cursor_after_none: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".cursor").join("mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(cursor_after_none["mcpServers"].get("kite-dispatch").is_none());
+        assert_eq!(cursor_after_none["mcpServers"]["existing"]["command"], "node");
 
         let _ = std::fs::remove_dir_all(&home);
     }

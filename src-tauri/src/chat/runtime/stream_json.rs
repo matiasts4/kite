@@ -53,6 +53,8 @@ pub(super) fn clear_stream_run_state(run_id: &str) {
     streaming_sys_msg_runs().lock().unwrap().remove(run_id);
     last_agent_step_by_run().lock().unwrap().remove(run_id);
     fallback_projected_steps_by_run().lock().unwrap().remove(run_id);
+    stderr_ring().lock().unwrap().remove(run_id);
+    result_failures().lock().unwrap().remove(run_id);
 }
 
 #[cfg(test)]
@@ -71,6 +73,14 @@ pub(super) fn seed_stream_run_state_for_test(run_id: &str, step: i64) {
         .entry(run_id.to_string())
         .or_default()
         .insert(step);
+    stderr_ring()
+        .lock()
+        .unwrap()
+        .insert(run_id.to_string(), "test stderr".to_string());
+    result_failures()
+        .lock()
+        .unwrap()
+        .insert(run_id.to_string(), "test failure".to_string());
 }
 
 #[cfg(test)]
@@ -81,6 +91,8 @@ pub(super) fn has_stream_run_state_for_test(run_id: &str) -> bool {
             .lock()
             .unwrap()
             .contains_key(run_id)
+        || stderr_ring().lock().unwrap().contains_key(run_id)
+        || result_failures().lock().unwrap().contains_key(run_id)
 }
 
 use super::pipeline::apply_known_turn_pipeline;
@@ -328,14 +340,24 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                         None
                     }
                 };
+                let meta = crate::notifications::resolve_notification_context(
+                    Some(thread_id),
+                    profile_id.as_deref(),
+                    None,
+                );
                 {
                     let source = if profile_id.is_some() { "agentChat" } else { "codeThread" };
+                    let module = if profile_id.is_some() { "agent" } else { "chat" };
                     let notice = json!({
                         "id": approval.request_id,
                         "runId": run_id,
                         "target": { "source": source, "id": thread_id },
                         "profileId": profile_id,
                         "routineId": Value::Null,
+                        "actorName": meta.actor_name,
+                        "threadTitle": meta.thread_title,
+                        "workspaceId": meta.workspace_id,
+                        "module": module,
                         "kind": { "kind": "needsInput", "requestKind": "toolApproval" },
                         "resolution": Value::Null,
                         "createdAtUnixMs": now_ms(),
@@ -354,6 +376,7 @@ pub fn handle_stream_json_line(thread_id: &str, run_id: &str, assistant_id: &str
                 }
                 crate::chat::subagents::sync_child_thread_to_parent(thread_id);
                 persist();
+                crate::notifications::emit_notifications_updated();
                 return true;
             }
             crate::acp::AcpStreamEvent::UnknownFrame { message } => {
@@ -692,13 +715,23 @@ pub fn open_headless_permission(thread_id: &str, run_id: &str, permission: &str)
             None
         }
     };
+    let meta = crate::notifications::resolve_notification_context(
+        Some(thread_id),
+        profile_id.as_deref(),
+        None,
+    );
     let source = if profile_id.is_some() { "agentChat" } else { "codeThread" };
+    let module = if profile_id.is_some() { "agent" } else { "chat" };
     let notice = json!({
         "id": request_id,
         "runId": run_id,
         "target": { "source": source, "id": thread_id },
         "profileId": profile_id,
         "routineId": Value::Null,
+        "actorName": meta.actor_name,
+        "threadTitle": meta.thread_title,
+        "workspaceId": meta.workspace_id,
+        "module": module,
         "kind": { "kind": "needsInput", "requestKind": "toolApproval" },
         "resolution": Value::Null,
         "createdAtUnixMs": now_ms(),
@@ -717,6 +750,7 @@ pub fn open_headless_permission(thread_id: &str, run_id: &str, permission: &str)
         }
     }
     persist();
+    crate::notifications::emit_notifications_updated();
     crate::chat::subagents::sync_child_thread_to_parent(thread_id);
 }
 
@@ -1078,10 +1112,15 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
         None,
         item.get("text").and_then(Value::as_str),
     );
+    let has_started_thread_receipt = item
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.contains("started thread:"));
     if parent_active
         && !item_failed
         && tool.status == "completed"
-        && crate::chat::subagents::is_invoke_subagent_tool_name(item_tool_name)
+        && (crate::chat::subagents::is_invoke_subagent_tool_name(item_tool_name)
+            || has_started_thread_receipt)
         && item.get("subagentMeta").is_some()
         && !crate::chat::subagents::child_transcript_ended_with_final_response(
             item.pointer("/subagentMeta/transcriptUri").and_then(Value::as_str),
@@ -1141,5 +1180,53 @@ pub fn record_acp_tool_update(thread_id: &str, run_id: &str, tool: crate::acp::A
     }
     if !streaming {
         crate::persist::persist_async();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn clear_stream_run_state_removes_stderr_ring_and_result_failures() {
+        let rid = format!("run-stream-clear-{}", uuid::Uuid::new_v4().simple());
+        read_stderr_ring(Cursor::new(b"boom stderr\n".to_vec()), &rid);
+        record_result_failure(&rid, "provider failed");
+        seed_stream_run_state_for_test(&rid, 3);
+
+        assert!(stderr_ring().lock().unwrap().contains_key(&rid));
+        assert!(result_failures().lock().unwrap().contains_key(&rid));
+
+        clear_stream_run_state(&rid);
+
+        assert!(
+            !stderr_ring().lock().unwrap().contains_key(&rid),
+            "clear_stream_run_state must remove stderr_ring entry"
+        );
+        assert!(
+            !result_failures().lock().unwrap().contains_key(&rid),
+            "clear_stream_run_state must remove result_failures entry"
+        );
+        assert!(!has_stream_run_state_for_test(&rid));
+    }
+
+    #[test]
+    fn read_stderr_ring_keeps_tail_bounded_and_take_drains_on_one_shot() {
+        let rid = format!("run-stderr-ring-{}", uuid::Uuid::new_v4().simple());
+        let payload = "x".repeat(20_000);
+        read_stderr_ring(Cursor::new(payload.into_bytes()), &rid);
+
+        let stored_len = stderr_ring()
+            .lock()
+            .unwrap()
+            .get(&rid)
+            .map(String::len)
+            .unwrap_or(0);
+        assert_eq!(stored_len, 16_000);
+
+        let drained = take_run_stderr(&rid);
+        assert_eq!(drained.len(), 16_000);
+        assert!(!stderr_ring().lock().unwrap().contains_key(&rid));
     }
 }

@@ -82,6 +82,8 @@ pub(crate) fn model_cache() -> &'static Mutex<HashMap<String, CachedProviderMode
 
 pub(crate) const MODEL_CACHE_TTL: Duration = Duration::from_secs(900); // 15 minutes in-memory TTL
 pub(crate) const DISK_CACHE_TTL_MS: i64 = 4 * 3600 * 1000; // 4 hours disk TTL
+/// Bump whenever catalog parsing semantics change so stale disk entries refresh automatically.
+pub(crate) const DISK_CACHE_SCHEMA_VERSION: u64 = 2;
 
 pub(super) fn models_cache_path() -> std::path::PathBuf {
     crate::persist::roaming_app_dir().join("provider_models_cache.json")
@@ -94,11 +96,16 @@ pub(super) fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-pub(super) fn load_provider_models_from_disk(provider: &str) -> Option<Vec<Value>> {
-    let path = models_cache_path();
-    let bytes = std::fs::read(&path).ok()?;
+pub(super) fn load_provider_models_from_disk_at(
+    path: &std::path::Path,
+    provider: &str,
+) -> Option<Vec<Value>> {
+    let bytes = std::fs::read(path).ok()?;
     let val: Value = serde_json::from_slice(&bytes).ok()?;
     let entry = val.get(provider)?;
+    if entry.get("schemaVersion").and_then(|v| v.as_u64()) != Some(DISK_CACHE_SCHEMA_VERSION) {
+        return None;
+    }
     let cached_at = entry.get("cachedAtUnixMs").and_then(|v| v.as_i64())?;
     if now_unix_ms().saturating_sub(cached_at) > DISK_CACHE_TTL_MS {
         return None;
@@ -110,12 +117,19 @@ pub(super) fn load_provider_models_from_disk(provider: &str) -> Option<Vec<Value
     Some(models)
 }
 
-pub(super) fn save_provider_models_to_disk(provider: &str, models: &[Value]) {
+pub(super) fn load_provider_models_from_disk(provider: &str) -> Option<Vec<Value>> {
+    load_provider_models_from_disk_at(&models_cache_path(), provider)
+}
+
+pub(super) fn save_provider_models_to_disk_at(
+    path: &std::path::Path,
+    provider: &str,
+    models: &[Value],
+) {
     if models.is_empty() {
         return;
     }
-    let path = models_cache_path();
-    let mut root: Value = std::fs::read(&path)
+    let mut root: Value = std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_else(|| json!({}));
@@ -124,15 +138,22 @@ pub(super) fn save_provider_models_to_disk(provider: &str, models: &[Value]) {
         obj.insert(
             provider.to_string(),
             json!({
+                "schemaVersion": DISK_CACHE_SCHEMA_VERSION,
                 "models": models,
                 "cachedAtUnixMs": now_unix_ms(),
             }),
         );
         if let Ok(serialized) = serde_json::to_vec_pretty(&root) {
-            let _ = std::fs::create_dir_all(crate::persist::roaming_app_dir());
-            let _ = std::fs::write(&path, serialized);
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, serialized);
         }
     }
+}
+
+pub(super) fn save_provider_models_to_disk(provider: &str, models: &[Value]) {
+    save_provider_models_to_disk_at(&models_cache_path(), provider, models);
 }
 
 

@@ -603,3 +603,70 @@ fn step_update_subagent_info_populates_role_type_prompt_and_child_refs_when_tool
         other => panic!("expected AcpStreamEvent::ToolUpdate, got {other:?}"),
     }
 }
+
+#[test]
+fn approval_response_normalizes_camelcase_decisions_preserves_wire_id_type_and_maps_options() {
+    let camel_once = format_acp_approval_response("perm-42", "allowOnce");
+    let parsed_once: serde_json::Value = serde_json::from_str(camel_once.trim()).unwrap();
+    assert_eq!(parsed_once["id"], serde_json::json!("perm-42"));
+    assert_eq!(parsed_once["result"]["approved"], serde_json::json!(true));
+    assert_eq!(parsed_once["result"]["decision"], serde_json::json!("approve"));
+    assert_eq!(
+        parsed_once["result"]["outcome"]["optionId"],
+        serde_json::json!("allow_once")
+    );
+
+    let camel_session = format_acp_approval_response("perm-43", "allowForSession");
+    let parsed_session: serde_json::Value = serde_json::from_str(camel_session.trim()).unwrap();
+    assert_eq!(parsed_session["result"]["approved"], serde_json::json!(true));
+    assert_eq!(
+        parsed_session["result"]["outcome"]["optionId"],
+        serde_json::json!("allow_always")
+    );
+
+    let options = vec![
+        AcpApprovalOption {
+            option_id: "allow".to_string(),
+            name: Some("Allow".to_string()),
+            kind: Some("allow_once".to_string()),
+        },
+        AcpApprovalOption {
+            option_id: "deny".to_string(),
+            name: Some("Deny".to_string()),
+            kind: Some("reject_once".to_string()),
+        },
+    ];
+    let with_wire = format_acp_approval_response_with_wire("1", "allowOnce", Some(true), &options);
+    let parsed_wire: serde_json::Value = serde_json::from_str(with_wire.trim()).unwrap();
+    assert!(parsed_wire["id"].is_string(), "string RPC id '1' must remain a JSON string");
+    assert_eq!(parsed_wire["id"], serde_json::json!("1"));
+    assert_eq!(parsed_wire["result"]["approved"], serde_json::json!(true));
+    assert_eq!(
+        parsed_wire["result"]["outcome"]["optionId"],
+        serde_json::json!("allow")
+    );
+
+    let denied_wire = format_acp_approval_response_with_wire("1", "rejectOnce", Some(true), &options);
+    let parsed_denied: serde_json::Value = serde_json::from_str(denied_wire.trim()).unwrap();
+    assert_eq!(parsed_denied["id"], serde_json::json!("1"));
+    assert_eq!(parsed_denied["result"]["approved"], serde_json::json!(false));
+    assert_eq!(parsed_denied["result"]["decision"], serde_json::json!("deny"));
+    assert_eq!(
+        parsed_denied["result"]["outcome"]["optionId"],
+        serde_json::json!("deny")
+    );
+}
+
+#[test]
+fn parse_acp_stream_line_accepts_usage_update_and_tool_call_content_chunk() {
+    let usage = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"usage_update","used":24345,"size":1048576}}}"#;
+    assert!(matches!(
+        parse_acp_stream_line("t1", "r1", usage),
+        Some(AcpStreamEvent::Raw { .. })
+    ));
+    let chunk = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"tool_call_content_chunk","toolCallId":"c1","content":"ok"}}}"#;
+    assert!(matches!(
+        parse_acp_stream_line("t1", "r1", chunk),
+        Some(AcpStreamEvent::Raw { .. })
+    ));
+}

@@ -946,7 +946,17 @@ pub fn commit_workspace_changes_sync(request: Option<Value>) -> Result<Workspace
     }
 
     run_git_checked(&dir, &["commit", "-m", message])?;
-    read_workspace_changes_internal(&dir)
+    let changes = read_workspace_changes_internal(&dir)?;
+    crate::routines::dispatch_routine_event_async(
+        "on_git_commit",
+        serde_json::json!({
+            "workspaceId": req.get("workspaceId").or_else(|| req.get("workspace_id")).cloned().unwrap_or(Value::Null),
+            "path": dir.to_string_lossy(),
+            "branch": changes.branch,
+            "message": message,
+        }),
+    );
+    Ok(changes)
 }
 
 #[tauri::command]
@@ -1053,6 +1063,14 @@ pub fn switch_workspace_branch_sync(request: Option<Value>) -> Result<WorkspaceB
         .ok_or_else(|| GitError::new("missing_branch", "Branch name is required."))?;
 
     run_git_checked(&dir, &["checkout", branch])?;
+    crate::routines::dispatch_routine_event_async(
+        "on_branch_change",
+        serde_json::json!({
+            "workspaceId": req.get("workspaceId").or_else(|| req.get("workspace_id")).cloned().unwrap_or(Value::Null),
+            "path": dir.to_string_lossy(),
+            "branch": branch,
+        }),
+    );
     list_workspace_branches_internal(&dir)
 }
 
@@ -1074,6 +1092,15 @@ pub fn create_workspace_branch_sync(request: Option<Value>) -> Result<WorkspaceB
         .ok_or_else(|| GitError::new("missing_branch", "Branch name cannot be empty."))?;
 
     run_git_checked(&dir, &["checkout", "-b", branch])?;
+    crate::routines::dispatch_routine_event_async(
+        "on_branch_change",
+        serde_json::json!({
+            "workspaceId": req.get("workspaceId").or_else(|| req.get("workspace_id")).cloned().unwrap_or(Value::Null),
+            "path": dir.to_string_lossy(),
+            "branch": branch,
+            "created": true,
+        }),
+    );
     list_workspace_branches_internal(&dir)
 }
 

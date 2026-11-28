@@ -17,6 +17,7 @@ pub mod subagents;
 pub mod swarm;
 pub mod thread_index;
 pub mod threads;
+pub mod turn_pipeline;
 pub mod utils;
 
 pub use approval::*;

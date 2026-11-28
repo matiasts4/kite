@@ -86,9 +86,27 @@ fn sync_matching_subagent_items(
             .unwrap_or("");
         let meta_ctid = target
             .pointer("/subagentMeta/childThreadId")
-            .and_then(Value::as_str);
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let text_started_cid = target
+            .get("text")
+            .and_then(Value::as_str)
+            .and_then(super::dedup::extract_started_thread_id_from_text);
+        let has_conflicting_child = child_thread_id
+            .filter(|s| !s.is_empty())
+            .is_some_and(|ctid| {
+                meta_ctid.is_some_and(|mc| mc != ctid)
+                    || text_started_cid.as_deref().is_some_and(|tc| tc != ctid)
+            });
+        if has_conflicting_child {
+            continue;
+        }
         let matches = tid == synth_id
             || meta_sid == subagent_id
+            || text_started_cid
+                .as_deref()
+                .is_some_and(|tc| Some(tc) == child_thread_id || tc == subagent_id)
             || matched_call_id.is_some_and(|cid| !cid.is_empty() && tid == cid)
             || child_thread_id.is_some_and(|ctid| {
                 !ctid.is_empty() && (meta_ctid == Some(ctid) || meta_sid == ctid)
@@ -96,8 +114,15 @@ fn sync_matching_subagent_items(
         if !matches {
             continue;
         }
+        let failed_only_from_wait_timeout =
+            target.get("status").and_then(Value::as_str) == Some("failed")
+                && target
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| crate::acp::is_wait_timeout_receipt(Some(t)));
         let is_primary_or_non_failed = target.get("status").and_then(Value::as_str) != Some("failed")
-            || tool_status == "completed";
+            || tool_status == "completed"
+            || failed_only_from_wait_timeout;
         if is_primary_or_non_failed {
             target["status"] = json!(tool_status);
         }
@@ -116,6 +141,13 @@ fn sync_matching_subagent_items(
             }
             if let Some(latest) = latest_activity {
                 meta.insert("latestActivity".to_string(), json!(latest));
+            } else if failed_only_from_wait_timeout
+                && meta
+                    .get("latestActivity")
+                    .and_then(Value::as_str)
+                    .is_some_and(|la| crate::acp::is_wait_timeout_receipt(Some(la)))
+            {
+                meta.remove("latestActivity");
             }
             if let Some(m) = model {
                 meta.insert("model".to_string(), json!(m));
@@ -130,6 +162,7 @@ fn sync_matching_subagent_items(
 }
 
 pub fn sync_child_thread_to_parent(child_thread_id: &str) {
+    crate::persist::hydrate_thread(child_thread_id);
     let snapshot = {
         let Ok(all_threads) = threads().lock() else {
             return;
@@ -200,9 +233,11 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
     let now = now_ms();
 
     let mut emitted_run: Option<Value> = None;
+    let mut emitted_step_items: Option<Vec<Value>> = None;
     let mut updated_tool_items: Vec<Value> = Vec::new();
     let mut should_persist = is_terminal;
 
+    crate::persist::hydrate_thread(&parent_tid);
     {
         let Ok(mut all_threads) = threads().lock() else {
             return;
@@ -216,10 +251,13 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
             let mut synced_step_count = 0usize;
             let mut synced_latest_activity: Option<String> = None;
             if let Some(runs) = parent.get_mut("subagentRuns").and_then(Value::as_array_mut) {
-                if let Some(run) = runs.iter_mut().find(|r| {
-                    r.get("childThreadId").and_then(Value::as_str) == Some(child_thread_id)
-                        || r.get("subagentId").and_then(Value::as_str) == Some(child_thread_id)
-                }) {
+                for run in runs.iter_mut() {
+                    let matches_run = run.get("childThreadId").and_then(Value::as_str)
+                        == Some(child_thread_id)
+                        || run.get("subagentId").and_then(Value::as_str) == Some(child_thread_id);
+                    if !matches_run {
+                        continue;
+                    }
                     let initial_prompt = run.get("prompt").and_then(Value::as_str).map(str::to_string);
                     let mut filtered_items =
                         filter_subagent_stream_items(&child_items, initial_prompt.as_deref());
@@ -266,15 +304,39 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                     synced_step_count = step_count;
                     synced_latest_activity = latest_activity.clone();
 
-                    matched_sub_id = run
-                        .get("subagentId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    matched_call_id = run
+                    if matched_sub_id.is_none() {
+                        matched_sub_id = run
+                            .get("subagentId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                    }
+                    let run_call_id = run
                         .get("parentToolCallId")
                         .and_then(Value::as_str)
                         .map(str::to_string);
-                    run["items"] = Value::Array(filtered_items);
+                    if matched_call_id.is_none()
+                        || matched_call_id
+                            .as_deref()
+                            .is_some_and(|c| c.starts_with("dispatch-subagent-"))
+                    {
+                        if run_call_id.is_some() {
+                            matched_call_id = run_call_id;
+                        }
+                    }
+                    let has_child_thread = run
+                        .get("childThreadId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty());
+                    let has_transcript_uri = run
+                        .get("transcriptUri")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.trim().is_empty());
+                    let keep_inline_items = !has_child_thread && !has_transcript_uri;
+                    if keep_inline_items {
+                        run["items"] = Value::Array(filtered_items.clone());
+                    } else {
+                        run["items"] = Value::Array(Vec::new());
+                    }
                     run["status"] = json!(run_status);
                     run["stepCount"] = json!(step_count);
                     if let Some(ref latest) = latest_activity {
@@ -294,7 +356,16 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
                     } else if let Some(obj) = run.as_object_mut() {
                         obj.remove("completedAtUnixMs");
                     }
-                    emitted_run = Some(run.clone());
+                    if emitted_run.is_none()
+                        || !run
+                            .get("parentToolCallId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .starts_with("dispatch-subagent-")
+                    {
+                        emitted_run = Some(run.clone());
+                        emitted_step_items = Some(filtered_items);
+                    }
                 }
             }
             if matched_sub_id.is_none() {
@@ -345,7 +416,11 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
             "subagentId": sub_id,
             "run": run,
         }));
-        emit_subagent_steps_event(&parent_tid, &sub_id, &run);
+        let mut steps_run = run;
+        if let Some(step_items) = emitted_step_items {
+            steps_run["items"] = Value::Array(step_items);
+        }
+        emit_subagent_steps_event(&parent_tid, &sub_id, &steps_run);
     }
     if should_persist {
         persist();
@@ -353,6 +428,32 @@ pub fn sync_child_thread_to_parent(child_thread_id: &str) {
 }
 
 pub fn extract_final_assistant_text(thread_id: &str) -> String {
+    let extract_text = |thread: &Value| -> String {
+        let Some(items) = thread.get("items").and_then(Value::as_array) else {
+            return String::new();
+        };
+        items
+            .iter()
+            .rev()
+            .find(|item| {
+                item.get("kind").and_then(Value::as_str) == Some("assistant")
+                    && !item
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .is_empty()
+            })
+            .and_then(|item| item.get("text").and_then(Value::as_str))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    if crate::persist::is_daemon_process() {
+        return crate::persist::find_thread_direct(thread_id)
+            .map(|t| extract_text(&t))
+            .unwrap_or_default();
+    }
+    crate::persist::hydrate_thread(thread_id);
     let Ok(all_threads) = threads().lock() else {
         return String::new();
     };
@@ -362,24 +463,7 @@ pub fn extract_final_assistant_text(thread_id: &str) -> String {
     else {
         return String::new();
     };
-    let Some(items) = thread.get("items").and_then(Value::as_array) else {
-        return String::new();
-    };
-    items
-        .iter()
-        .rev()
-        .find(|item| {
-            item.get("kind").and_then(Value::as_str) == Some("assistant")
-                && !item
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-                    .is_empty()
-        })
-        .and_then(|item| item.get("text").and_then(Value::as_str))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    extract_text(thread)
 }
 
 pub use crate::dispatch::cli_wire::format_subagent_wait_output;
@@ -395,6 +479,7 @@ pub fn send_subagent_message_with_launcher(
         return Err("message is required".to_string());
     }
 
+    crate::persist::hydrate_thread(thread_id);
     let (child_tid, emitted_run, updated_items) = {
         let mut all = threads()
             .lock()
@@ -458,12 +543,31 @@ pub fn send_subagent_message_with_launcher(
             None,
         );
         touch(parent);
-        if let Some(child) = all
-            .iter_mut()
+        let child_needs_hydration = all
+            .iter()
             .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
-        {
-            child["status"] = json!("running");
-            touch(child);
+            .is_some_and(crate::persist::is_thread_stub);
+        if !child_needs_hydration {
+            if let Some(child) = all
+                .iter_mut()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+            {
+                child["status"] = json!("running");
+                touch(child);
+            }
+        }
+        drop(all);
+        if child_needs_hydration {
+            crate::persist::hydrate_thread(&cid);
+            if let Ok(mut all) = threads().lock() {
+                if let Some(child) = all
+                    .iter_mut()
+                    .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+                {
+                    child["status"] = json!("running");
+                    touch(child);
+                }
+            }
         }
         (cid, updated_run, synced_items)
     };
@@ -496,6 +600,7 @@ pub fn send_subagent_message_with_launcher(
         None => crate::chat::kill_registry::resume_child_thread_turn(&child_tid, trimmed),
     };
     if let Err(err) = launch_res {
+        crate::persist::hydrate_thread(thread_id);
         if let Ok(mut all) = threads().lock() {
             if let Some(parent) = all
                 .iter_mut()
@@ -534,6 +639,7 @@ pub fn steer_subagent_thread(
 
 pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Value, String> {
     let mut did_kill = false;
+    crate::persist::hydrate_thread(thread_id);
     let (child_tid, existing_status, settled_detail, already_settled_nat) = {
         let all = threads()
             .lock()
@@ -620,6 +726,10 @@ pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Valu
     let mut already_settled_in_race = false;
     let mut should_clear_killed = false;
     let mut updated_items: Vec<Value> = Vec::new();
+    crate::persist::hydrate_thread(thread_id);
+    if let Some(ref cid) = child_tid {
+        crate::persist::hydrate_thread(cid);
+    }
     {
         let mut all = threads()
             .lock()
@@ -733,5 +843,142 @@ pub fn cancel_subagent_thread(thread_id: &str, subagent_id: &str) -> Result<Valu
     Ok(build_subagent_detail(thread_id, subagent_id)
         .or(updated_run)
         .unwrap_or(Value::Null))
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    struct CleanupThread(String);
+    impl Drop for CleanupThread {
+        fn drop(&mut self) {
+            if !threads().is_poisoned() && !std::thread::panicking() {
+                crate::chat::threads::remove_thread(&self.0);
+            } else if let Ok(mut list) = threads().lock() {
+                list.retain(|t| t.get("id").and_then(Value::as_str) != Some(self.0.as_str()));
+            }
+        }
+    }
+
+    #[test]
+    fn sync_child_thread_to_parent_keeps_parent_run_items_empty_for_child_backed_runs() {
+        let parent_id = format!("dedup-parent-{}", uuid::Uuid::new_v4().simple());
+        let child_id = format!("dedup-child-{}", uuid::Uuid::new_v4().simple());
+        let _c1 = CleanupThread(parent_id.clone());
+        let _c2 = CleanupThread(child_id.clone());
+
+        let mut parent = blank_thread(&parent_id, None, "Parent", "antigravity", None);
+        parent["subagentRuns"] = json!([{
+            "subagentId": "sub_dedup_1",
+            "parentThreadId": parent_id,
+            "parentToolCallId": "call_dedup_1",
+            "childThreadId": child_id,
+            "role": "Explorer",
+            "status": "running",
+            "stepCount": 0,
+            "items": [],
+            "startedAtUnixMs": 100,
+            "updatedAtUnixMs": 100
+        }]);
+
+        let mut child = blank_thread(&child_id, None, "Child", "grok", None);
+        child["startedByAgent"] = json!(true);
+        child["parentThreadId"] = json!(parent_id);
+        child["status"] = json!("idle");
+        child["items"] = json!([
+            { "id": "u-1", "kind": "user", "text": "Inspect auth" },
+            { "id": "t-1", "kind": "tool", "title": "Read auth.rs", "status": "completed" },
+            { "id": "a-1", "kind": "assistant", "text": "Auth looks clean." }
+        ]);
+
+        {
+            let mut guard = threads().lock().unwrap();
+            guard.push(parent);
+            guard.push(child);
+        }
+
+        sync_child_thread_to_parent(&child_id);
+
+        {
+            let guard = threads().lock().unwrap();
+            let updated = guard
+                .iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+                .unwrap();
+            let run = &updated["subagentRuns"][0];
+            assert_eq!(run["status"], "completed");
+            assert_eq!(run["stepCount"], 1);
+            assert_eq!(run["latestActivity"], "Auth looks clean.");
+            assert_eq!(
+                run["items"].as_array().unwrap().len(),
+                0,
+                "child-backed parent subagentRun must not duplicate child items in parent RAM/SQLite"
+            );
+        }
+
+        let detail = build_subagent_detail(&parent_id, "sub_dedup_1").expect("detail");
+        let detail_items = detail["items"].as_array().expect("detail items");
+        assert_eq!(detail_items.len(), 3);
+        assert_eq!(detail_items[0]["id"], "u-1");
+        assert_eq!(detail_items[1]["id"], "t-1");
+        assert_eq!(detail_items[2]["id"], "a-1");
+    }
+
+    #[test]
+    fn build_subagent_detail_surfaces_child_turn_failure_without_parent_items() {
+        let parent_id = format!("err-parent-{}", uuid::Uuid::new_v4().simple());
+        let child_id = format!("err-child-{}", uuid::Uuid::new_v4().simple());
+        let _c1 = CleanupThread(parent_id.clone());
+        let _c2 = CleanupThread(child_id.clone());
+
+        let mut parent = blank_thread(&parent_id, None, "Parent", "antigravity", None);
+        parent["subagentRuns"] = json!([{
+            "subagentId": "sub_err_1",
+            "parentThreadId": parent_id,
+            "childThreadId": child_id,
+            "role": "Worker",
+            "status": "running",
+            "stepCount": 0,
+            "items": [],
+            "startedAtUnixMs": 100,
+            "updatedAtUnixMs": 100
+        }]);
+
+        let mut child = blank_thread(&child_id, None, "Child", "grok", None);
+        child["startedByAgent"] = json!(true);
+        child["parentThreadId"] = json!(parent_id);
+        child["status"] = json!("error");
+        child["turnFailure"] = json!({ "message": "Rate limit hit" });
+        child["items"] = json!([
+            { "id": "u-1", "kind": "user", "text": "Run check" }
+        ]);
+
+        {
+            let mut guard = threads().lock().unwrap();
+            guard.push(parent);
+            guard.push(child);
+        }
+
+        sync_child_thread_to_parent(&child_id);
+
+        {
+            let guard = threads().lock().unwrap();
+            let updated = guard
+                .iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+                .unwrap();
+            let run = &updated["subagentRuns"][0];
+            assert_eq!(run["status"], "failed");
+            assert_eq!(run["latestActivity"], "Rate limit hit");
+            assert_eq!(run["items"].as_array().unwrap().len(), 0);
+        }
+
+        let detail = build_subagent_detail(&parent_id, "sub_err_1").expect("detail");
+        let detail_items = detail["items"].as_array().expect("detail items");
+        assert!(detail_items.iter().any(|it| {
+            it.get("kind").and_then(Value::as_str) == Some("error")
+                && it.get("text").and_then(Value::as_str) == Some("Rate limit hit")
+        }));
+    }
 }
 

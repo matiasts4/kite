@@ -473,6 +473,7 @@ pub fn run_core_daemon_main() {
     // Loopback agent dispatch lives inside the daemon so an external script can
     // dispatch while no GUI window is open (S5).
     crate::dispatch_wire::start_background();
+    crate::dispatch::mcp_http::start_mcp_http_hub_background();
     let pipe_path = get_core_pipe_name();
     let token = get_or_create_core_token();
 

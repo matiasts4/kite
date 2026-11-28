@@ -771,21 +771,31 @@ fn sync_child_thread_to_parent_surfaces_turn_failure_message() {
 
     sync_child_thread_to_parent(&child_id);
 
-    let guard = threads().lock().unwrap();
-    let updated = guard
-        .iter()
-        .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
-        .unwrap();
-    let run = &updated["subagentRuns"][0];
-    assert_eq!(run["status"], "failed");
-    assert_eq!(run["latestActivity"], "Provider rate limit exceeded");
-    let run_items = run["items"].as_array().expect("run items");
+    {
+        let guard = threads().lock().unwrap();
+        let updated = guard
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(parent_id.as_str()))
+            .unwrap();
+        let run = &updated["subagentRuns"][0];
+        assert_eq!(run["status"], "failed");
+        assert_eq!(run["latestActivity"], "Provider rate limit exceeded");
+        let run_items = run["items"].as_array().expect("run items");
+        assert!(
+            run_items.is_empty(),
+            "expected child-backed parent run items to stay empty, got: {run_items:?}"
+        );
+    }
+
+    let detail = build_subagent_detail(&parent_id, "sub_fail_1")
+        .expect("subagent detail should reconstruct child turn failure");
+    let detail_items = detail["items"].as_array().expect("detail items");
     assert!(
-        run_items.iter().any(|it| {
+        detail_items.iter().any(|it| {
             it.get("kind").and_then(Value::as_str) == Some("error")
                 && it.get("text").and_then(Value::as_str) == Some("Provider rate limit exceeded")
         }),
-        "expected canonical error item in run items, got: {run_items:?}"
+        "expected canonical error item in detail items, got: {detail_items:?}"
     );
 }
 
@@ -3203,4 +3213,231 @@ fn parent_transcript_pre_tool_hook_denial_pops_pending_invoke_without_poisoning_
     assert_eq!(runs[0]["prompt"], "Real Prompt");
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn spawn_child_subagent_stamps_created_at_unix_ms_on_parent_tool_item() {
+    let parent_id = format!("voice-sub-ts-parent-{}", uuid::Uuid::new_v4().simple());
+    let _cleanup_p = CleanupThread(parent_id.clone());
+    let parent = blank_thread(&parent_id, None, "Sesión de voz", "antigravity", None);
+    threads().lock().unwrap().push(parent);
+
+    let before = crate::chat::utils::now_ms();
+    let res = spawn_child_subagent_thread(ChildSubagentSpawnParams {
+        parent_thread_id: Some(parent_id.clone()),
+        provider: Some("antigravity".to_string()),
+        model: None,
+        effort: None,
+        role: Some("ODD Planner".to_string()),
+        agent_id: None,
+        mode: None,
+        workspace_mode: "inherit".to_string(),
+        fallback_cwd: None,
+        task: "Audit voice mode roadmap".to_string(),
+    })
+    .expect("spawn child subagent");
+    let _cleanup_c = CleanupThread(res.child_thread_id.clone());
+    let after = crate::chat::utils::now_ms();
+
+    let expected_tool_id = format!("dispatch-subagent-{}", res.child_thread_id);
+    let all = threads().lock().unwrap();
+    let stored_parent = all
+        .iter()
+        .find(|t| t["id"] == parent_id)
+        .expect("parent exists");
+    let tool_item = stored_parent["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|it| it["id"] == expected_tool_id)
+        .expect("dispatch-subagent tool item exists");
+    let ts = tool_item
+        .get("createdAtUnixMs")
+        .and_then(Value::as_i64)
+        .expect("dispatch-subagent tool item must carry createdAtUnixMs");
+    assert!(
+        ts >= before && ts <= after,
+        "createdAtUnixMs ({ts}) should fall between {before} and {after}"
+    );
+}
+
+#[test]
+fn parallel_unbound_subagent_spawns_claim_matching_cards_and_settle_all_duplicate_runs() {
+    let parent_id = format!("parallel-sub-parent-{}", uuid::Uuid::new_v4().simple());
+    let _cleanup_p = CleanupThread(parent_id.clone());
+    let mut parent = blank_thread(&parent_id, None, "Asistente", "antigravity", None);
+    parent["status"] = json!("running");
+    parent["items"] = json!([
+        {
+            "id": "t_parallel_241",
+            "kind": "tool",
+            "toolName": "call_mcp_tool",
+            "toolKind": "subagent",
+            "title": "Subagent · Grok Bot Desktop RE",
+            "detail": "Task A: Grok Bot RE",
+            "status": "running",
+            "streaming": true,
+            "createdAtUnixMs": 1_795_374_845_528i64,
+            "subagentMeta": {
+                "subagentId": "t_parallel_241",
+                "role": "Grok Bot Desktop RE",
+                "prompt": "Task A: Grok Bot RE",
+                "status": "running",
+                "stepCount": 0
+            }
+        },
+        {
+            "id": "t_parallel_242",
+            "kind": "tool",
+            "toolName": "call_mcp_tool",
+            "toolKind": "subagent",
+            "title": "Subagent · Kite-Ctx & Zed Conversational Audit",
+            "detail": "Task B: Kite-Ctx Audit",
+            "status": "running",
+            "streaming": true,
+            "createdAtUnixMs": 1_795_374_845_545i64,
+            "subagentMeta": {
+                "subagentId": "t_parallel_242",
+                "role": "Kite-Ctx & Zed Conversational Audit",
+                "prompt": "Task B: Kite-Ctx Audit",
+                "status": "running",
+                "stepCount": 0
+            }
+        }
+    ]);
+    threads().lock().unwrap().push(parent);
+
+    // First parallel child spawned is Grok Bot (_241), even though _242 is newer and also live.
+    let res_a = spawn_child_subagent_thread(ChildSubagentSpawnParams {
+        parent_thread_id: Some(parent_id.clone()),
+        provider: Some("antigravity".to_string()),
+        model: Some("gemini-4-hydrogen".to_string()),
+        effort: None,
+        role: Some("Grok Bot Desktop RE".to_string()),
+        agent_id: None,
+        mode: None,
+        workspace_mode: "inherit".to_string(),
+        fallback_cwd: None,
+        task: "Task A: Grok Bot RE".to_string(),
+    })
+    .expect("spawn child A");
+    let _cleanup_a = CleanupThread(res_a.child_thread_id.clone());
+
+    let res_b = spawn_child_subagent_thread(ChildSubagentSpawnParams {
+        parent_thread_id: Some(parent_id.clone()),
+        provider: Some("antigravity".to_string()),
+        model: Some("gemini-4-hydrogen".to_string()),
+        effort: None,
+        role: Some("Kite-Ctx & Zed Conversational Audit".to_string()),
+        agent_id: None,
+        mode: None,
+        workspace_mode: "inherit".to_string(),
+        fallback_cwd: None,
+        task: "Task B: Kite-Ctx Audit".to_string(),
+    })
+    .expect("spawn child B");
+    let _cleanup_b = CleanupThread(res_b.child_thread_id.clone());
+
+    {
+        let all = threads().lock().unwrap();
+        let stored_parent = all.iter().find(|t| t["id"] == parent_id).unwrap();
+        let runs = stored_parent["subagentRuns"].as_array().unwrap();
+        assert_eq!(runs.len(), 2, "parallel spawns must produce 2 distinct runs without duplicates: {runs:?}");
+        let run_a = runs.iter().find(|r| r["childThreadId"] == res_a.child_thread_id).unwrap();
+        let run_b = runs.iter().find(|r| r["childThreadId"] == res_b.child_thread_id).unwrap();
+        assert_eq!(run_a["parentToolCallId"], "t_parallel_241");
+        assert_eq!(run_b["parentToolCallId"], "t_parallel_242");
+    }
+
+    // Even if a legacy duplicate dispatch-subagent-<cid> run exists and child B finishes,
+    // sync_child_thread_to_parent must settle all matching runs and summary_of must not list child B as active.
+    {
+        let mut all = threads().lock().unwrap();
+        if let Some(p) = all.iter_mut().find(|t| t["id"] == parent_id) {
+            p["subagentRuns"].as_array_mut().unwrap().push(json!({
+                "subagentId": res_b.child_thread_id,
+                "parentThreadId": parent_id,
+                "parentToolCallId": format!("dispatch-subagent-{}", res_b.child_thread_id),
+                "childThreadId": res_b.child_thread_id,
+                "role": "Kite-Ctx & Zed Conversational Audit",
+                "status": "running",
+                "stepCount": 0,
+                "items": []
+            }));
+        }
+        if let Some(child_b) = all.iter_mut().find(|t| t["id"] == res_b.child_thread_id) {
+            child_b["status"] = json!("idle");
+            child_b["items"] = json!([
+                { "id": "b_tool_1", "kind": "tool", "title": "Read file", "status": "completed" },
+                { "id": "b_ans_1", "kind": "assistant", "text": "Audit complete.", "status": "completed" }
+            ]);
+        }
+    }
+    sync_child_thread_to_parent(&res_b.child_thread_id);
+
+    let all = threads().lock().unwrap();
+    let stored_parent = all.iter().find(|t| t["id"] == parent_id).unwrap();
+    for r in stored_parent["subagentRuns"].as_array().unwrap() {
+        if r["childThreadId"] == res_b.child_thread_id {
+            assert_eq!(r["status"], "completed", "every run for child B must settle: {r:?}");
+        }
+    }
+    let item_241 = stored_parent["items"].as_array().unwrap().iter().find(|it| it["id"] == "t_parallel_241").unwrap();
+    let item_242 = stored_parent["items"].as_array().unwrap().iter().find(|it| it["id"] == "t_parallel_242").unwrap();
+    assert_eq!(item_241["subagentMeta"]["childThreadId"], res_a.child_thread_id);
+    assert_eq!(item_242["subagentMeta"]["childThreadId"], res_b.child_thread_id);
+    assert_eq!(item_242["subagentMeta"]["status"], "completed");
+
+    let summary = crate::chat::threads::summary_of(stored_parent).expect("parent summary");
+    let active_subs = summary["activeSubagents"].as_array().expect("activeSubagents");
+    assert_eq!(active_subs.len(), 1, "only child A should remain active in summary_of: {active_subs:?}");
+    assert_eq!(active_subs[0]["childThreadId"], res_a.child_thread_id);
+}
+
+#[test]
+fn project_thread_for_ipc_backfills_missing_and_null_item_text() {
+    let raw = json!({
+        "id": "parent-proj-text",
+        "title": "Test",
+        "status": "idle",
+        "items": [
+            {
+                "id": "dispatch-subagent-1",
+                "kind": "tool",
+                "toolKind": "subagent",
+                "toolName": "dispatch_subagent",
+                "title": "Worker",
+                "detail": "Inspect module"
+            },
+            {
+                "id": "msg-null-text",
+                "kind": "assistant",
+                "text": null
+            },
+            {
+                "id": "msg-ok",
+                "kind": "assistant",
+                "text": "Kept text"
+            }
+        ],
+        "subagentRuns": [
+            {
+                "subagentId": "sub-1",
+                "role": "Worker",
+                "status": "running",
+                "items": [
+                    { "id": "sub-tool-1", "kind": "tool", "title": "Read" }
+                ]
+            }
+        ]
+    });
+
+    let projected = crate::chat::subagents::project_thread_for_ipc(raw);
+    let items = projected["items"].as_array().unwrap();
+    assert_eq!(items[0]["text"], json!(""));
+    assert_eq!(items[1]["text"], json!(""));
+    assert_eq!(items[2]["text"], json!("Kept text"));
+
+    let run_items = projected["subagentRuns"][0]["items"].as_array().unwrap();
+    assert_eq!(run_items[0]["text"], json!(""));
 }

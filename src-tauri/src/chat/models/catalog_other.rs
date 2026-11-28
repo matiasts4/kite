@@ -53,29 +53,57 @@ pub fn parse_cursor_models(raw: &str) -> Vec<Value> {
     models
 }
 
-pub fn sort_effort_levels(levels: &mut [String]) {
-    fn rank(s: &str) -> i32 {
-        match s.to_lowercase().as_str() {
-            "none" | "off" => 0,
-            "minimal" | "min" => 1,
-            "low" => 2,
-            "medium" | "med" => 3,
-            "high" => 4,
-            "xhigh" | "extra-high" | "extra_high" | "very-high" => 5,
-            "max" | "maximum" => 6,
-            "ultra" => 7,
-            _ => 10,
-        }
+pub(crate) fn effort_level_rank(s: &str) -> i32 {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" => 0,
+        "minimal" | "min" => 1,
+        "low" => 2,
+        "medium" | "med" => 3,
+        "high" => 4,
+        "xhigh" | "x-high" | "extra-high" | "extra_high" | "very-high" | "extra" => 5,
+        "max" | "maximum" => 6,
+        "ultra" => 7,
+        _ => 10,
     }
+}
+
+pub fn sort_effort_levels(levels: &mut [String]) {
     levels.sort_by(|a, b| {
-        let ra = rank(a);
-        let rb = rank(b);
+        let ra = effort_level_rank(a);
+        let rb = effort_level_rank(b);
         if ra != rb {
             ra.cmp(&rb)
         } else {
             a.cmp(b)
         }
     });
+}
+
+/// Maps `requested` onto an entry in `allowed`: exact case-insensitive matches win;
+/// otherwise clamps to the entry with the closest canonical reasoning-effort rank.
+pub fn clamp_effort_to_levels(requested: &str, allowed: &[String]) -> Option<String> {
+    let trimmed = requested.trim();
+    if trimmed.is_empty() || allowed.is_empty() {
+        return None;
+    }
+    if let Some(exact) = allowed.iter().find(|cand| cand.eq_ignore_ascii_case(trimmed)) {
+        return Some(exact.clone());
+    }
+    let target_rank = effort_level_rank(trimmed);
+    if target_rank >= 10 {
+        return allowed
+            .iter()
+            .find(|cand| cand.eq_ignore_ascii_case("medium"))
+            .or_else(|| allowed.first())
+            .cloned();
+    }
+    allowed
+        .iter()
+        .min_by_key(|cand| {
+            let cand_rank = effort_level_rank(cand);
+            ((cand_rank - target_rank).abs(), cand_rank)
+        })
+        .cloned()
 }
 
 pub fn model_row(

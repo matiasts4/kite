@@ -90,24 +90,123 @@ pub(super) fn user_input_from(frame: &Value) -> UserInputRequest {
 
 pub(super) fn approval_event(frame: &Value) -> ProviderTurnEvent {
     let params = frame.get("params").unwrap_or(frame);
+    let raw_id = params.get("id").or_else(|| frame.get("id"));
+    let (request_id, rpc_id_is_string) = match raw_id {
+        Some(Value::String(s)) if !s.trim().is_empty() => (s.clone(), true),
+        Some(Value::Number(n)) => (n.to_string(), false),
+        _ => ("approval".to_string(), true),
+    };
+    let tool_call = params.get("toolCall").or_else(|| params.get("tool_call"));
+    let fallback_kind = tool_call
+        .and_then(|tc| tc.get("kind"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(|k| match k.to_ascii_lowercase().as_str() {
+            "execute" | "command" => "bash",
+            "edit" | "write" => "edit_file",
+            _ => k,
+        });
+    let tool_name = params
+        .get("toolName")
+        .or_else(|| params.get("tool_name"))
+        .or_else(|| tool_call.and_then(|tc| tc.get("name")))
+        .or_else(|| tool_call.and_then(|tc| tc.get("toolName")))
+        .or_else(|| tool_call.and_then(|tc| tc.get("tool_name")))
+        .or_else(|| tool_call.and_then(|tc| tc.get("tool")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(fallback_kind)
+        .unwrap_or("tool")
+        .to_string();
+
+    let raw_input = tool_call
+        .and_then(|tc| {
+            tc.get("rawInput")
+                .or_else(|| tc.get("args"))
+                .or_else(|| tc.get("input"))
+                .or_else(|| tc.get("parameters"))
+        })
+        .or_else(|| {
+            params
+                .get("rawInput")
+                .or_else(|| params.get("args"))
+                .or_else(|| params.get("input"))
+                .or_else(|| params.get("parameters"))
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let (tool_kind, _server, classified_title, command, file_path, _, _) =
+        classify_tool_metadata(&tool_name, &raw_input);
+
+    let title = params
+        .get("title")
+        .or_else(|| tool_call.and_then(|tc| tc.get("title")))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if !classified_title.is_empty() && classified_title != tool_name {
+                classified_title
+            } else {
+                "Approval requested".to_string()
+            }
+        });
+
+    let detail = command
+        .clone()
+        .or_else(|| file_path.clone())
+        .or_else(|| Some(title.clone()));
+    let risk = match tool_kind.as_str() {
+        "commandExecution" => Some("command".to_string()),
+        "fileChange" => Some("fileChange".to_string()),
+        "mcpToolCall" => Some("externalWrite".to_string()),
+        _ => Some("tool".to_string()),
+    };
+
+    let options = params
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let option_id = item
+                        .get("optionId")
+                        .or_else(|| item.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())?
+                        .to_string();
+                    Some(crate::acp::AcpApprovalOption {
+                        option_id,
+                        name: item
+                            .get("name")
+                            .or_else(|| item.get("label"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        kind: item
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     ProviderTurnEvent::ApprovalRequested {
-        request_id: params
-            .get("id")
-            .or_else(|| frame.get("id"))
-            .and_then(Value::as_str)
-            .unwrap_or("approval")
-            .to_string(),
-        tool_name: params
-            .get("toolName")
-            .or_else(|| params.get("tool_name"))
-            .and_then(Value::as_str)
-            .unwrap_or("tool")
-            .to_string(),
-        title: params
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("Approval requested")
-            .to_string(),
+        request_id,
+        rpc_id_is_string,
+        tool_name,
+        title,
+        detail,
+        command,
+        path: file_path,
+        risk,
+        parameters: raw_input,
+        options,
     }
 }
 
@@ -174,6 +273,7 @@ pub(super) fn usage_events(update: &Value, frame: &Value) -> Vec<ProviderTurnEve
         .get("inputTokens")
         .or_else(|| usage.get("input_tokens"))
         .or_else(|| usage.get("input"))
+        .or_else(|| usage.get("used"))
         .and_then(Value::as_i64);
     let output_tokens = usage
         .get("outputTokens")

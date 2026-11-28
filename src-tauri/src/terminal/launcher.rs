@@ -230,6 +230,18 @@ pub fn fresh_registry_path() -> Option<std::ffi::OsString> {
         .clone()
 }
 
+fn merge_process_and_registry_path(curr: &str, fresh: &str) -> String {
+    let curr_trimmed = curr.trim();
+    let fresh_trimmed = fresh.trim();
+    if curr_trimmed.is_empty() {
+        fresh_trimmed.to_string()
+    } else if fresh_trimmed.is_empty() {
+        curr_trimmed.to_string()
+    } else {
+        format!("{curr_trimmed};{fresh_trimmed}")
+    }
+}
+
 pub fn where_program(name: &str) -> Option<String> {
     if let Some(found) = search_path_var(name, std::env::var_os("PATH")) {
         return Some(found);
@@ -239,7 +251,7 @@ pub fn where_program(name: &str) -> Option<String> {
         if let Some(fresh_path) = fresh_registry_path() {
             if let Some(found) = search_path_var(name, Some(fresh_path.clone())) {
                 if let Ok(curr) = std::env::var("PATH") {
-                    let updated = format!("{};{}", fresh_path.to_string_lossy(), curr);
+                    let updated = merge_process_and_registry_path(&curr, &fresh_path.to_string_lossy());
                     std::env::set_var("PATH", updated);
                 }
                 return Some(found);
@@ -722,4 +734,30 @@ pub fn extract_osc_cwd(bytes: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod path_precedence_tests {
+    use super::merge_process_and_registry_path;
+
+    #[test]
+    fn merge_process_and_registry_path_preserves_existing_precedence() {
+        let merged = merge_process_and_registry_path(
+            "C:\\sandbox\\bin;C:\\Windows",
+            "C:\\Users\\me\\.grok\\bin",
+        );
+        let sandbox_idx = merged.find("C:\\sandbox\\bin").expect("sandbox path present");
+        let grok_idx = merged
+            .find("C:\\Users\\me\\.grok\\bin")
+            .expect("registry path present");
+        assert!(sandbox_idx < grok_idx, "merged={merged}");
+        assert_eq!(
+            merge_process_and_registry_path("", "C:\\Users\\me\\.grok\\bin"),
+            "C:\\Users\\me\\.grok\\bin"
+        );
+        assert_eq!(
+            merge_process_and_registry_path("C:\\sandbox\\bin", ""),
+            "C:\\sandbox\\bin"
+        );
+    }
 }

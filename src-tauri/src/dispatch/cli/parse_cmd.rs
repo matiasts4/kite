@@ -636,7 +636,7 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentCommand, (DispatchError,
     }
     let domain = items
         .next()
-        .ok_or_else(|| agent_bad_args("Missing `agent` domain. Expected: thread, memory, routine, teammate, tasks, ctx, diff."))?;
+        .ok_or_else(|| agent_bad_args("Missing `agent` domain. Expected: thread, memory, routine, teammate, tasks, ctx, diff, browser."))?;
     let action = items
         .next()
         .ok_or_else(|| agent_bad_args(format!("Missing action for `agent {domain}`.")))?;
@@ -756,6 +756,120 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentCommand, (DispatchError,
                 thread_id,
                 cursor,
                 limit,
+            })
+        }
+        ("thread", "launch") => {
+            let mut title = None;
+            let mut prompt = None;
+            let mut workspace_id = None;
+            let mut provider = None;
+            let mut model = None;
+            let mut mode = None;
+            let mut effort = None;
+            let mut worktree = false;
+            let mut odd_path = None;
+            let mut open = false;
+            let mut orchestrate = false;
+            let mut positionals: Vec<String> = Vec::new();
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--title" => {
+                        title = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--prompt" => {
+                        prompt = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--workspace-id" | "--workspace" => {
+                        workspace_id = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--provider" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        provider = Some(
+                            canonical_thread_provider(&raw)
+                                .ok_or_else(|| agent_bad_args(parse_run::unknown_provider_message(&raw)))?
+                                .to_string(),
+                        );
+                    }
+                    "--model" => {
+                        model = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--mode" => {
+                        mode = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--effort" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        effort = Some(normalize_effort(&raw).ok_or_else(|| {
+                            agent_bad_args(format!(
+                                "Invalid `--effort` value `{raw}`. Allowed: minimal, low, medium, high, xhigh, max, ultra."
+                            ))
+                        })?);
+                    }
+                    "--worktree" => {
+                        if let Some(val) = inline_val {
+                            worktree = parse_bool_flag(val)
+                                .map_err(|_| agent_bad_args("Invalid `--worktree` boolean."))?;
+                        } else {
+                            worktree = true;
+                        }
+                    }
+                    "--odd" | "--odd-path" => {
+                        odd_path = Some(need_agent_flag(&mut items, flag, inline_val)?);
+                    }
+                    "--open" => {
+                        if let Some(val) = inline_val {
+                            open = parse_bool_flag(val)
+                                .map_err(|_| agent_bad_args("Invalid `--open` boolean."))?;
+                        } else {
+                            open = true;
+                        }
+                    }
+                    "--orchestrate" => {
+                        if let Some(val) = inline_val {
+                            orchestrate = parse_bool_flag(val)
+                                .map_err(|_| agent_bad_args("Invalid `--orchestrate` boolean."))?;
+                        } else {
+                            orchestrate = true;
+                        }
+                    }
+                    "--approved" => {}
+                    "--" if inline_val.is_none() => {
+                        positionals.extend(items.by_ref().map(|p| p.to_string()));
+                    }
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!(
+                            "Unknown flag `{next}` for `agent thread launch`."
+                        )));
+                    }
+                    other => positionals.push(other.to_string()),
+                }
+            }
+            let prompt = prompt
+                .or_else(|| {
+                    if positionals.is_empty() {
+                        None
+                    } else {
+                        Some(positionals.join(" "))
+                    }
+                })
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| agent_bad_args("`agent thread launch` requires a non-empty prompt."))?;
+            let clean_opt = |opt: Option<String>| {
+                opt.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            };
+            Ok(AgentCommand::ThreadLaunch {
+                title: clean_opt(title),
+                prompt,
+                workspace_id: clean_opt(workspace_id),
+                provider,
+                model: clean_opt(model),
+                mode: clean_opt(mode),
+                effort,
+                worktree,
+                odd_path: clean_opt(odd_path),
+                open,
+                orchestrate,
             })
         }
         ("memory", "read") => {
@@ -1303,6 +1417,212 @@ pub fn parse_agent_args(args: &[String]) -> Result<AgentCommand, (DispatchError,
             let path = path.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
                 .ok_or_else(|| agent_bad_args("`agent diff file_diff` requires `--path`."))?;
             Ok(AgentCommand::Tool(AgentToolCommand::DiffFile { path, workspace_id, staged }))
+        }
+        ("browser", action) => {
+            let mut payload = serde_json::Map::new();
+            payload.insert(
+                "action".to_string(),
+                serde_json::Value::String(action.to_ascii_lowercase()),
+            );
+            let mut step_obj = serde_json::Map::new();
+            let mut positionals: Vec<String> = Vec::new();
+
+            while let Some(next) = items.next() {
+                let (flag, inline_val) = parse_run::split_flag(next);
+                match flag {
+                    "--payload" | "--json" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                            agent_bad_args(format!("Invalid JSON for `{flag}`: {e}"))
+                        })?;
+                        let obj = parsed.as_object().ok_or_else(|| {
+                            agent_bad_args("`--payload` must be a JSON object.")
+                        })?;
+                        for (k, v) in obj {
+                            payload.insert(k.clone(), v.clone());
+                        }
+                        if !payload.contains_key("action")
+                            || payload
+                                .get("action")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("")
+                                .trim()
+                                .is_empty()
+                        {
+                            payload.insert(
+                                "action".to_string(),
+                                serde_json::Value::String(action.to_ascii_lowercase()),
+                            );
+                        }
+                    }
+                    "--url" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        payload.insert("url".to_string(), serde_json::Value::String(v));
+                    }
+                    "--surface-id" | "--tab-id" | "--tab" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        payload.insert("surfaceId".to_string(), serde_json::Value::String(v));
+                    }
+                    "--mode" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        payload.insert("mode".to_string(), serde_json::Value::String(v));
+                    }
+                    "--fresh" => {
+                        let b = if let Some(val) = inline_val {
+                            parse_bool_flag(val)
+                                .map_err(|_| agent_bad_args("Invalid boolean for `--fresh`."))?
+                        } else {
+                            true
+                        };
+                        payload.insert("fresh".to_string(), serde_json::Value::Bool(b));
+                    }
+                    "--background" => {
+                        let b = if let Some(val) = inline_val {
+                            parse_bool_flag(val)
+                                .map_err(|_| agent_bad_args("Invalid boolean for `--background`."))?
+                        } else if let Some(&peek) = items.peek() {
+                            if !peek.starts_with('-') {
+                                parse_bool_flag(items.next().unwrap()).map_err(|_| {
+                                    agent_bad_args("Invalid boolean for `--background`.")
+                                })?
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        };
+                        payload.insert("background".to_string(), serde_json::Value::Bool(b));
+                    }
+                    "--foreground" => {
+                        payload.insert("background".to_string(), serde_json::Value::Bool(false));
+                    }
+                    "--isolated" => {
+                        let b = if let Some(val) = inline_val {
+                            parse_bool_flag(val)
+                                .map_err(|_| agent_bad_args("Invalid boolean for `--isolated`."))?
+                        } else {
+                            true
+                        };
+                        payload.insert("isolated".to_string(), serde_json::Value::Bool(b));
+                    }
+                    "--width" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        let n: u64 = raw
+                            .parse()
+                            .map_err(|_| agent_bad_args("Invalid `--width` integer."))?;
+                        payload.insert("width".to_string(), serde_json::json!(n));
+                    }
+                    "--height" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        let n: u64 = raw
+                            .parse()
+                            .map_err(|_| agent_bad_args("Invalid `--height` integer."))?;
+                        payload.insert("height".to_string(), serde_json::json!(n));
+                    }
+                    "--workspace-id" | "--workspace" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        payload.insert("workspaceId".to_string(), serde_json::Value::String(v));
+                    }
+                    "--intent" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        payload.insert("intent".to_string(), serde_json::Value::String(v));
+                    }
+                    "--format" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        payload.insert("format".to_string(), serde_json::Value::String(v));
+                    }
+                    "--script" | "--js" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        payload.insert("script".to_string(), serde_json::Value::String(v));
+                    }
+                    "--params" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                            agent_bad_args(format!("Invalid JSON for `--params`: {e}"))
+                        })?;
+                        payload.insert("params".to_string(), val);
+                    }
+                    "--step" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                            agent_bad_args(format!("Invalid JSON for `--step`: {e}"))
+                        })?;
+                        payload.insert("step".to_string(), val);
+                    }
+                    "--steps" => {
+                        let raw = need_agent_flag(&mut items, flag, inline_val)?;
+                        let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                            agent_bad_args(format!("Invalid JSON for `--steps`: {e}"))
+                        })?;
+                        payload.insert("steps".to_string(), val);
+                    }
+                    "--include-snapshot" => {
+                        let b = if let Some(val) = inline_val {
+                            parse_bool_flag(val).map_err(|_| {
+                                agent_bad_args("Invalid boolean for `--include-snapshot`.")
+                            })?
+                        } else {
+                            true
+                        };
+                        payload.insert("includeSnapshot".to_string(), serde_json::Value::Bool(b));
+                    }
+                    "--op" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        step_obj.insert("op".to_string(), serde_json::Value::String(v));
+                    }
+                    "--ref" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        step_obj.insert("ref".to_string(), serde_json::Value::String(v));
+                    }
+                    "--selector" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        step_obj.insert("selector".to_string(), serde_json::Value::String(v));
+                    }
+                    "--value" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        step_obj.insert("value".to_string(), serde_json::Value::String(v));
+                    }
+                    "--text" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        step_obj.insert("text".to_string(), serde_json::Value::String(v));
+                    }
+                    "--key" => {
+                        let v = need_agent_flag(&mut items, flag, inline_val)?;
+                        step_obj.insert("key".to_string(), serde_json::Value::String(v));
+                    }
+                    "--approved" => {}
+                    _ if next.starts_with('-') => {
+                        return Err(agent_bad_args(format!(
+                            "Unknown flag `{next}` for `agent browser {action}`."
+                        )));
+                    }
+                    other => positionals.push(other.to_string()),
+                }
+            }
+
+            if !step_obj.is_empty() && !payload.contains_key("step") {
+                payload.insert("step".to_string(), serde_json::Value::Object(step_obj));
+            }
+            if let Some(first) = positionals.into_iter().next() {
+                match action {
+                    "open" if !payload.contains_key("url") => {
+                        payload.insert("url".to_string(), serde_json::Value::String(first));
+                    }
+                    "eval" if !payload.contains_key("script") => {
+                        payload.insert("script".to_string(), serde_json::Value::String(first));
+                    }
+                    "replay" | "save_recipe" if !payload.contains_key("intent") => {
+                        payload.insert("intent".to_string(), serde_json::Value::String(first));
+                    }
+                    _ if !payload.contains_key("surfaceId") => {
+                        payload.insert("surfaceId".to_string(), serde_json::Value::String(first));
+                    }
+                    _ => {}
+                }
+            }
+
+            let payload_json = serde_json::Value::Object(payload).to_string();
+            Ok(AgentCommand::Tool(AgentToolCommand::Browser { payload_json }))
         }
         _ => Err(agent_bad_args(format!(
             "Unknown agent command `agent {domain} {action}`."

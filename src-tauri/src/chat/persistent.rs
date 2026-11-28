@@ -24,13 +24,33 @@
 
 pub(crate) mod controls;
 pub(crate) mod antigravity;
+pub(crate) mod antigravity_acp;
 pub(crate) mod opencode;
+pub(crate) mod opencode_pool;
 pub(crate) mod grok;
+pub(crate) mod grok_pool;
+pub(crate) mod codex_app_server;
 
 pub use controls::*;
 pub use antigravity::*;
+pub use antigravity_acp::{
+    agy_acp_pool_stats, global_agy_acp_pool, reap_idle_agy_acp_daemons, AgyAcpSessionHandle,
+    SharedAgyAcpPool,
+};
 pub use opencode::*;
+pub use opencode_pool::{
+    global_opencode_pool, opencode_pool_stats, reap_idle_opencode_servers, PooledOpenCodeLease,
+    SharedOpenCodeServerPool,
+};
 pub use grok::*;
+pub use grok_pool::{
+    global_grok_pool, grok_pool_stats, reap_idle_grok_daemons, GrokPooledSessionHandle,
+    SharedGrokAcpPool,
+};
+pub use codex_app_server::{
+    probe_codex_app_server, probe_codex_app_server_help, CodexAppServerProbeResult,
+    CodexAppServerSession,
+};
 
 #[cfg(test)]
 #[path = "persistent_tests.rs"]

@@ -847,3 +847,690 @@ fn test_initial_state_moves_into_stores_once() {
     let _th_len = threads().lock().unwrap().len();
 }
 
+#[test]
+fn test_seed_routines_have_valid_uuid_and_heal_migrates_legacy_seed() {
+    for routine in seed_routines() {
+        let id = routine
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("seeded routine must have id");
+        assert!(
+            uuid::Uuid::parse_str(id).is_ok(),
+            "seeded routine id '{id}' must be a valid UUID"
+        );
+    }
+
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA_SQL).unwrap();
+    let legacy_id = "r1111111-1111-4111-8111-111111111111";
+    conn.execute(
+        "INSERT INTO routine_runs (run_id, routine_id, agent_id, trigger_kind, status, started_at_unix_ms, finished_at_unix_ms, thread_id, summary, changed_files_count, retry_attempt, error)
+         VALUES ('run-legacy-1', ?1, 'c3333333-3333-4333-8333-333333333333', 'schedule', 'succeeded', 100, 200, 'th-1', 'ok', 0, 0, NULL)",
+        [legacy_id],
+    )
+    .unwrap();
+
+    let mut loaded_routines = vec![json!({
+        "id": legacy_id,
+        "agentId": "c3333333-3333-4333-8333-333333333333",
+        "name": "Daily Project Health Check",
+        "enabled": true,
+    })];
+    let mut loaded_notifications = vec![json!({
+        "id": "e1111111-1111-4111-8111-111111111111",
+        "routineId": legacy_id,
+    })];
+
+    let changed = heal_loaded_routines_in_conn(&conn, &mut loaded_routines, &mut loaded_notifications);
+    assert!(changed, "legacy non-UUID routine id should be migrated");
+    let healed_id = loaded_routines[0]["id"].as_str().unwrap();
+    assert_eq!(healed_id, SEEDED_HEALTH_CHECK_ROUTINE_ID);
+    assert!(uuid::Uuid::parse_str(healed_id).is_ok());
+    assert_eq!(loaded_notifications[0]["routineId"].as_str(), Some(healed_id));
+
+    let migrated_runs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM routine_runs WHERE routine_id = ?1",
+            [healed_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(migrated_runs, 1);
+
+    let changed_again =
+        heal_loaded_routines_in_conn(&conn, &mut loaded_routines, &mut loaded_notifications);
+    assert!(!changed_again, "healing legacy routine ids must be idempotent");
+}
+
+#[test]
+fn test_stub_never_overwrites_full_row_or_gets_pruned_on_persist() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    configure_sqlite_pragmas(&conn).unwrap();
+    conn.execute_batch(SCHEMA_SQL).unwrap();
+
+    let full_stub_target = json!({
+        "id": "th-stubbed",
+        "title": "Full Title",
+        "status": "idle",
+        "provider": "claude",
+        "model": "claude-sonnet-4-5",
+        "effort": "high",
+        "providerOptions": [{ "id": "opt-1" }],
+        "workspaceId": "ws-1",
+        "profileId": "ag-1",
+        "parentThreadId": "parent-0",
+        "providerSessionId": "sess-1",
+        "archived": false,
+        "startedByAgent": true,
+        "workingDirectory": "C:/repo",
+        "worktreePath": "C:/repo/.wt",
+        "createdAtUnixMs": 100,
+        "updatedAtUnixMs": 200,
+        "revision": "rev-1",
+        "usage": { "inputTokens": 42 },
+        "mode": "fullAccess",
+        "permissionMode": "auto",
+        "sessionState": "ready",
+        "lastActiveAtUnixMs": 200,
+        "worktreeBranch": "feat/test",
+        "unread": true,
+        "subagentRuns": [{
+            "subagentId": "sub-1",
+            "status": "completed",
+            "stepCount": 1,
+            "items": [{ "id": "si-1", "kind": "assistant", "text": "sub output" }]
+        }],
+        "items": [
+            { "id": "u1", "kind": "user", "text": "hello" },
+            { "id": "a1", "kind": "assistant", "text": "world" }
+        ]
+    });
+    let active_thread = json!({
+        "id": "th-active",
+        "title": "Active",
+        "status": "idle",
+        "createdAtUnixMs": 150,
+        "updatedAtUnixMs": 250,
+        "revision": "rev-2",
+        "items": [{ "id": "u2", "kind": "user", "text": "stay full" }]
+    });
+
+    let mut rev_cache = ThreadRevCache::new();
+    let initial = DiskState {
+        workspaces: vec![],
+        paths: HashMap::new(),
+        agents: vec![],
+        threads: vec![full_stub_target.clone(), active_thread.clone()],
+        last_provider: "claude".into(),
+        last_model: None,
+        last_effort: None,
+        grid: Value::Null,
+        revision: 1,
+        routines: vec![],
+        notifications: vec![],
+    };
+    write_disk_state_with_cache(&mut conn, &initial, Some(&mut rev_cache)).unwrap();
+
+    let stub = to_thread_stub(&full_stub_target);
+    assert!(is_thread_stub(&stub));
+    assert_eq!(stub["_kiteStub"], json!(true));
+    assert_eq!(stub["itemCount"], json!(2));
+    assert_eq!(stub["items"], json!([]));
+    assert_eq!(
+        stub["subagentRuns"][0]
+            .get("items")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        0
+    );
+    for key in [
+        "id",
+        "title",
+        "status",
+        "provider",
+        "model",
+        "effort",
+        "providerOptions",
+        "workspaceId",
+        "profileId",
+        "parentThreadId",
+        "providerSessionId",
+        "archived",
+        "startedByAgent",
+        "workingDirectory",
+        "worktreePath",
+        "createdAtUnixMs",
+        "updatedAtUnixMs",
+        "revision",
+        "usage",
+        "mode",
+        "permissionMode",
+        "sessionState",
+        "lastActiveAtUnixMs",
+        "worktreeBranch",
+        "unread",
+    ] {
+        assert_eq!(stub.get(key), full_stub_target.get(key), "stub must preserve {key}");
+    }
+    // Stubbing an already-stubbed thread must preserve itemCount.
+    let stub_again = to_thread_stub(&stub);
+    assert_eq!(stub_again["itemCount"], json!(2));
+
+    // Even if a stub is mutated in memory without hydration (or lacks revision), persist must neither
+    // overwrite the SQLite row nor prune it.
+    let mut mutated_stub = stub.clone();
+    mutated_stub["title"] = json!("Must Not Clobber");
+    mutated_stub["revision"] = json!("rev-stub-mutated");
+    mutated_stub["updatedAtUnixMs"] = json!(999);
+
+    let mut mutated_active = active_thread.clone();
+    mutated_active["title"] = json!("Active Updated");
+    mutated_active["revision"] = json!("rev-3");
+    mutated_active["updatedAtUnixMs"] = json!(350);
+
+    let in_mem = vec![mutated_stub.clone(), mutated_active.clone()];
+    let (dirty, live_ids) = collect_dirty_threads(&in_mem, &rev_cache);
+    assert_eq!(live_ids, vec!["th-stubbed", "th-active"]);
+    assert_eq!(dirty.len(), 1);
+    assert_eq!(dirty[0]["id"], json!("th-active"));
+
+    let snap = DirtyDiskSnapshot {
+        workspaces: vec![],
+        paths: HashMap::new(),
+        agents: vec![],
+        dirty_threads: dirty,
+        live_thread_ids: live_ids,
+        last_provider: "claude".into(),
+        last_model: None,
+        last_effort: None,
+        grid: Value::Null,
+        revision: 2,
+        routines: vec![],
+        notifications: vec![],
+    };
+    let written = write_dirty_disk_state_with_cache(&mut conn, &snap, Some(&mut rev_cache)).unwrap();
+    assert_eq!(written, 1);
+
+    // Also verify upsert_threads_into_tx directly skips stubs while collecting live_ids.
+    let mut direct_no_cache_state = initial.clone();
+    direct_no_cache_state.threads = vec![mutated_stub, mutated_active];
+    let written_direct = write_disk_state_with_cache(&mut conn, &direct_no_cache_state, None).unwrap();
+    assert_eq!(written_direct, 1);
+
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM threads WHERE id = ?1", "th-stubbed"), 1);
+    let stored = find_thread_from_conn(&conn, "th-stubbed").unwrap();
+    assert!(!is_thread_stub(&stored));
+    assert_eq!(stored["title"], json!("Full Title"));
+    assert_eq!(stored["items"].as_array().unwrap().len(), 2);
+    assert_eq!(stored["subagentRuns"][0]["items"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn test_hydrate_thread_restores_full_items_and_clears_stub() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA_SQL).unwrap();
+
+    let full = json!({
+        "id": "th-hydrate-1",
+        "title": "Original",
+        "status": "idle",
+        "createdAtUnixMs": 100,
+        "updatedAtUnixMs": 200,
+        "revision": "rev-1",
+        "items": [
+            { "id": "i1", "kind": "user", "text": "one" },
+            { "id": "i2", "kind": "assistant", "text": "two" },
+            { "id": "i3", "kind": "assistant", "text": "three" }
+        ]
+    });
+    let mut rev_cache = ThreadRevCache::new();
+    let state = DiskState {
+        workspaces: vec![],
+        paths: HashMap::new(),
+        agents: vec![],
+        threads: vec![full.clone()],
+        last_provider: "claude".into(),
+        last_model: None,
+        last_effort: None,
+        grid: Value::Null,
+        revision: 1,
+        routines: vec![],
+        notifications: vec![],
+    };
+    write_disk_state_with_cache(&mut conn, &state, Some(&mut rev_cache)).unwrap();
+
+    let mut touched_stub = to_thread_stub(&full);
+    touched_stub["title"] = json!("Renamed In Stub");
+    touched_stub["updatedAtUnixMs"] = json!(250);
+    touched_stub["revision"] = json!("rev-2");
+
+    let mut mem_threads = vec![touched_stub];
+    let mut lru = std::collections::VecDeque::new();
+
+    assert!(!hydrate_thread_in_state(
+        &mut conn,
+        &mut mem_threads,
+        &mut lru,
+        &mut rev_cache,
+        "missing-thread",
+    ));
+    assert!(hydrate_thread_in_state(
+        &mut conn,
+        &mut mem_threads,
+        &mut lru,
+        &mut rev_cache,
+        "th-hydrate-1",
+    ));
+    assert!(!is_thread_stub(&mem_threads[0]));
+    assert!(mem_threads[0].get("_kiteStub").is_none());
+    assert!(mem_threads[0].get("itemCount").is_none());
+    assert_eq!(mem_threads[0]["items"].as_array().unwrap().len(), 3);
+    assert_eq!(mem_threads[0]["title"], json!("Renamed In Stub"));
+    assert_eq!(mem_threads[0]["updatedAtUnixMs"], json!(250));
+    assert_eq!(lru.back().map(String::as_str), Some("th-hydrate-1"));
+
+    // Public hydrate_thread smoke check against global db_connection() and threads().
+    struct PublicThreadCleanup {
+        id: String,
+    }
+    impl Drop for PublicThreadCleanup {
+        fn drop(&mut self) {
+            if let Ok(mut list) = threads().lock() {
+                list.retain(|t| json_row_id(t) != Some(self.id.as_str()));
+            }
+            if let Ok(mut lru) = hydrated_lru().lock() {
+                lru.retain(|id| id != &self.id);
+            }
+            if let Ok(mut revs) = persisted_thread_revs().lock() {
+                revs.remove(&self.id);
+            }
+            if let Ok(conn) = db_connection().lock() {
+                let _ = conn.execute("DELETE FROM threads WHERE id = ?1", [&self.id]);
+            }
+        }
+    }
+
+    let pub_tid = format!("th-pub-hydrate-{}", uuid::Uuid::new_v4().simple());
+    let _cleanup = PublicThreadCleanup { id: pub_tid.clone() };
+    let pub_full = json!({
+        "id": pub_tid,
+        "title": "Public Hydrate",
+        "status": "idle",
+        "createdAtUnixMs": 100,
+        "updatedAtUnixMs": 200,
+        "revision": "rev-pub-1",
+        "items": [{ "id": "p1", "kind": "user", "text": "hi" }]
+    });
+    {
+        let conn = db_connection().lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO threads (id, data, created_at_unix_ms, updated_at_unix_ms) VALUES (?1, ?2, 100, 200)",
+            params![pub_tid, serde_json::to_string(&pub_full).unwrap()],
+        )
+        .unwrap();
+    }
+    {
+        let mut list = threads().lock().unwrap();
+        list.push(to_thread_stub(&pub_full));
+    }
+
+    assert!(!hydrate_thread("nonexistent-public-thread-xyz"));
+    assert!(hydrate_thread(&pub_tid));
+    let list = threads().lock().unwrap();
+    let hydrated = list.iter().find(|t| json_row_id(t) == Some(pub_tid.as_str())).unwrap();
+    assert!(!is_thread_stub(hydrated));
+    assert!(hydrated.get("_kiteStub").is_none());
+    assert_eq!(hydrated["items"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn test_hydrate_lru_flushes_dirty_and_dehydrates_oldest_non_running() {
+    assert_eq!(MAX_HYDRATED_THREADS, 8);
+    let mut conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(SCHEMA_SQL).unwrap();
+
+    let mut full_threads = Vec::new();
+    for idx in 1..=10 {
+        let status = match idx {
+            1 => "running",
+            2 => "waiting",
+            _ => "idle",
+        };
+        full_threads.push(json!({
+            "id": format!("th-{idx}"),
+            "title": format!("Thread {idx}"),
+            "status": status,
+            "createdAtUnixMs": idx as i64 * 10,
+            "updatedAtUnixMs": idx as i64 * 100,
+            "revision": format!("rev-{idx}-v1"),
+            "items": [{ "id": format!("item-{idx}-1"), "kind": "user", "text": format!("msg {idx}") }]
+        }));
+    }
+
+    let mut rev_cache = ThreadRevCache::new();
+    let state = DiskState {
+        workspaces: vec![],
+        paths: HashMap::new(),
+        agents: vec![],
+        threads: full_threads.clone(),
+        last_provider: "claude".into(),
+        last_model: None,
+        last_effort: None,
+        grid: Value::Null,
+        revision: 1,
+        routines: vec![],
+        notifications: vec![],
+    };
+    write_disk_state_with_cache(&mut conn, &state, Some(&mut rev_cache)).unwrap();
+
+    let mut mem_threads: Vec<Value> = full_threads.iter().map(to_thread_stub).collect();
+    let mut lru = std::collections::VecDeque::new();
+
+    for idx in 1..=MAX_HYDRATED_THREADS {
+        let tid = format!("th-{idx}");
+        assert!(hydrate_thread_in_state(&mut conn, &mut mem_threads, &mut lru, &mut rev_cache, &tid));
+    }
+    assert!(mem_threads.iter().take(8).all(|t| !is_thread_stub(t)));
+
+    // Mutate th-3 (oldest idle thread) in memory without calling persist() first.
+    {
+        let t3 = mem_threads.iter_mut().find(|t| t["id"] == "th-3").unwrap();
+        t3["items"].as_array_mut().unwrap().push(json!({
+            "id": "item-3-2",
+            "kind": "assistant",
+            "text": "unsaved reply"
+        }));
+        t3["revision"] = json!("rev-3-dirty");
+        t3["updatedAtUnixMs"] = json!(9999);
+    }
+
+    // Hydrate th-9 -> exceeds MAX_HYDRATED_THREADS; must skip th-1 (running) & th-2 (waiting),
+    // flush dirty th-3 to SQLite, and dehydrate th-3 to a stub.
+    assert!(hydrate_thread_in_state(&mut conn, &mut mem_threads, &mut lru, &mut rev_cache, "th-9"));
+
+    let t1 = mem_threads.iter().find(|t| t["id"] == "th-1").unwrap();
+    let t2 = mem_threads.iter().find(|t| t["id"] == "th-2").unwrap();
+    let t3 = mem_threads.iter().find(|t| t["id"] == "th-3").unwrap();
+    let t9 = mem_threads.iter().find(|t| t["id"] == "th-9").unwrap();
+    assert!(!is_thread_stub(t1), "running thread must never be dehydrated");
+    assert!(!is_thread_stub(t2), "waiting thread must never be dehydrated");
+    assert!(is_thread_stub(t3), "oldest idle thread must be dehydrated beyond MAX_HYDRATED_THREADS");
+    assert_eq!(t3["itemCount"], json!(2));
+    assert_eq!(t3["items"], json!([]));
+    assert!(!is_thread_stub(t9));
+
+    let persisted_t3 = find_thread_from_conn(&conn, "th-3").unwrap();
+    assert_eq!(persisted_t3["revision"], json!("rev-3-dirty"));
+    assert_eq!(persisted_t3["items"].as_array().unwrap().len(), 2);
+    assert_eq!(persisted_t3["items"][1]["text"], json!("unsaved reply"));
+
+    // Now dehydrate all idle threads except th-9 via dehydrate_idle_threads_in_state.
+    let dehydrated = dehydrate_idle_threads_in_state(
+        &mut conn,
+        &mut mem_threads,
+        &mut lru,
+        &mut rev_cache,
+        &["th-9"],
+    );
+    assert_eq!(dehydrated, 5, "th-4..=th-8 should dehydrate while th-1 (running), th-2 (waiting), th-9 (keep_ids) stay hydrated");
+    assert!(!is_thread_stub(mem_threads.iter().find(|t| t["id"] == "th-1").unwrap()));
+    assert!(!is_thread_stub(mem_threads.iter().find(|t| t["id"] == "th-2").unwrap()));
+    assert!(!is_thread_stub(mem_threads.iter().find(|t| t["id"] == "th-9").unwrap()));
+    for idx in 3..=8 {
+        assert!(is_thread_stub(
+            mem_threads.iter().find(|t| t["id"] == format!("th-{idx}")).unwrap()
+        ));
+    }
+}
+
+#[test]
+fn test_direct_helpers_do_not_initialize_stores() {
+    // Verify isolated _from_conn behavior first.
+    let conn_mem = Connection::open_in_memory().unwrap();
+    conn_mem.execute_batch(SCHEMA_SQL).unwrap();
+    conn_mem.execute(
+        "INSERT INTO workspaces (id, display_name, folder_path, created_at_unix_ms, last_opened_at_unix_ms, pinned, available, sort_order)
+         VALUES ('ws-m1', 'Mem WS', 'C:/mem/ws', 1, 2, 0, 1, 0)",
+        [],
+    ).unwrap();
+    conn_mem.execute(
+        "INSERT INTO threads (id, data, created_at_unix_ms, updated_at_unix_ms)
+         VALUES ('th-m1', ?1, 1, 2)",
+        [serde_json::to_string(&json!({
+            "id": "th-m1",
+            "title": "Direct Query",
+            "updatedAtUnixMs": 2,
+            "items": [{ "id": "x1", "kind": "user", "text": "hello" }, { "id": "x2", "kind": "assistant", "text": "world" }]
+        })).unwrap()],
+    ).unwrap();
+
+    assert_eq!(all_workspace_paths_from_conn(&conn_mem).get("ws-m1").map(String::as_str), Some("C:/mem/ws"));
+    assert_eq!(find_thread_from_conn(&conn_mem, "th-m1").unwrap()["items"].as_array().unwrap().len(), 2);
+    let mem_summaries = list_threads_summaries_from_conn(&conn_mem);
+    assert_eq!(mem_summaries.len(), 1);
+    assert!(is_thread_stub(&mem_summaries[0]));
+    assert_eq!(mem_summaries[0]["itemCount"], json!(2));
+
+    // Verify public *_direct helpers against db_connection() never touch stores().
+    struct DirectDbCleanup {
+        ws_id: String,
+        th_id: String,
+    }
+    impl Drop for DirectDbCleanup {
+        fn drop(&mut self) {
+            if let Ok(conn) = db_connection().lock() {
+                let _ = conn.execute("DELETE FROM workspaces WHERE id = ?1", [&self.ws_id]);
+                let _ = conn.execute("DELETE FROM threads WHERE id = ?1", [&self.th_id]);
+            }
+        }
+    }
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let ws_id = format!("ws-direct-no-stores-{suffix}");
+    let th_id = format!("th-direct-no-stores-{suffix}");
+    let _cleanup = DirectDbCleanup { ws_id: ws_id.clone(), th_id: th_id.clone() };
+    {
+        let conn = db_connection().lock().unwrap();
+        conn.execute(
+            "INSERT INTO workspaces (id, display_name, folder_path, created_at_unix_ms, last_opened_at_unix_ms, pinned, available, sort_order)
+             VALUES (?1, 'Direct Test WS', 'C:/direct/test', 10, 20, 0, 1, 999)",
+            [&ws_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, data, created_at_unix_ms, updated_at_unix_ms)
+             VALUES (?1, ?2, 10, 20)",
+            params![
+                th_id,
+                serde_json::to_string(&json!({
+                    "id": th_id,
+                    "title": "Daemon Direct Thread",
+                    "updatedAtUnixMs": 20,
+                    "items": [{ "id": "d1", "kind": "user", "text": "one" }, { "id": "d2", "kind": "assistant", "text": "two" }]
+                })).unwrap()
+            ],
+        ).unwrap();
+    }
+
+    reset_test_thread_touched_stores();
+    let found = find_thread_direct(&th_id).expect("find_thread_direct must return inserted row");
+    assert_eq!(found["items"].as_array().unwrap().len(), 2);
+
+    let summaries = list_threads_direct_summaries();
+    let summary = summaries.iter().find(|t| json_row_id(t) == Some(th_id.as_str())).expect("summary present");
+    assert!(is_thread_stub(summary));
+    assert_eq!(summary["items"], json!([]));
+    assert_eq!(summary["itemCount"], json!(2));
+
+    let ws_paths = all_workspace_paths_direct();
+    assert_eq!(ws_paths.get(&ws_id).map(String::as_str), Some("C:/direct/test"));
+
+    let ws_list = list_workspaces_direct();
+    assert!(ws_list.iter().any(|w| w.id == ws_id));
+
+    assert!(
+        !test_thread_touched_stores(),
+        "direct SQLite helpers must NEVER call stores() / initialize PersistStores"
+    );
+}
+
+#[test]
+fn test_migrate_compact_legacy_sqlite() {
+    struct TempDirCleanup(PathBuf);
+    impl Drop for TempDirCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let root = std::env::temp_dir().join(format!("kite-compact-test-{}", uuid::Uuid::new_v4().simple()));
+    fs::create_dir_all(&root).unwrap();
+    let _cleanup = TempDirCleanup(root.clone());
+
+    let db_file = root.join("compact.sqlite");
+    let attachments_dir = root.join("chat-attachments");
+    let existing_img = root.join("existing-preview.png");
+    fs::write(&existing_img, b"existing-png-bytes").unwrap();
+    let existing_img_str = existing_img.to_string_lossy().to_string();
+
+    let raw_png_bytes = b"\x89PNG\r\n\x1a\nfake-legacy-image-payload";
+    let b64_png = base64::engine::general_purpose::STANDARD.encode(raw_png_bytes);
+    let data_url = format!("data:image/png;base64,{b64_png}");
+
+    let mut conn = Connection::open(&db_file).unwrap();
+    configure_sqlite_pragmas(&conn).unwrap();
+    conn.execute_batch(SCHEMA_SQL).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE dispatch_audit (
+            id TEXT PRIMARY KEY,
+            op TEXT NOT NULL,
+            address TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL,
+            submitted INTEGER NOT NULL,
+            historical INTEGER NOT NULL,
+            sender_name TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            error TEXT,
+            created_ms INTEGER NOT NULL,
+            thread_id TEXT
+        );",
+    ).unwrap();
+
+    // Insert 2,050 dispatch_audit rows inside a transaction for speed.
+    {
+        let tx = conn.transaction().unwrap();
+        let mut stmt = tx.prepare(
+            "INSERT INTO dispatch_audit (id, op, address, body, status, submitted, historical, sender_name, profile_id, error, created_ms, thread_id)
+             VALUES (?1, 'send', 'thread:t1', 'msg', 'ok', 1, 0, 'Agent', '', NULL, ?2, 't1')"
+        ).unwrap();
+        for i in 1..=2050i64 {
+            stmt.execute(params![format!("aud-{i:04}"), i]).unwrap();
+        }
+        drop(stmt);
+        tx.commit().unwrap();
+    }
+
+    // Create > 8 MiB of freelist pages so VACUUM runs as part of compaction.
+    conn.execute_batch(
+        "CREATE TABLE bloat_scratch (payload BLOB);
+         INSERT INTO bloat_scratch (payload) VALUES (zeroblob(9 * 1024 * 1024));
+         DROP TABLE bloat_scratch;",
+    ).unwrap();
+    let freelist_before: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)).unwrap();
+    assert!(freelist_before > 0);
+
+    let legacy_thread = json!({
+        "id": "th-legacy-compact",
+        "title": "Legacy Thread",
+        "status": "idle",
+        "createdAtUnixMs": 100,
+        "updatedAtUnixMs": 200,
+        "subagentRuns": [
+            {
+                "subagentId": "sub-child-done",
+                "status": "completed",
+                "childThreadId": "child-1",
+                "items": [
+                    { "id": "si-tool", "kind": "tool", "title": "Read file" },
+                    { "id": "si-1", "kind": "assistant", "text": "duplicated child item" }
+                ]
+            },
+            {
+                "subagentId": "sub-transcript-killed",
+                "status": "killed",
+                "transcriptUri": "file:///tmp/transcript.jsonl",
+                "items": [{ "id": "si-2", "kind": "assistant", "text": "duplicated transcript item" }]
+            },
+            {
+                "subagentId": "sub-still-running",
+                "status": "running",
+                "childThreadId": "child-2",
+                "items": [{ "id": "si-3", "kind": "assistant", "text": "keep while running" }]
+            },
+            {
+                "subagentId": "sub-inline-only",
+                "status": "completed",
+                "items": [{ "id": "si-4", "kind": "assistant", "text": "keep inline without child or transcript" }]
+            }
+        ],
+        "items": [
+            {
+                "id": "u1",
+                "kind": "user",
+                "text": "check attachments",
+                "attachments": [
+                    {
+                        "resourceId": "att-existing",
+                        "displayName": "existing-preview.png",
+                        "path": existing_img_str,
+                        "previewDataUrl": data_url
+                    },
+                    {
+                        "resourceId": "att-inline-only",
+                        "displayName": "pasted.png",
+                        "previewDataUrl": data_url
+                    }
+                ]
+            }
+        ]
+    });
+    conn.execute(
+        "INSERT INTO threads (id, data, created_at_unix_ms, updated_at_unix_ms) VALUES ('th-legacy-compact', ?1, 100, 200)",
+        [serde_json::to_string(&legacy_thread).unwrap()],
+    ).unwrap();
+
+    let ran = migrate_compact_legacy_sqlite_with_attachments_dir(&mut conn, &attachments_dir).unwrap();
+    assert!(ran, "first compaction must execute");
+    assert_eq!(app_value(&conn, "legacy_bloat_compacted_v1"), "1");
+
+    // Verify dispatch_audit trimmed to latest 2,000 rows.
+    let audit_count: i64 = conn.query_row("SELECT COUNT(*) FROM dispatch_audit", [], |r| r.get(0)).unwrap();
+    assert_eq!(audit_count, 2000);
+    let min_created: i64 = conn.query_row("SELECT MIN(created_ms) FROM dispatch_audit", [], |r| r.get(0)).unwrap();
+    assert_eq!(min_created, 51);
+
+    // Verify freelist was reclaimed by VACUUM.
+    let freelist_after: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)).unwrap();
+    assert_eq!(freelist_after, 0);
+
+    // Verify subagentRuns and attachments compaction.
+    let compacted = find_thread_from_conn(&conn, "th-legacy-compact").unwrap();
+    assert_eq!(compacted["subagentRuns"][0]["items"], json!([]));
+    assert_eq!(compacted["subagentRuns"][0]["stepCount"], json!(1));
+    assert_eq!(compacted["subagentRuns"][1]["items"], json!([]));
+    assert_eq!(compacted["subagentRuns"][2]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(compacted["subagentRuns"][3]["items"].as_array().unwrap().len(), 1);
+
+    let atts = compacted["items"][0]["attachments"].as_array().unwrap();
+    assert!(atts[0].get("previewDataUrl").is_none());
+    assert_eq!(atts[0]["path"], json!(existing_img.to_string_lossy().to_string()));
+
+    assert!(atts[1].get("previewDataUrl").is_none());
+    let written_path = atts[1]["path"].as_str().expect("externalized path must be set");
+    assert!(written_path.ends_with("att-inline-only.png"), "unexpected path: {written_path}");
+    assert_eq!(fs::read(written_path).unwrap(), raw_png_bytes);
+
+    // Second run must short-circuit via app_state guard.
+    let ran_again = migrate_compact_legacy_sqlite_with_attachments_dir(&mut conn, &attachments_dir).unwrap();
+    assert!(!ran_again);
+}
+

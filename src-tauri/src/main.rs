@@ -27,6 +27,9 @@ pub mod chat;
 pub mod chat_attachments;
 pub mod chat_commands;
 pub mod browser;
+pub mod browser_policy;
+pub mod browser_discovery;
+pub mod browser_cdp;
 pub mod files;
 pub mod routines;
 pub mod notifications;
@@ -67,7 +70,7 @@ pub mod voice_realtime;
 pub mod remote;
 pub mod native_agent;
 
-use logger::log_trace;
+use logger::{log_fatal, log_trace};
 use tauri::Manager;
 
 use acp::*;
@@ -339,7 +342,7 @@ fn main() {
                 None => format!("{:?}", info.payload()),
             },
         };
-        log_trace(&format!("PANIC: {} at {:?}", payload, info.location()));
+        log_fatal(&format!("PANIC: {} at {:?}", payload, info.location()));
     }));
 
     #[cfg(windows)]
@@ -561,6 +564,12 @@ fn main() {
             cancel_dictation,
             cancel_transcript_search,
             close_browser_surface,
+            list_browser_surfaces,
+            takeover_browser_surface,
+            resume_browser_surface,
+            discover_browser_servers,
+            capture_browser_surface_screenshot,
+            browser_agent_action,
             close_files_resource,
             complete_agent_inbox,
             complete_agent_install,
@@ -884,6 +893,14 @@ fn main() {
             plugin_runtime::commands::plugin_runtime_sidecar_action,
             plugin_runtime::commands::plugin_runtime_sidecar_logs,
             plugin_runtime::commands::plugin_runtime_list_sidecars,
+            plugin_runtime::commands::plugin_mcp_app_list_entrypoints,
+            plugin_runtime::commands::plugin_mcp_app_read_resource,
+            plugin_runtime::commands::plugin_mcp_app_call_tool,
+            plugin_runtime::commands::plugin_catalog_list_sources,
+            plugin_runtime::commands::plugin_catalog_save_sources,
+            plugin_runtime::commands::plugin_catalog_fetch,
+            plugin_runtime::commands::plugin_catalog_install,
+            plugin_runtime::commands::plugin_scheduled_sidecars_status,
             get_agent_updates_summary,
             start_agent_tool_job,
             get_active_agent_tool_jobs,
@@ -932,6 +949,8 @@ fn main() {
             remote::remote_gateway_list_devices,
             remote::remote_gateway_revoke_device,
             remote::remote_argos_turn_reply,
+            remote::remote_gateway_tailscale_status,
+            remote::remote_gateway_configure_tailscale,
             native_agent::get_runtime_transport_metrics,
             native_agent::save_runtime_resource_settings,
             native_agent::get_runtime_resource_settings,

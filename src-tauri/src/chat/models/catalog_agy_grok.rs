@@ -11,13 +11,45 @@ pub fn fetch_antigravity_models_dynamic() -> Vec<Value> {
     query_agy_models_cli().unwrap_or_default()
 }
 
+/// Returns true for Antigravity model IDs known not to accept `--effort` / `thought_level`.
+pub fn is_antigravity_non_effort_model(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    lower.contains("orchestrator")
+        || matches!(lower.as_str(), "gpt-oss-120b" | "gpt-oss-120b-medium")
+}
+
+/// Sanitizes an Antigravity CLI `--effort` value against model support and the
+/// `agy --effort` accepted grammar (`low|medium|high|xhigh|max`).
+pub fn sanitize_antigravity_cli_effort(
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Option<String> {
+    let raw = effort.map(str::trim).filter(|s| !s.is_empty())?;
+    if model.is_some_and(is_antigravity_non_effort_model) {
+        return None;
+    }
+    match raw.to_ascii_lowercase().as_str() {
+        "none" | "off" => None,
+        "minimal" | "min" | "low" => Some("low".to_string()),
+        "medium" | "med" => Some("medium".to_string()),
+        "high" => Some("high".to_string()),
+        "xhigh" | "x-high" | "extra-high" | "extra_high" | "very-high" | "extra" | "ultra" => {
+            Some("xhigh".to_string())
+        }
+        "max" | "maximum" => Some("max".to_string()),
+        _ => Some(raw.to_string()),
+    }
+}
+
 pub fn parse_agy_models(raw: &str) -> Vec<Value> {
     struct ModelEntry {
         base_id: String,
         clean_name: String,
         description: &'static str,
         tiers: Vec<String>,
-        has_known_effort: bool,
     }
 
     let mut order: Vec<String> = Vec::new();
@@ -67,6 +99,7 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
             .replace(" (High)", "")
             .replace(" (Medium)", "")
             .replace(" (Low)", "")
+            .replace(" (XHigh)", "")
             .replace(" (X-High)", "")
             .replace(" (Max)", "")
             .replace(" (Minimal)", "")
@@ -74,7 +107,9 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
             .replace(" (Adaptive)", "");
 
         let id_lower = base_id.to_lowercase();
-        let description = if id_lower.contains("gemini-4") || id_lower.contains("argon") {
+        let description = if id_lower.contains("orchestrator") {
+            "Multi-agent orchestration model (Google DeepMind)"
+        } else if id_lower.contains("gemini-4") || id_lower.contains("argon") {
             "Frontier reasoning & agentic coding (Google DeepMind)"
         } else if id_lower.contains("flash") {
             "Ultra-fast, lightweight agentic execution (Google DeepMind)"
@@ -88,12 +123,6 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
             "Antigravity live model"
         };
 
-        let has_known_effort = effort_tier.is_some()
-            || id_lower.contains("gemini")
-            || id_lower.contains("claude")
-            || id_lower.contains("argon")
-            || id_lower.contains("flash");
-
         let entry = map.entry(base_id.to_string()).or_insert_with(|| {
             order.push(base_id.to_string());
             ModelEntry {
@@ -101,7 +130,6 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
                 clean_name,
                 description,
                 tiers: Vec::new(),
-                has_known_effort,
             }
         });
 
@@ -115,17 +143,6 @@ pub fn parse_agy_models(raw: &str) -> Vec<Value> {
     let mut result = Vec::new();
     for id in order {
         if let Some(mut entry) = map.remove(&id) {
-            if entry.tiers.is_empty() && entry.has_known_effort {
-                let id_lower = entry.base_id.to_lowercase();
-                if id_lower.contains("gemini") || id_lower.contains("argon") {
-                    entry.tiers = vec!["minimal".into(), "low".into(), "medium".into(), "high".into()];
-                } else if id_lower.contains("claude") {
-                    entry.tiers = vec!["low".into(), "medium".into(), "high".into(), "max".into()];
-                } else {
-                    entry.tiers = vec!["low".into(), "medium".into(), "high".into()];
-                }
-            }
-
             sort_effort_levels(&mut entry.tiers);
 
             let supports_effort = entry.tiers.len() >= 2;

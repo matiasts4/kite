@@ -7,8 +7,6 @@
 
 use serde_json::Value;
 
-use crate::acp::strip_mcp_prefix;
-
 const GENERIC_ROLE: &str = "Subagent";
 /// Discovered subagents are timestamped from the child transcript, which can trail the
 /// streamed tool call by a moment.
@@ -34,10 +32,9 @@ fn created_at(it: &Value) -> i64 {
 /// An `invoke_subagent` card that no discovered subagent has claimed yet.
 pub(super) fn is_unbound_invoke_placeholder(it: &Value) -> bool {
     let id = item_id(it);
-    let is_invoke = it
-        .get("toolName")
-        .and_then(Value::as_str)
-        .is_some_and(|n| strip_mcp_prefix(n, &Value::Null).1 == "invoke_subagent");
+    let is_invoke = super::record::resolve_item_clean_tool_name(it)
+        .1
+        .eq_ignore_ascii_case("invoke_subagent");
     it.get("toolKind").and_then(Value::as_str) == Some("subagent")
         && is_invoke
         && !id.is_empty()
@@ -328,5 +325,42 @@ mod tests {
         assert_eq!(cards[0]["subagentMeta"]["role"], "Verifier");
         assert_eq!(thread["subagentRuns"].as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn legacy_call_item_without_tool_name_resolves_from_title_and_retires_when_superseded() {
+        let legacy_blocked = json!({
+            "id": "call_legacy_block_1",
+            "kind": "tool",
+            "toolKind": "subagent",
+            "title": "Run invoke_subagent",
+            "status": "failed",
+            "text": "Blocked by pre-tool hook: native `invoke_subagent` is blocked in Thread Mode.",
+            "createdAtUnixMs": 1_000,
+            "subagentMeta": {
+                "subagentId": "call_legacy_block_1",
+                "role": "Subagent",
+                "status": "failed",
+                "stepCount": 0
+            }
+        });
+        assert!(
+            crate::chat::subagents::is_unspawned_failed_native_invoke(&legacy_blocked),
+            "persisted ACP call_* item lacking toolName must resolve invoke_subagent via title"
+        );
+        let mut thread = json!({
+            "items": [legacy_blocked, discovered("cid-real-1", 1_500)],
+            "subagentRuns": [
+                { "subagentId": "call_legacy_block_1", "parentToolCallId": "call_legacy_block_1", "role": "Subagent", "status": "failed", "stepCount": 0 },
+                { "subagentId": "cid-real-1", "parentToolCallId": "sub_cid-real-1", "role": "Verifier", "status": "completed", "stepCount": 4 }
+            ]
+        });
+        assert!(drop_superseded_placeholders(&mut thread));
+        let items = thread["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "sub_cid-real-1");
+        let runs = thread["subagentRuns"].as_array().unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0]["subagentId"], "cid-real-1");
     }
 }

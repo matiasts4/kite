@@ -168,6 +168,7 @@ pub fn ingest_nested_subagent_frame(
     let mut parent_tool_item_update: Option<Value> = None;
     let mut updated_run: Option<Value> = None;
 
+    crate::persist::hydrate_thread(thread_id);
     {
         let mut all_threads = threads().lock().unwrap();
         if let Some(thread) = all_threads
@@ -275,55 +276,142 @@ pub fn ingest_nested_subagent_frame(
 }
 
 pub fn build_subagent_detail(thread_id: &str, subagent_id: &str) -> Option<Value> {
-    let all_threads = threads().lock().unwrap();
-    let parent = all_threads
-        .iter()
-        .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))?;
-    let mut run = parent
-        .get("subagentRuns")
-        .and_then(Value::as_array)
-        .and_then(|runs| {
-            runs.iter().find(|r| {
-                r.get("subagentId").and_then(Value::as_str) == Some(subagent_id)
-                    || r.get("parentToolCallId").and_then(Value::as_str) == Some(subagent_id)
-                    || r.get("childThreadId").and_then(Value::as_str) == Some(subagent_id)
-            })
-        })
-        .cloned()?;
-
-    let child_tid = run.get("childThreadId").and_then(Value::as_str).map(str::to_string);
-    let uri = run.get("transcriptUri").and_then(Value::as_str).map(str::to_string);
-    let initial_prompt = run.get("prompt").and_then(Value::as_str).map(str::to_string);
-
-    if let Some(cid) = child_tid {
-        if let Some(child) = all_threads
+    crate::persist::hydrate_thread(thread_id);
+    let (mut run, child_tid, uri, initial_prompt) = {
+        let all_threads = threads().lock().unwrap();
+        let parent = all_threads
             .iter()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))?;
+        let run = parent
+            .get("subagentRuns")
+            .and_then(Value::as_array)
+            .and_then(|runs| {
+                runs.iter().find(|r| {
+                    r.get("subagentId").and_then(Value::as_str) == Some(subagent_id)
+                        || r.get("parentToolCallId").and_then(Value::as_str) == Some(subagent_id)
+                        || r.get("childThreadId").and_then(Value::as_str) == Some(subagent_id)
+                })
+            })
+            .cloned()?;
+        let child_tid = run
+            .get("childThreadId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let uri = run
+            .get("transcriptUri")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let initial_prompt = run
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        (run, child_tid, uri, initial_prompt)
+    };
+
+    if let Some(ref cid) = child_tid {
+        crate::persist::hydrate_thread(cid);
+        let child_snapshot = {
+            let all_threads = threads().lock().unwrap();
+            all_threads
+                .iter()
+                .find(|t| t.get("id").and_then(Value::as_str) == Some(cid.as_str()))
+                .map(|child| {
+                    (
+                        child.get("items").and_then(Value::as_array).cloned(),
+                        child
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        child
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        child
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        child
+                            .pointer("/turnFailure/message")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
+                        child.get("updatedAtUnixMs").and_then(Value::as_i64),
+                    )
+                })
+        };
+        if let Some((
+            child_items_opt,
+            status_opt,
+            model_opt,
+            provider_opt,
+            child_failure,
+            updated_at,
+        )) = child_snapshot
         {
-            if let Some(child_items) = child.get("items").and_then(Value::as_array) {
-                let filtered =
+            if let Some(ref child_items) = child_items_opt {
+                let mut filtered =
                     filter_subagent_stream_items(child_items, initial_prompt.as_deref());
+                if status_opt.as_deref() == Some("error") {
+                    if let Some(ref failure_msg) = child_failure {
+                        let already_shown = filtered.iter().any(|it| {
+                            it.get("text")
+                                .and_then(Value::as_str)
+                                .is_some_and(|t| t.contains(failure_msg.as_str()))
+                                || it
+                                    .get("detail")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|d| d.contains(failure_msg.as_str()))
+                        });
+                        if !already_shown {
+                            filtered.push(json!({
+                                "id": format!("subagent-error-{cid}"),
+                                "kind": "error",
+                                "title": "Subagent error",
+                                "text": failure_msg,
+                                "detail": failure_msg,
+                                "status": "error",
+                                "timestamp": updated_at.unwrap_or_else(now_ms),
+                            }));
+                        }
+                    }
+                }
                 run["items"] = Value::Array(filtered.clone());
                 let (steps, latest) = summarize_run_progress(&filtered);
                 run["stepCount"] = json!(steps);
-                if let Some(l) = latest {
+                if status_opt.as_deref() == Some("error") {
+                    if let Some(l) = child_failure.clone().or(latest) {
+                        run["latestActivity"] = json!(l);
+                    }
+                } else if let Some(l) = latest {
                     run["latestActivity"] = json!(l);
                 }
             }
-            if let Some(status) = child.get("status").and_then(Value::as_str) {
+            if let Some(status) = status_opt.as_deref() {
                 if status == "running" || status == "waiting" {
                     run["status"] = json!(status);
+                } else if status == "error" {
+                    run["status"] = json!("failed");
+                } else if status == "idle"
+                    && matches!(
+                        run.get("status").and_then(Value::as_str),
+                        Some("running" | "pending" | "inProgress" | "in_progress")
+                    )
+                    && !crate::chat::runtime::is_turn_running(cid)
+                {
+                    run["status"] = json!("completed");
                 }
             }
-            if let Some(model) = child.get("model").and_then(Value::as_str) {
+            if let Some(model) = model_opt {
                 run["model"] = json!(model);
             }
-            if let Some(provider) = child.get("provider").and_then(Value::as_str) {
+            if let Some(provider) = provider_opt {
                 run["provider"] = json!(provider);
             }
         }
     }
-    drop(all_threads);
 
     if let Some(u) = uri {
         if let Some(path) = resolve_local_transcript_path(&u) {
@@ -360,6 +448,7 @@ pub fn build_subagent_detail(thread_id: &str, subagent_id: &str) -> Option<Value
 }
 
 pub fn build_swarm_state(thread_id: &str) -> Value {
+    crate::persist::hydrate_thread(thread_id);
     let all_threads = threads().lock().unwrap();
     let Some(parent) = all_threads
         .iter()
@@ -470,6 +559,7 @@ pub(crate) fn register_swarm_worker_subagent_run(
         return;
     };
     let mut emitted = None;
+    crate::persist::hydrate_thread(parent_thread_id);
     if let Ok(mut all_threads) = threads().lock() {
         if let Some(parent) = all_threads
             .iter_mut()

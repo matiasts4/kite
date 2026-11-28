@@ -2485,6 +2485,561 @@ fn dispatch_audit_migration_preserves_existing_rows_and_surfaces_thread_id() {
     );
 }
 
+#[test]
+fn steer_cancel_preserve_children_rearms_dispatch_notice_and_delivers_after_steered_turn_settles() {
+    use crate::chat::runtime::state::{live_turns, TurnRun};
+    use crate::persist::threads;
+
+    let parent_id = format!("wire-steer-parent-{}", uuid::Uuid::new_v4().simple());
+    let child_id = format!("wire-steer-child-{}", uuid::Uuid::new_v4().simple());
+    let parent_addr = format!("thread:{parent_id}");
+    let child_addr = format!("thread:{child_id}");
+    let p_run_1 = format!("wire-steer-prun1-{}", uuid::Uuid::new_v4().simple());
+    let c_run = format!("wire-steer-crun-{}", uuid::Uuid::new_v4().simple());
+
+    {
+        let mut list = threads().lock().unwrap();
+        list.push(json!({
+            "id": parent_id,
+            "provider": "antigravity",
+            "status": "running",
+            "items": [
+                { "id": "u1", "kind": "user", "text": "Delegate work" }
+            ],
+            "subagentRuns": [
+                {
+                    "subagentId": "sub-wire-1",
+                    "parentThreadId": parent_id,
+                    "parentToolCallId": "call-wire-1",
+                    "role": "Researcher",
+                    "status": "running",
+                    "childThreadId": child_id,
+                    "stepCount": 1,
+                    "items": [],
+                    "startedAtUnixMs": 1000,
+                    "updatedAtUnixMs": 1000
+                }
+            ]
+        }));
+        list.push(json!({
+            "id": child_id,
+            "parentThreadId": parent_id,
+            "startedByAgent": true,
+            "sideChat": true,
+            "provider": "grok",
+            "status": "running",
+            "items": [
+                { "id": "cu1", "kind": "user", "text": "Inspect codebase" },
+                { "id": "ca1", "kind": "assistant", "text": "Subagent finished findings." }
+            ]
+        }));
+    }
+
+    let make_run = |asst_id: &str| TurnRun {
+        revision: "rev".into(),
+        events: Vec::new(),
+        next_sequence: 0,
+        assistant_id: asst_id.into(),
+        assistant_text: String::new(),
+        child: None,
+        stdin: None,
+        closing: false,
+        finished: false,
+        started_at_ms: 1000,
+        finished_at_ms: None,
+        routine_id: None,
+        delivered_through: 0,
+        file_baselines: std::collections::HashMap::new(),
+    };
+    {
+        let mut live = live_turns().lock().unwrap();
+        live.runs.insert(p_run_1.clone(), make_run("pa1"));
+        live.by_thread.insert(parent_id.clone(), p_run_1.clone());
+        live.runs.insert(c_run.clone(), make_run("ca1"));
+        live.by_thread.insert(child_id.clone(), c_run.clone());
+    }
+
+    // Attach parent + child with child's parent notice suppressed (simulating an active `run --wait`).
+    {
+        let mut svc = super::protocol::service().lock().unwrap();
+        let _ = svc.attach(Family::Thread, &parent_id, None, None, false);
+        let _ = svc.attach(Family::Thread, &child_id, None, Some(&parent_addr), false);
+        super::protocol::publish_thread(&mut svc, &parent_id);
+        super::protocol::publish_thread(&mut svc, &child_id);
+        svc.suppress_parent_notice_for(&child_addr);
+    }
+
+    // 1. Steer cancel (preserve_children = true) stops parent, keeps child alive, and re-arms child's notice.
+    crate::chat::cancel_turn_with_options(&parent_id, true);
+    assert!(!crate::chat::is_turn_running(&parent_id));
+    assert!(crate::chat::is_turn_running(&child_id));
+
+    // 2. Steered parent turn starts -> publishes Working presence via on_thread_started.
+    let started = crate::chat::start_turn(&parent_id, None, "Consider edge case X too", Vec::new(), None);
+    let steered_run_id = started["runId"].as_str().unwrap().to_string();
+    assert!(crate::chat::is_turn_running(&parent_id));
+
+    // 3. Child completes while parent is running its steered turn -> notice must QUEUE, not replace parent's run!
+    crate::chat::finish_run(&c_run, true, false, "");
+    let active_parent_run = {
+        let live = live_turns().lock().unwrap();
+        live.by_thread.get(&parent_id).cloned()
+    };
+    assert_eq!(
+        active_parent_run.as_deref(),
+        Some(steered_run_id.as_str()),
+        "child completion while parent is running steered turn must not clobber active steered run"
+    );
+
+    // 4. Parent finishes its steered turn -> queued child completion notice wakes parent automatically!
+    crate::chat::finish_run(&steered_run_id, true, false, "");
+    let has_child_notice = {
+        let list = threads().lock().unwrap();
+        list.iter()
+            .find(|t| t["id"] == parent_id)
+            .and_then(|parent| parent["items"].as_array())
+            .is_some_and(|items| {
+                items.iter().any(|it| {
+                    it.get("kind").and_then(Value::as_str) == Some("user")
+                        && it
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.contains("Subagent finished findings."))
+                })
+            })
+    };
+    assert!(
+        has_child_notice,
+        "queued child completion notice must wake parent once steered turn finishes"
+    );
+
+    // Cleanup
+    crate::chat::cancel_turn(&parent_id);
+    {
+        let mut svc = super::protocol::service().lock().unwrap();
+        let _ = svc.kill("cleanup-wire-steer-p2-c", &child_addr);
+        let _ = svc.kill("cleanup-wire-steer-p2-p", &parent_addr);
+    }
+    super::protocol::clear_thread_killed(&child_id);
+    super::protocol::clear_thread_killed(&parent_id);
+    crate::chat::threads::remove_thread(&child_id);
+    crate::chat::threads::remove_thread(&parent_id);
+}
+
+#[test]
+fn live_port_swarm_add_and_kill_do_not_self_deadlock_service_mutex() {
+    use crate::persist::threads;
+
+    let parent_id = format!("wire-swarm-reent-{}", uuid::Uuid::new_v4().simple());
+    let parent_addr = format!("thread:{parent_id}");
+
+    {
+        let mut parent = crate::chat::threads::blank_thread(
+            &parent_id,
+            None,
+            "Swarm Reentrancy Coordinator",
+            "antigravity",
+            None,
+        );
+        parent["status"] = json!("running");
+        threads().lock().unwrap().push(parent);
+    }
+
+    // `execute_argv_envelope` locks `service()` -> `Service::swarm` -> `LivePort::swarm` ->
+    // `execute_swarm_action` -> `start_turn` (`on_thread_started`) / `cancel_turn` (`on_thread_settled`).
+    // Without `LivePortReentrancyGuard` in `LivePort::swarm`, either call would self-deadlock.
+    let add_env = execute_argv_envelope(&json!({
+        "id": "wire-swarm-reent-add-1",
+        "caller": "agent",
+        "from": parent_addr,
+        "argv": [
+            "kite", "dispatch", "swarm", "add",
+            "--name", "auditor",
+            "--brief", "Verify lock safety"
+        ]
+    }));
+    assert_eq!(add_env["exit"], 0, "swarm add via LivePort::swarm failed: {add_env:?}");
+
+    let child_tid = {
+        let list = threads().lock().unwrap();
+        list.iter()
+            .find(|t| t["id"] == parent_id)
+            .and_then(|t| t.pointer("/swarmState/members"))
+            .and_then(Value::as_array)
+            .and_then(|m| m.first())
+            .and_then(|m| m.get("childThreadId"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let child_tid = child_tid.expect("swarm add must create worker childThreadId");
+
+    let kill_env = execute_argv_envelope(&json!({
+        "id": "wire-swarm-reent-kill-1",
+        "caller": "agent",
+        "from": parent_addr,
+        "argv": [
+            "kite", "dispatch", "swarm", "kill",
+            "--name", "auditor"
+        ]
+    }));
+    assert_eq!(kill_env["exit"], 0, "swarm kill via LivePort::swarm failed: {kill_env:?}");
+
+    crate::chat::cancel_turn(&child_tid);
+    crate::chat::cancel_turn(&parent_id);
+    super::protocol::clear_thread_killed(&child_tid);
+    super::protocol::clear_thread_killed(&parent_id);
+    crate::chat::threads::remove_thread(&child_tid);
+    crate::chat::threads::remove_thread(&parent_id);
+}
+
+#[test]
+fn thread_launch_parses_and_creates_top_level_thread_with_worktree_orchestrate_and_odd_path() {
+    use crate::dispatch::cli::{is_agent_argv, parse_agent_args, AgentCommand};
+    use crate::persist::{agents, paths, threads, workspaces, AgentProfile, Workspace};
+
+    let launch_argv: Vec<String> = [
+        "kite",
+        "agent",
+        "thread",
+        "launch",
+        "--title",
+        "Launch V3",
+        "--prompt",
+        "Implement ODD spec",
+        "--workspace",
+        "ws-1",
+        "--provider",
+        "claude-code",
+        "--model",
+        "claude-sonnet-4-6",
+        "--mode",
+        "fullAccess",
+        "--effort",
+        "high",
+        "--worktree",
+        "--odd",
+        "odd/tasks/v3.md",
+        "--open",
+        "--orchestrate",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    assert!(is_agent_argv(&launch_argv));
+    assert_eq!(
+        parse_agent_args(&launch_argv).unwrap(),
+        AgentCommand::ThreadLaunch {
+            title: Some("Launch V3".to_string()),
+            prompt: "Implement ODD spec".to_string(),
+            workspace_id: Some("ws-1".to_string()),
+            provider: Some("claude".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            mode: Some("fullAccess".to_string()),
+            effort: Some("high".to_string()),
+            worktree: true,
+            odd_path: Some("odd/tasks/v3.md".to_string()),
+            open: true,
+            orchestrate: true,
+        }
+    );
+
+    let pos_argv: Vec<String> = [
+        "dispatch",
+        "agent",
+        "thread",
+        "launch",
+        "Positional kickoff prompt",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    assert!(is_agent_argv(&pos_argv));
+    assert_eq!(
+        parse_agent_args(&pos_argv).unwrap(),
+        AgentCommand::ThreadLaunch {
+            title: None,
+            prompt: "Positional kickoff prompt".to_string(),
+            workspace_id: None,
+            provider: None,
+            model: None,
+            mode: None,
+            effort: None,
+            worktree: false,
+            odd_path: None,
+            open: false,
+            orchestrate: false,
+        }
+    );
+
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let repo_dir = std::env::temp_dir().join(format!("kite-thread-launch-{unique}"));
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    let git = |args: &[&str]| {
+        crate::git::run_git(&repo_dir, args).expect("git executable available for launch test")
+    };
+    assert!(git(&["init"]).status.success());
+    assert!(git(&["config", "user.email", "test@kite.local"]).status.success());
+    assert!(git(&["config", "user.name", "Kite Test"]).status.success());
+    std::fs::write(repo_dir.join("README.md"), "launch\n").unwrap();
+    assert!(git(&["add", "README.md"]).status.success());
+    assert!(git(&["commit", "-m", "init"]).status.success());
+
+    let ws_id = format!("ws-launch-{unique}");
+    let agent_id = format!("agent-launch-{unique}");
+    {
+        workspaces().lock().unwrap().push(Workspace {
+            id: ws_id.clone(),
+            display_name: "Launch Test Repo".to_string(),
+            created_at_unix_ms: 1_000,
+            last_opened_at_unix_ms: 1_000,
+            pinned: false,
+            available: true,
+        });
+        paths()
+            .lock()
+            .unwrap()
+            .insert(ws_id.clone(), repo_dir.to_string_lossy().to_string());
+        agents().lock().unwrap().push(AgentProfile {
+            id: agent_id.clone(),
+            name: "Discovery Architect".to_string(),
+            engine: "claude-code".to_string(),
+            purpose: "Research and launch".to_string(),
+            brief: "Research and launch".to_string(),
+            avatar: None,
+            created_at_unix_ms: 1_000,
+            pinned: false,
+            order: 0,
+            memory_budget: Some(2200),
+            reflection_mode: None,
+            allow_agent_scheduling: Some(true),
+            allow_agent_messaging: Some(true),
+            default_mode: Some("fullAccess".to_string()),
+            default_plan: Some(false),
+            default_model: None,
+            default_provider_options: Vec::new(),
+            place_display_names: Vec::new(),
+            disabled_plugin_ids: Vec::new(),
+        });
+    }
+
+    // Launch by directory path + caller agent engine fallback + worktree + oddPath + orchestrate
+    let env_res = execute_argv_envelope(&json!({
+        "id": "wire-thread-launch-1",
+        "agentId": &agent_id,
+        "argv": [
+            "kite",
+            "agent",
+            "thread",
+            "launch",
+            "--title",
+            "Discovery Kickoff",
+            "--workspace-id",
+            repo_dir.to_string_lossy().to_string(),
+            "--odd-path",
+            "odd/tasks/feature-x.md",
+            "--worktree",
+            "--open",
+            "--orchestrate",
+            "--prompt",
+            "Build feature X cleanly."
+        ]
+    }));
+    assert_eq!(env_res["exit"], 0, "launch failed: {env_res:?}");
+    let res = &env_res["result"];
+    assert_eq!(res["schema"], "kite.thread-launch/v1");
+    assert_eq!(res["provider"], "claude");
+    assert_eq!(res["workspaceId"], ws_id);
+    assert_eq!(res["open"], true);
+    assert_eq!(res["status"], "running");
+    assert!(res["runId"].as_str().is_some_and(|s| !s.is_empty()));
+    let wt_str = res["worktreePath"].as_str().expect("worktreePath must be set");
+    assert!(std::path::Path::new(wt_str).exists());
+    let launched_tid = res["threadId"].as_str().unwrap().to_string();
+
+    {
+        let list = threads().lock().unwrap();
+        let thread = list
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(launched_tid.as_str()))
+            .expect("launched thread must exist");
+        assert!(thread.get("profileId").is_none_or(Value::is_null));
+        assert_eq!(thread.get("sideChat").and_then(Value::as_bool), Some(false));
+        assert_eq!(thread.get("startedByAgent").and_then(Value::as_bool), Some(false));
+        assert!(thread.get("parentThreadId").is_none_or(Value::is_null));
+        assert_eq!(
+            thread.get("oddPath").and_then(Value::as_str),
+            Some("odd/tasks/feature-x.md")
+        );
+        assert_eq!(thread.get("workspaceId").and_then(Value::as_str), Some(ws_id.as_str()));
+        assert_eq!(thread.get("worktreePath").and_then(Value::as_str), Some(wt_str));
+        assert_eq!(thread.get("workingDirectory").and_then(Value::as_str), Some(wt_str));
+        assert_eq!(thread.get("workspaceMode").and_then(Value::as_str), Some("branch"));
+        let first_user_text = thread["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|it| it.get("kind").and_then(Value::as_str) == Some("user"))
+            .and_then(|it| it.get("text").and_then(Value::as_str))
+            .unwrap_or("");
+        assert!(first_user_text.contains("[Orchestrator Mode]"));
+        assert!(first_user_text.contains("odd/tasks/feature-x.md"));
+        assert!(first_user_text.contains("kite_subagent_run"));
+        assert!(first_user_text.contains("Build feature X cleanly."));
+    }
+
+    crate::chat::cancel_turn(&launched_tid);
+    crate::chat::threads::remove_thread(&launched_tid);
+    let _ = git(&["worktree", "remove", "--force", wt_str]);
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    workspaces().lock().unwrap().retain(|w| w.id != ws_id);
+    paths().lock().unwrap().remove(&ws_id);
+    agents().lock().unwrap().retain(|a| a.id != agent_id);
+    if let Ok(conn) = crate::persist::db_connection().lock() {
+        let _ = conn.execute(
+            "DELETE FROM agent_audit_log WHERE agent_id = ?1",
+            rusqlite::params![agent_id],
+        );
+    }
+}
+
+#[test]
+fn agent_audit_log_records_thread_memory_routine_teammate_dispatch_and_policy_denials() {
+    use crate::agents::{
+        list_agent_audit_log_in_conn, save_agent_autonomy_config, AgentAutonomyConfig,
+    };
+    use crate::persist::{agents, db_connection, AgentProfile};
+
+    let restricted_id = uuid::Uuid::new_v4().to_string();
+    let allowed_id = uuid::Uuid::new_v4().to_string();
+
+    {
+        let mut list = agents().lock().unwrap();
+        for (aid, sched, disabled) in [
+            (&restricted_id, false, vec!["kite-dispatch".to_string()]),
+            (&allowed_id, true, Vec::new()),
+        ] {
+            list.push(AgentProfile {
+                id: aid.clone(),
+                name: format!("Audit {aid}"),
+                engine: "antigravity".to_string(),
+                purpose: "Audit test".to_string(),
+                brief: "Audit test".to_string(),
+                avatar: None,
+                created_at_unix_ms: 1_000,
+                pinned: false,
+                order: 0,
+                memory_budget: Some(1000),
+                reflection_mode: None,
+                allow_agent_scheduling: Some(sched),
+                allow_agent_messaging: Some(true),
+                default_mode: None,
+                default_plan: None,
+                default_model: None,
+                default_provider_options: Vec::new(),
+                place_display_names: Vec::new(),
+                disabled_plugin_ids: disabled,
+            });
+        }
+    }
+
+    let mut cfg = AgentAutonomyConfig::default();
+    cfg.tool_policies.insert("thread".into(), "deny".into());
+    cfg.tool_policies.insert("memory".into(), "allow".into());
+    cfg.tool_policies.insert("teammate".into(), "ask".into());
+    save_agent_autonomy_config(&restricted_id, &cfg).unwrap();
+
+    // 1. thread -> policy deny
+    let thread_denied = execute_argv_envelope(&json!({
+        "id": "aud-thread-1",
+        "agentId": &restricted_id,
+        "argv": ["kite", "agent", "thread", "list"]
+    }));
+    assert_eq!(thread_denied["exit"], 1);
+
+    // 2. memory -> allow
+    let mem_ok = execute_argv_envelope(&json!({
+        "id": "aud-mem-1",
+        "agentId": &restricted_id,
+        "argv": ["kite", "agent", "memory", "read"]
+    }));
+    assert_eq!(mem_ok["exit"], 0);
+
+    // 3. routine -> allowAgentScheduling = false -> denied
+    let routine_denied = execute_argv_envelope(&json!({
+        "id": "aud-routine-1",
+        "agentId": &restricted_id,
+        "argv": ["kite", "agent", "routine", "list"]
+    }));
+    assert_eq!(routine_denied["exit"], 1);
+
+    // 4. teammate -> policy ask without active interactive thread session -> denied
+    let teammate_asked = execute_argv_envelope(&json!({
+        "id": "aud-teammate-1",
+        "agentId": &restricted_id,
+        "argv": ["kite", "agent", "teammate", "list"]
+    }));
+    assert_eq!(teammate_asked["exit"], 1);
+
+    // 5. kite-dispatch disabled -> denied
+    let dispatch_denied = execute_argv_envelope(&json!({
+        "id": "aud-dispatch-1",
+        "agentId": &restricted_id,
+        "argv": ["kite", "dispatch", "ls"]
+    }));
+    assert_eq!(dispatch_denied["exit"], 1);
+
+    // 6. execute_command & execute_swarm_command with env.KITE_AGENT_ID
+    let ls_ok = execute_argv_envelope(&json!({
+        "id": "aud-exec-ls-1",
+        "env": { "KITE_AGENT_ID": &allowed_id },
+        "argv": ["kite", "dispatch", "ls"]
+    }));
+    assert_eq!(ls_ok["exit"], 0);
+
+    let swarm_res = super::server::execute_swarm_command(
+        &json!({
+            "id": "aud-swarm-1",
+            "caller": "agent",
+            "from": "thread:missing-coord",
+            "env": { "KITE_AGENT_ID": &allowed_id }
+        }),
+        "aud-swarm-1",
+        &crate::dispatch::cli::SwarmCommand::Status,
+    );
+    assert_eq!(swarm_res.op, "swarm");
+
+    {
+        let conn = db_connection().lock().unwrap();
+        let restricted_rows =
+            list_agent_audit_log_in_conn(&conn, Some(&restricted_id), None, None, 20).unwrap();
+        assert!(restricted_rows.iter().any(|r| r.tool_name == "kite_thread" && r.tool_family == "thread" && r.verdict == "denied"));
+        assert!(restricted_rows.iter().any(|r| r.tool_name == "kite_memory" && r.tool_family == "memory" && r.verdict == "allowed"));
+        assert!(restricted_rows.iter().any(|r| r.tool_name == "kite_routine" && r.tool_family == "routine" && r.verdict == "denied"));
+        assert!(restricted_rows.iter().any(|r| r.tool_name == "kite_teammate" && r.tool_family == "teammate" && r.verdict == "denied"));
+        assert!(restricted_rows.iter().any(|r| r.tool_name == "kite_dispatch" && r.tool_family == "subagents" && r.verdict == "denied"));
+
+        let allowed_rows =
+            list_agent_audit_log_in_conn(&conn, Some(&allowed_id), None, None, 20).unwrap();
+        assert!(allowed_rows.iter().any(|r| r.tool_name == "kite_dispatch_ls" && r.tool_family == "subagents" && r.verdict == "allowed"));
+        assert!(allowed_rows.iter().any(|r| r.tool_name == "kite_swarm" && r.tool_family == "subagents"));
+
+        let _ = conn.execute(
+            "DELETE FROM agent_audit_log WHERE agent_id IN (?1, ?2)",
+            rusqlite::params![restricted_id, allowed_id],
+        );
+        let _ = conn.execute(
+            "DELETE FROM agent_autonomy_config WHERE agent_id = ?1",
+            rusqlite::params![restricted_id],
+        );
+    }
+    let _ = std::fs::remove_dir_all(crate::agent_mind::get_agent_home_dir(&restricted_id));
+    agents()
+        .lock()
+        .unwrap()
+        .retain(|a| a.id != restricted_id && a.id != allowed_id);
+}
+
 
 
 

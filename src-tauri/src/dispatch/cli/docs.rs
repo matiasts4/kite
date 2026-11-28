@@ -41,7 +41,7 @@ pub(super) fn format_subagent_settings_section(
     }
     if settings.default_delegation.is_some() || !enabled.is_empty() {
         out.push(
-            "- IMPORTANT: Do NOT pass `--provider` or `--model` when delegating a normal subagent task; run `kite dispatch run --via thread --role \"<Role Title>\" --workspace inherit --wait \"<task>\"` so Kite automatically uses your configured default delegation above. Only pass `--provider` / `--model` when choosing a specific model from `Curated enabled stack` or when the user explicitly requests one; never probe unconfigured providers."
+            "- IMPORTANT: Omit `--provider`/`--model` for `kite dispatch run --via thread --role \"<Role>\" --workspace inherit --wait \"<task>\"` so Kite uses the default above; only pass them for a `Curated enabled stack` pick or explicit user request (never probe unconfigured providers)."
                 .to_string(),
         );
     }
@@ -173,10 +173,11 @@ Cross-provider swarm (`kite dispatch swarm`):
 - Reactive `@mention` wakeup: `waiting` workers sleep at zero token cost and wake only when a post mentions `@<role>`, `@<prefix>`, `@#<channel>`, or `@all` (e.g. `kite dispatch swarm post \"@verifier check #2\"`). Park without polling using `kite dispatch swarm wait --since <seq>`.
 - Quota failover: swap a stalled or rate-limited worker's provider/model while keeping its conversation history intact via `kite dispatch swarm model --name <role> --provider <provider> --model <new_model>`.
 
-Agent service tools (`kite agent` / `kite dispatch agent` or MCP `kite_thread`, `kite_memory`, `kite_routine`, `kite_teammate`):
+Agent service tools (`kite agent` / `kite dispatch agent` or MCP `kite_thread`, `kite_memory`, `kite_routine`, `kite_teammate`, `kite_tasks`, `kite_ctx`, `kite_diff`):
 - `kite agent thread list [--workspace-id <id>] [--agent-id <id>] [--cursor <n>] [--limit <n>]`
 - `kite agent thread search --query \"<text>\" [--workspace-id <id>] [--agent-id <id>] [--cursor <n>] [--limit <n>]`
 - `kite agent thread read --thread-id <id> [--cursor <n>] [--limit <n>]`
+- `kite agent thread launch --prompt \"<task>\" [--title \"<title>\"] [--workspace <id|path>] [--provider <p>] [--model <m>] [--mode <m>] [--effort <e>] [--worktree] [--odd <path>] [--open] [--orchestrate]`
 - `kite agent memory read [--target agent|user] [--agent-id <id>]`
 - `kite agent memory add --text \"<fact>\" [--target agent|user] [--agent-id <id>]`
 - `kite agent memory search --query \"<text>\" [--target agent|user] [--agent-id <id>] [--limit <n>]`
@@ -187,6 +188,10 @@ Agent service tools (`kite agent` / `kite dispatch agent` or MCP `kite_thread`, 
 - `kite agent teammate list` (requires `allowAgentMessaging`)
 - `kite agent teammate send --target <agent_id|name> --message \"<text>\"` (requires `allowAgentMessaging`)
 - `kite agent teammate delegate --target <agent_id|name> --task \"<task>\" [--wait] [--timeout-ms <ms>]` (requires `allowAgentMessaging`)
+- `kite agent tasks <list|get|create|update|move_state> ...` (`kite_tasks`)
+- `kite agent ctx <read_compact|search|share_put|share_get|ccr_retrieve> ...` (`kite_ctx`)
+- `kite agent diff <status|file_diff> [--path <file>] [--workspace-id <id>] [--staged]` (`kite_diff`)
+- `kite browser <discover|tabs|open|close|snapshot|act|batch|replay|save_recipe|console|network|errors|screenshot|eval|takeover|resume> ...` (`kite_browser`; built-in `--role browser` subagent uses Kite's embedded RightDock browser with `kite-ctx` AX diffs and replay recipes)
 
 Envelope:
 [kite from=\"<alias-or-address>\"]
@@ -281,17 +286,20 @@ pub fn compose_thread_rules_markdown_with(
 <!-- kite-dispatch:start -->
 ## Kite Subagents & Swarms (`kite-dispatch`)
 
-When `KITE_DISPATCH=1` (`KITE_ADDRESS=thread:<id>`), delegate subagents and swarms via Kite (`RightDock`):
+When `KITE_DISPATCH=1` (`KITE_ADDRESS=thread:<id>`), use Kite (`RightDock`):
 - MCP (`kite-dispatch`, preferred):
-  - `kite_subagent_run` (`task`, `tasks: [...]`, `n: 1..8`, `role`, `workspace: \"inherit\"|\"share\"|\"branch\"`, `wait: true`, optional `provider`, `model`, `effort`, `override_stack`)
+  - `kite_subagent_run` (`task`, `tasks`, `n: 1..8`, `role`, `workspace: \"inherit\"|\"share\"|\"branch\"`, `wait`, `provider`, `model`, `effort`, `override_stack`)
   - `kite_subagent_send` (`target: \"thread:<id>\"`, `message`, `wait: true`)
   - `kite_subagent_wait` (`targets: [...]` or `children: \"all\"|\"any\"`)
   - `kite_subagent_read` (`target: \"thread:<id>\"`, `last: true`)
   - `kite_swarm` (`action: \"title\"|\"add\"|\"post\"|\"read\"|\"wait\"|\"status\"|\"model\"|\"kill\"|\"channel\"`, `members: [...]`)
+  - Services: `kite_thread` (incl. `launch`), `kite_memory`, `kite_routine`, `kite_teammate`, `kite_tasks`, `kite_ctx`, `kite_diff`, `kite_browser` (CDP browser; `role: \"browser\"` for UI tests)
 - CLI fallback:
-  - `kite dispatch run --via thread --role \"<Role>\" --workspace inherit --wait \"<task>\"` (or parallel `--task \"<t1>\" --task \"<t2>\"` / `--count <N>`)
+  - `kite dispatch run --via thread --role \"<Role>\" --workspace inherit --wait \"<task>\"` (or `--task` / `--count`)
   - `kite dispatch send thread:<id> \"<task>\" --wait`
-  - `kite dispatch swarm <title|add|post|read|wait|status|model|kill|channel> ...`{config_section}
+  - `kite dispatch swarm ...`
+  - `kite agent thread launch --prompt \"<task>\"`
+  - `kite browser <discover|tabs|open|snapshot|batch|replay|errors|screenshot> ...`{config_section}
 <!-- kite-dispatch:end -->"
     )
 }

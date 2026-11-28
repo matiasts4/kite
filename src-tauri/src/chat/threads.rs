@@ -66,11 +66,17 @@ pub fn blank_thread(
     } else {
         Value::Null
     };
-    let default_effort_val = if model_compatible || last_model_raw.is_none() {
+    let raw_default_effort = if model_compatible || last_model_raw.is_none() {
         crate::persist::last_effort().lock().unwrap().clone()
     } else {
         None
     };
+    let default_effort_val = crate::chat::models::resolve_effective_effort_for_provider(
+        provider,
+        None,
+        default_model_val.as_str(),
+        raw_default_effort.as_deref(),
+    );
     let provider_options = if let Some(ref effort) = default_effort_val {
         if !effort.trim().is_empty() {
             vec![json!({ "id": "effort", "value": effort })]
@@ -138,20 +144,20 @@ pub fn create_thread(
 pub fn load_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Value {
     // Check runtime liveness before acquiring threads() so locks never nest.
     let runtime_active = crate::chat::runtime::is_thread_runtime_active(thread_id);
+    crate::persist::hydrate_thread(thread_id);
     let stale_cutoff_ms = now_ms().saturating_sub(5_000);
     let mut is_stale_for_heal = false;
     let mut items = threads().lock().unwrap();
+    let compacted_runs =
+        crate::chat::subagents::compact_settled_child_backed_run_items(items.as_mut_slice(), thread_id);
     let mut thread = if let Some(thread) = items
         .iter_mut()
         .find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id))
     {
         let mut mutated = false;
-        if let Some(profile_id) = profile_id {
-            if thread.get("profileId").and_then(|v| v.as_str()) != Some(profile_id) {
-                thread["profileId"] = json!(profile_id);
-                touch(thread);
-                mutated = true;
-            }
+        if compacted_runs {
+            touch(thread);
+            mutated = true;
         }
         if crate::chat::runtime::post_reply::heal_persisted_connection_loss_after_reply(thread) {
             touch(thread);
@@ -302,6 +308,7 @@ fn persist_loaded_thread_repairs(
     stale_cutoff_ms: i64,
 ) {
     let mut should_persist = false;
+    crate::persist::hydrate_thread(thread_id);
     {
         let mut items = threads().lock().unwrap();
         let child_states: std::collections::HashMap<String, (String, bool)> = items
@@ -469,6 +476,7 @@ pub fn hydrate_thread_binding(thread: &mut Value) {
 }
 
 pub fn rename_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> Value {
+    crate::persist::hydrate_thread(thread_id);
     let mut items = threads().lock().unwrap();
     if let Some(thread) = items
         .iter_mut()
@@ -493,6 +501,7 @@ pub fn rename_thread(thread_id: &str, profile_id: Option<&str>, title: &str) -> 
 }
 
 pub fn set_pinned(thread_id: &str, pinned: bool) -> Value {
+    crate::persist::hydrate_thread(thread_id);
     let mut items = threads().lock().unwrap();
     if let Some(thread) = items
         .iter_mut()
@@ -510,6 +519,7 @@ pub fn set_pinned(thread_id: &str, pinned: bool) -> Value {
 }
 
 pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
+    crate::persist::hydrate_thread(thread_id);
     let mut items = threads().lock().unwrap();
     if items
         .iter()
@@ -567,7 +577,7 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
             }
         }
         let mut new_last_model: Option<String> = None;
-        let mut new_last_effort: Option<String> = None;
+        let mut new_last_effort: Option<Option<String>> = None;
         if patch.get("model").is_some() {
             let normalized = normalize_model(patch.get("model"));
             if let Some(m) = normalized.as_str() {
@@ -588,11 +598,41 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
             );
             thread["effort"] = match effort {
                 Some(value) if !value.trim().is_empty() => {
-                    new_last_effort = Some(value.trim().to_string());
-                    json!(value.trim())
+                    let trimmed = value.trim().to_string();
+                    new_last_effort = Some(Some(trimmed.clone()));
+                    json!(trimmed)
                 }
-                _ => Value::Null,
+                _ => {
+                    new_last_effort = Some(None);
+                    Value::Null
+                }
             };
+        }
+        if patch.get("model").is_some()
+            || patch.get("provider").is_some()
+            || patch.get("effort").is_some()
+        {
+            let active_model = thread.get("model").and_then(|v| v.as_str());
+            let current_effort = crate::chat::normalize::hydrated_effort(thread);
+            let reconciled = crate::chat::models::resolve_effective_effort_for_provider(
+                &provider,
+                None,
+                active_model,
+                current_effort.as_deref(),
+            );
+            if reconciled != current_effort {
+                thread["providerOptions"] = crate::chat::normalize::effort_option(
+                    &thread["providerOptions"],
+                    reconciled.as_deref(),
+                );
+                thread["effort"] = match reconciled {
+                    Some(ref value) => json!(value),
+                    None => Value::Null,
+                };
+                if patch.get("effort").is_some() {
+                    new_last_effort = Some(reconciled);
+                }
+            }
         }
         hydrate_thread_binding(thread);
         if provider != current_provider {
@@ -647,8 +687,8 @@ pub fn configure_thread(thread_id: &str, patch: &Value) -> Value {
         if let Some(m) = new_last_model {
             *crate::persist::last_model().lock().unwrap() = Some(m);
         }
-        if let Some(e) = new_last_effort {
-            *crate::persist::last_effort().lock().unwrap() = Some(e);
+        if let Some(next_effort) = new_last_effort {
+            *crate::persist::last_effort().lock().unwrap() = next_effort;
         }
         *last_provider().lock().unwrap() = updated_provider;
         persist();
@@ -686,6 +726,9 @@ pub fn set_agent_plan(agent_id: &str, thread_id: &str, plan: bool) -> Value {
 
 pub(crate) fn replace_thread(thread: &Value) {
     let id = thread.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if !id.is_empty() && !crate::persist::is_thread_stub(thread) {
+        crate::persist::hydrate_thread(id);
+    }
     let mut items = threads().lock().unwrap();
     if let Some(slot) = items
         .iter_mut()
@@ -720,12 +763,18 @@ pub fn history(agent_id: Option<&str>) -> Value {
         for thread in items.iter_mut() {
             let matches_agent = match agent_id {
                 Some(id) => thread.get("profileId").and_then(|v| v.as_str()) == Some(id),
-                None => true,
+                None => thread
+                    .get("profileId")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .is_none_or(|s| s.is_empty()),
             };
             if !matches_agent || archived_at_ms(thread).is_some() {
                 continue;
             }
-            if apply_derived_title_if_needed(thread, "generated", false) {
+            if !crate::persist::is_thread_stub(thread)
+                && apply_derived_title_if_needed(thread, "generated", false)
+            {
                 mutated = true;
             }
             out.push(thread.clone());
@@ -735,7 +784,31 @@ pub fn history(agent_id: Option<&str>) -> Value {
     if mutated {
         persist();
     }
-    let summaries: Vec<Value> = filtered.iter().filter_map(summary_of).collect();
+    let mut summaries: Vec<Value> = filtered.iter().filter_map(summary_of).collect();
+    if agent_id.is_none() {
+        summaries.sort_by(|a, b| {
+            let sort_ts = |s: &Value| -> i64 {
+                s.get("lastTurnAtUnixMs")
+                    .and_then(Value::as_i64)
+                    .or_else(|| s.get("updatedAtUnixMs").and_then(Value::as_i64))
+                    .or_else(|| s.get("createdAtUnixMs").and_then(Value::as_i64))
+                    .unwrap_or(0)
+            };
+            let cmp = sort_ts(b).cmp(&sort_ts(a));
+            if cmp != std::cmp::Ordering::Equal {
+                return cmp;
+            }
+            let created_b = b.get("createdAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
+            let created_a = a.get("createdAtUnixMs").and_then(Value::as_i64).unwrap_or(0);
+            let created_cmp = created_b.cmp(&created_a);
+            if created_cmp != std::cmp::Ordering::Equal {
+                return created_cmp;
+            }
+            let id_a = a.get("id").and_then(Value::as_str).unwrap_or("");
+            let id_b = b.get("id").and_then(Value::as_str).unwrap_or("");
+            id_a.cmp(id_b)
+        });
+    }
     let provider = last_provider().lock().unwrap().clone();
     json!({
         "schemaVersion": 1,
@@ -792,6 +865,31 @@ fn active_subagent_summaries(thread: &Value) -> Vec<Value> {
             .unwrap_or("")
             .trim();
         if !is_active_subagent_status(status) {
+            if let Some(sid) = run
+                .get("subagentId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                seen_ids.insert(sid.to_string());
+            }
+            if let Some(ctid) = run
+                .get("childThreadId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                seen_children.insert(ctid.to_string());
+            }
+        }
+    }
+    for run in runs {
+        let status = run
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if !is_active_subagent_status(status) {
             continue;
         }
         let subagent_id = run
@@ -836,6 +934,24 @@ fn active_subagent_summaries(thread: &Value) -> Vec<Value> {
     out
 }
 
+pub(crate) fn last_turn_at_unix_ms(thread: &Value) -> Option<i64> {
+    thread
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .filter(|item| is_human_user_item(item))
+                .filter_map(|item| item.get("createdAtUnixMs").and_then(Value::as_i64))
+                .max()
+        })
+        .or_else(|| {
+            crate::persist::is_thread_stub(thread)
+                .then(|| thread.get("lastTurnAtUnixMs").and_then(Value::as_i64))
+                .flatten()
+        })
+}
+
 pub fn summary_of(thread: &Value) -> Option<Value> {
     let thread_id = thread.get("id")?.as_str()?;
     let status_val = thread.get("status").cloned().unwrap_or(json!("idle"));
@@ -866,6 +982,20 @@ pub fn summary_of(thread: &Value) -> Option<Value> {
         && !matches!(status_str, "running" | "waiting" | "pendingApproval")
         && !has_pending_approval
         && !has_pending_user_input;
+    let has_content = thread
+        .get("items")
+        .and_then(|v| v.as_array())
+        .is_some_and(|items| !items.is_empty())
+        || (crate::persist::is_thread_stub(thread)
+            && (thread
+                .get("hasContent")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || thread
+                    .get("itemCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > 0));
 
     Some(json!({
         "id": thread_id,
@@ -876,7 +1006,7 @@ pub fn summary_of(thread: &Value) -> Option<Value> {
         "sessionState": session_state,
         "isWarm": is_warm,
         "isSettled": is_settled,
-        "hasContent": thread.get("items").and_then(|v| v.as_array()).map(|items| !items.is_empty()).unwrap_or(false),
+        "hasContent": has_content,
         "workspaceId": thread.get("workspaceId").cloned().unwrap_or(Value::Null),
         "pinned": thread.get("pinned").cloned().unwrap_or(json!(false)),
         "parentThreadId": thread.get("parentThreadId").cloned().unwrap_or(Value::Null),
@@ -890,6 +1020,7 @@ pub fn summary_of(thread: &Value) -> Option<Value> {
         "pendingApproval": thread.get("pendingApproval").cloned().unwrap_or(Value::Null),
         "pendingUserInput": thread.get("pendingUserInput").cloned().unwrap_or(Value::Null),
         "activeSubagents": active_subagent_summaries(thread),
+        "lastTurnAtUnixMs": last_turn_at_unix_ms(thread),
         "createdAtUnixMs": thread.get("createdAtUnixMs").cloned().unwrap_or(json!(now_ms())),
         "updatedAtUnixMs": thread.get("updatedAtUnixMs").cloned().unwrap_or(json!(now_ms()))
     }))
@@ -1313,6 +1444,7 @@ pub fn apply_derived_title_if_needed(
 
 /// Re-derives and persists a thread's title from its stored transcript items.
 pub fn regenerate_thread_title(thread_id: &str, profile_id: Option<&str>) -> Value {
+    crate::persist::hydrate_thread(thread_id);
     let mut items = threads().lock().unwrap();
     if let Some(thread) = items
         .iter_mut()
@@ -1649,6 +1781,7 @@ pub fn rewind_thread_transcript(thread_id: &str, message_id: &str) -> Result<Str
     if message_id.is_empty() {
         return Err(REWIND_MESSAGE_MISSING.to_string());
     }
+    crate::persist::hydrate_thread(thread_id);
     let mut stored = threads().lock().unwrap();
     let Some(thread) = stored
         .iter_mut()
@@ -1888,6 +2021,41 @@ mod rewind {
         assert!(blank["providerOptions"].as_array().unwrap().iter().any(|opt| {
             opt["id"] == "effort" && opt["value"] == "medium"
         }));
+
+        // Switching to a non-effort Antigravity model clears effort and does not inherit stale last_effort.
+        let updated = configure_thread(tid, &json!({
+            "provider": "antigravity",
+            "model": "gemini-pro-orchestrator-neon"
+        }));
+        assert_eq!(updated["model"], json!("gemini-pro-orchestrator-neon"));
+        assert!(updated["effort"].is_null(), "effort must clear on orchestrator model: {updated}");
+        assert!(
+            !updated["providerOptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|opt| opt["id"] == "effort"),
+            "providerOptions must strip effort on orchestrator model"
+        );
+        let orch_blank = blank_thread("blank-orch-probe-id", None, "New Chat", "antigravity", None);
+        assert_eq!(orch_blank["model"], json!("gemini-pro-orchestrator-neon"));
+        assert!(orch_blank["effort"].is_null());
+        assert!(orch_blank["providerOptions"].as_array().unwrap().is_empty());
+
+        // Explicitly resetting effort to null must clear persist::last_effort() so new threads do not inherit stale effort.
+        configure_thread(tid, &json!({
+            "provider": "antigravity",
+            "model": "gemini-3.8-flash",
+            "effort": "high"
+        }));
+        let cleared = configure_thread(tid, &json!({ "effort": Value::Null }));
+        assert!(cleared["effort"].is_null());
+        let after_clear = blank_thread("blank-after-clear-id", None, "New Chat", "antigravity", None);
+        assert_eq!(after_clear["model"], json!("gemini-3.8-flash"));
+        assert!(
+            after_clear["effort"].is_null(),
+            "explicitly clearing effort to null must clear remembered last_effort"
+        );
     }
 
     #[test]
@@ -2130,5 +2298,227 @@ mod rewind {
 
         let world_delta = " world";
         assert_eq!(sanitize_chat_text(world_delta), " world");
+    }
+
+    #[test]
+    fn summary_of_computes_last_turn_at_unix_ms_from_human_user_items() {
+        let tid = format!("turn-ts-{}", uuid::Uuid::new_v4().simple());
+        let empty = json!({
+            "id": format!("{tid}-empty"),
+            "title": "Empty",
+            "provider": "claude",
+            "status": "idle",
+            "items": [],
+            "createdAtUnixMs": 1_000,
+            "updatedAtUnixMs": 1_000
+        });
+        let empty_summary = summary_of(&empty).expect("empty summary");
+        assert_eq!(empty_summary["lastTurnAtUnixMs"], Value::Null);
+
+        let mut u1 = chat_item("u1", "user", "First turn", false);
+        u1["createdAtUnixMs"] = json!(1_500);
+        let mut u2 = chat_item("u2", "user", "Second turn", false);
+        u2["createdAtUnixMs"] = json!(3_200);
+        let mut internal = chat_item("u-int", "user", "Internal wakeup", false);
+        internal["internalDispatch"] = json!(true);
+        internal["createdAtUnixMs"] = json!(4_800);
+
+        let populated = json!({
+            "id": tid,
+            "title": "Active",
+            "provider": "claude",
+            "status": "running",
+            "items": [u1, u2, internal],
+            "createdAtUnixMs": 1_000,
+            "updatedAtUnixMs": 9_999
+        });
+        let summary = summary_of(&populated).expect("populated summary");
+        assert_eq!(summary["lastTurnAtUnixMs"], json!(3_200));
+    }
+
+    #[test]
+    fn history_for_threads_orders_newest_first_and_keeps_concurrent_working_stable() {
+        let agent_id = format!("prof-order-{}", uuid::Uuid::new_v4().simple());
+        let old_id = format!("hist-old-{}", uuid::Uuid::new_v4().simple());
+        let mid_id = format!("hist-mid-{}", uuid::Uuid::new_v4().simple());
+        let new_id = format!("hist-new-{}", uuid::Uuid::new_v4().simple());
+        let gen_old_id = format!("gen-old-{}", uuid::Uuid::new_v4().simple());
+        let gen_mid_id = format!("gen-mid-{}", uuid::Uuid::new_v4().simple());
+        let gen_new_id = format!("gen-new-{}", uuid::Uuid::new_v4().simple());
+        let _cleanup_old = RemoveThread(old_id.clone());
+        let _cleanup_mid = RemoveThread(mid_id.clone());
+        let _cleanup_new = RemoveThread(new_id.clone());
+        let _cleanup_gen_old = RemoveThread(gen_old_id.clone());
+        let _cleanup_gen_mid = RemoveThread(gen_mid_id.clone());
+        let _cleanup_gen_new = RemoveThread(gen_new_id.clone());
+
+        let make_user = |id: &str, ts: i64| {
+            let mut item = chat_item(id, "user", "Prompt", false);
+            item["createdAtUnixMs"] = json!(ts);
+            item
+        };
+
+        {
+            let mut list = threads().lock().unwrap();
+            list.push(json!({
+                "id": gen_old_id,
+                "profileId": Value::Null,
+                "title": "General Old",
+                "provider": "claude",
+                "status": "idle",
+                "items": [make_user("g-u-old", 1_000)],
+                "createdAtUnixMs": 1_000,
+                "updatedAtUnixMs": 1_100
+            }));
+            list.push(json!({
+                "id": gen_mid_id,
+                "profileId": Value::Null,
+                "title": "General Mid Working",
+                "provider": "claude",
+                "status": "running",
+                "items": [make_user("g-u-mid", 2_000)],
+                "createdAtUnixMs": 1_500,
+                "updatedAtUnixMs": 2_000
+            }));
+            list.push(json!({
+                "id": gen_new_id,
+                "profileId": Value::Null,
+                "title": "General New Working",
+                "provider": "claude",
+                "status": "running",
+                "items": [make_user("g-u-new", 3_000)],
+                "createdAtUnixMs": 2_500,
+                "updatedAtUnixMs": 3_000
+            }));
+            list.push(json!({
+                "id": old_id,
+                "profileId": agent_id,
+                "title": "Old",
+                "provider": "claude",
+                "status": "idle",
+                "items": [make_user("u-old", 1_000)],
+                "createdAtUnixMs": 1_000,
+                "updatedAtUnixMs": 1_100
+            }));
+            list.push(json!({
+                "id": mid_id,
+                "profileId": agent_id,
+                "title": "Mid Working",
+                "provider": "claude",
+                "status": "running",
+                "items": [make_user("u-mid", 2_000)],
+                "createdAtUnixMs": 1_500,
+                "updatedAtUnixMs": 2_000
+            }));
+            list.push(json!({
+                "id": new_id,
+                "profileId": agent_id,
+                "title": "New Working",
+                "provider": "claude",
+                "status": "running",
+                "items": [make_user("u-new", 3_000)],
+                "createdAtUnixMs": 2_500,
+                "updatedAtUnixMs": 3_000
+            }));
+        }
+
+        let ordered_ids = |res: Value| -> Vec<String> {
+            res["summaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s.get("id").and_then(Value::as_str).map(str::to_string))
+                .filter(|id| {
+                    id == &old_id
+                        || id == &mid_id
+                        || id == &new_id
+                        || id == &gen_old_id
+                        || id == &gen_mid_id
+                        || id == &gen_new_id
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            ordered_ids(history(None)),
+            vec![gen_new_id.clone(), gen_mid_id.clone(), gen_old_id.clone()],
+            "general Threads history(None) must exclude Agent chats (non-empty profileId)"
+        );
+        assert_eq!(
+            ordered_ids(history(Some(&agent_id))),
+            vec![old_id.clone(), mid_id.clone(), new_id.clone()],
+            "agent-scoped history must keep existing insertion/tabOrder ordering unchanged and exclude general threads"
+        );
+
+        // Streaming chunk touch() advances updatedAtUnixMs on gen_mid_id above gen_new_id while both run.
+        {
+            let mut list = threads().lock().unwrap();
+            if let Some(mid) = list.iter_mut().find(|t| t.get("id").and_then(Value::as_str) == Some(&gen_mid_id)) {
+                mid["updatedAtUnixMs"] = json!(9_999);
+            }
+        }
+        assert_eq!(ordered_ids(history(None)), vec![gen_new_id.clone(), gen_mid_id.clone(), gen_old_id.clone()]);
+    }
+
+    #[test]
+    fn summary_of_and_history_preserve_stub_metadata_without_hydrating() {
+        let stub_id = format!("stub-summary-{}", uuid::Uuid::new_v4().simple());
+        let empty_stub_id = format!("stub-empty-{}", uuid::Uuid::new_v4().simple());
+        let _cleanup_1 = RemoveThread(stub_id.clone());
+        let _cleanup_2 = RemoveThread(empty_stub_id.clone());
+
+        {
+            let mut list = threads().lock().unwrap();
+            list.push(json!({
+                "id": stub_id,
+                "profileId": Value::Null,
+                "title": "New Chat",
+                "provider": "claude",
+                "status": "idle",
+                "items": [],
+                "_kiteStub": true,
+                "itemCount": 4,
+                "lastTurnAtUnixMs": 42_000,
+                "createdAtUnixMs": 1_000,
+                "updatedAtUnixMs": 50_000
+            }));
+            list.push(json!({
+                "id": empty_stub_id,
+                "profileId": Value::Null,
+                "title": "Empty Stub",
+                "provider": "claude",
+                "status": "idle",
+                "items": [],
+                "_kiteStub": true,
+                "itemCount": 0,
+                "createdAtUnixMs": 1_000,
+                "updatedAtUnixMs": 10_000
+            }));
+        }
+
+        let res = history(None);
+        let summaries = res["summaries"].as_array().expect("summaries");
+        let populated = summaries
+            .iter()
+            .find(|s| s.get("id").and_then(Value::as_str) == Some(stub_id.as_str()))
+            .expect("populated stub summary");
+        assert_eq!(populated["hasContent"], json!(true));
+        assert_eq!(populated["lastTurnAtUnixMs"], json!(42_000));
+        assert_eq!(populated["title"], json!("New Chat"));
+
+        let empty = summaries
+            .iter()
+            .find(|s| s.get("id").and_then(Value::as_str) == Some(empty_stub_id.as_str()))
+            .expect("empty stub summary");
+        assert_eq!(empty["hasContent"], json!(false));
+
+        let stored_stub = threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(stub_id.as_str()))
+            .cloned()
+            .expect("stub still in threads()");
+        assert!(crate::persist::is_thread_stub(&stored_stub));
     }
 }

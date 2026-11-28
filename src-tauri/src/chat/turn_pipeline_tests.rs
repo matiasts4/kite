@@ -350,3 +350,132 @@ fn classify_turn_failure_detects_resource_exhausted_and_reset_hint() {
         "expected ~1h30m5s delta ms, got {delta_ms}"
     );
 }
+
+#[test]
+fn agy_acp_request_permission_extracts_tool_call_and_usage_update_accepts_used() {
+    let mut tracker = ToolCallTracker::default();
+    let perm_frame = json!({
+        "jsonrpc": "2.0",
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "s-agy-1",
+            "toolCall": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_123",
+                "name": "run_command",
+                "args": { "CommandLine": "Test-Path .codegraph; git log -n 15 --oneline" },
+                "status": "pending",
+                "kind": "execute",
+                "title": "Test-Path .codegraph; git log -n 15 --oneline",
+                "rawInput": { "CommandLine": "Test-Path .codegraph; git log -n 15 --oneline" }
+            },
+            "options": [
+                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                { "optionId": "deny", "name": "Deny", "kind": "reject_once" }
+            ]
+        },
+        "id": "1"
+    });
+    let events = tracker.ingest(&perm_frame);
+    match events.first() {
+        Some(ProviderTurnEvent::ApprovalRequested {
+            request_id,
+            rpc_id_is_string,
+            tool_name,
+            command,
+            options,
+            ..
+        }) => {
+            assert_eq!(request_id, "1");
+            assert!(*rpc_id_is_string);
+            assert_eq!(tool_name, "run_command");
+            assert_eq!(
+                command.as_deref(),
+                Some("Test-Path .codegraph; git log -n 15 --oneline")
+            );
+            assert_eq!(options.len(), 2);
+            assert_eq!(options[0].option_id, "allow");
+            assert!(!crate::chat::normalize::should_auto_approve(
+                "acceptEdits",
+                tool_name
+            ));
+            assert!(crate::chat::normalize::should_auto_approve(
+                "acceptEdits",
+                "edit_file"
+            ));
+        }
+        other => panic!("expected ApprovalRequested, got {other:?}"),
+    }
+
+    let usage_events = tracker.ingest(&json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s-agy-1",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "used": 24345,
+                "size": 1048576
+            }
+        }
+    }));
+    match usage_events.first() {
+        Some(ProviderTurnEvent::UsageUpdated { usage }) => {
+            assert_eq!(usage.input_tokens, 24345);
+        }
+        other => panic!("expected UsageUpdated, got {other:?}"),
+    }
+}
+
+#[test]
+fn acp_tool_call_preserves_normalized_tool_name_and_ignores_wait_timeout_failure() {
+    let mut tracker = ToolCallTracker::default();
+    let invoke_events = tracker.ingest(&json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s-agy-2",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_invoke_1",
+                "title": "Run invoke_subagent",
+                "status": "failed",
+                "rawOutput": "Denied by PreToolUse pre-tool hook: native invoke_subagent is blocked"
+            }
+        }
+    }));
+    match invoke_events.first() {
+        Some(ProviderTurnEvent::ToolCallUpdated { tool }) => {
+            assert_eq!(tool.tool_name.as_deref(), Some("invoke_subagent"));
+            assert_eq!(tool.kind, "subagent");
+            assert_eq!(tool.status, "failed");
+        }
+        other => panic!("expected ToolCallUpdated, got {other:?}"),
+    }
+
+    let timeout_events = tracker.ingest(&json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s-agy-2",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_kite_run_1",
+                "title": "MCP Tool kite_subagent_run",
+                "status": "completed",
+                "rawInput": { "role": "Verifier", "task": "Inspect build" },
+                "rawOutput": "{\"op\":\"wait\",\"status\":\"failed\",\"error\":\"timeout\",\"address\":\"thread:child-abc12345\",\"submitted\":false}"
+            }
+        }
+    }));
+    match timeout_events.first() {
+        Some(ProviderTurnEvent::ToolCallUpdated { tool }) => {
+            assert_eq!(tool.tool_name.as_deref(), Some("kite_subagent_run"));
+            assert_ne!(
+                tool.status, "failed",
+                "wait-slice timeout receipt must not force failed status in tracker"
+            );
+        }
+        other => panic!("expected ToolCallUpdated, got {other:?}"),
+    }
+}

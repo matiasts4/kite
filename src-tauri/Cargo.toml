@@ -3,7 +3,7 @@ members = [".", "crates/kite-ctx"]
 
 [package]
 name = "kite-code"
-version = "0.1.94"
+version = "0.1.96"
 description = "Kite Code Desktop Application"
 authors = ["Kite Code Authors"]
 edition = "2021"
@@ -42,6 +42,7 @@ futures-util = "0.3"
 base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
 windows = { version = "0.62", features = [
     "Data_Xml_Dom",
     "UI_Notifications",

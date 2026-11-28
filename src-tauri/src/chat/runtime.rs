@@ -14,7 +14,8 @@ pub use stream_json::*;
 pub use turn::*;
 
 pub use settle::{
-    finish_run, heal_orphaned_running_thread, heal_orphaned_thread_with_options, settle_routine,
+    finish_run, finish_run_with_options, heal_orphaned_running_thread,
+    heal_orphaned_thread_with_children, heal_orphaned_thread_with_options, settle_routine,
     settle_turn_notification,
 };
 

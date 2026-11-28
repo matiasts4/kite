@@ -250,15 +250,29 @@ pub fn read_agent_chat_turn_updates(request: Option<Value>) -> Value {
 }
 
 pub fn cancel_chat_turn(request: Option<Value>) -> Value {
-    if let Some(thread_id) = body(&request).and_then(|req| req.get("threadId")).and_then(|v| v.as_str()) {
-        cancel_turn(thread_id);
+    if let Some(req) = body(&request) {
+        if let Some(thread_id) = req.get("threadId").and_then(|v| v.as_str()) {
+            let preserve_children = req
+                .get("preserveChildren")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            crate::chat::cancel_host_approvals_for_thread(thread_id);
+            crate::chat::cancel_turn_with_options(thread_id, preserve_children);
+        }
     }
     Value::Null
 }
 
 pub fn cancel_agent_chat_turn(request: Option<Value>) -> Value {
-    if let Some(thread_id) = body(&request).and_then(|req| req.get("threadId")).and_then(|v| v.as_str()) {
-        cancel_turn(thread_id);
+    if let Some(req) = body(&request) {
+        if let Some(thread_id) = req.get("threadId").and_then(|v| v.as_str()) {
+            let preserve_children = req
+                .get("preserveChildren")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            crate::chat::cancel_host_approvals_for_thread(thread_id);
+            crate::chat::cancel_turn_with_options(thread_id, preserve_children);
+        }
     }
     Value::Null
 }
@@ -280,14 +294,19 @@ pub fn respond_chat_approval(request: Option<Value>) -> Value {
 
     crate::chat::write_approval_to_run(thread_id, request_id, decision);
 
-    if decision == "denyAndStop" {
+    let parsed = crate::chat::approval::parse_decision(decision);
+    if parsed == Some(crate::chat::ApprovalDecision::DenyAndStop) || decision == "denyAndStop" {
+        crate::chat::cancel_host_approvals_for_thread(thread_id);
         cancel_turn(thread_id);
     }
 
     let mut items = threads().lock().unwrap();
     if let Some(thread) = items.iter_mut().find(|t| t.get("id").and_then(|v| v.as_str()) == Some(thread_id)) {
         thread["pendingApproval"] = Value::Null;
-        if decision != "denyAndStop" && thread.get("status").and_then(|v| v.as_str()) == Some("waiting") {
+        if parsed != Some(crate::chat::ApprovalDecision::DenyAndStop)
+            && decision != "denyAndStop"
+            && thread.get("status").and_then(|v| v.as_str()) == Some("waiting")
+        {
             thread["status"] = json!("running");
         }
         if decision == "allowForSession" || decision == "accept_for_session" {

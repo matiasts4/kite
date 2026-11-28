@@ -145,7 +145,7 @@ fn serve(listener: TcpListener, token: String, stop_flag: &'static AtomicBool) {
 }
 
 pub(crate) fn is_gui_action_payload(action: &str, payload: &Value) -> bool {
-    if matches!(action, "swarm" | "providers" | "models" | "agent") {
+    if matches!(action, "swarm" | "providers" | "models" | "agent" | "browser") {
         return true;
     }
     if action == "run"
@@ -169,16 +169,24 @@ pub(crate) fn is_gui_action_payload(action: &str, payload: &Value) -> bool {
 }
 
 pub(crate) fn request_targets_gui(request: &Value) -> bool {
+    let thread_mode = request
+        .get("threadMode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(arr) = request.get("argv").and_then(Value::as_array) {
         let argv: Vec<String> = arr
             .iter()
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect();
-        return crate::dispatch::cli_wire::should_prefer_gui_endpoint(
+        return crate::dispatch::cli_wire::should_prefer_gui_endpoint_with_thread_mode(
             &argv,
             request.get("from").and_then(Value::as_str),
+            thread_mode,
         );
+    }
+    if thread_mode {
+        return true;
     }
     if let Some(op) = request
         .get("action")
@@ -234,20 +242,31 @@ pub fn try_forward_to_gui_bridge(request: &Value) -> Option<Value> {
     try_forward_to_gui_bridge_at(&crate::dispatch::cli_wire::gui_endpoint_path(), request)
 }
 
+fn read_thread_with<T, F>(thread_id: &str, extract: F) -> Option<T>
+where
+    F: FnOnce(&Value) -> Option<T>,
+{
+    if crate::persist::is_daemon_process() {
+        return crate::persist::find_thread_direct(thread_id).and_then(|t| extract(&t));
+    }
+    let all = crate::persist::threads().lock().ok()?;
+    let thread = all
+        .iter()
+        .find(|t| t.get("id").and_then(Value::as_str) == Some(thread_id))?;
+    extract(thread)
+}
+
 fn lookup_thread_provider(from: &str) -> Option<String> {
     let tid = from.strip_prefix("thread:").unwrap_or(from).trim();
     if tid.is_empty() {
         return None;
     }
-    let all = crate::persist::threads().lock().ok()?;
-    all.iter()
-        .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))
-        .and_then(|t| {
-            t.get("provider")
-                .or_else(|| t.get("engine"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
+    read_thread_with(tid, |t| {
+        t.get("provider")
+            .or_else(|| t.get("engine"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 fn lookup_swarm_member_provider(from: &str, member_name: &str) -> Option<String> {
@@ -258,21 +277,19 @@ fn lookup_swarm_member_provider(from: &str, member_name: &str) -> Option<String>
     if tid.is_empty() {
         return None;
     }
-    let all = crate::persist::threads().lock().ok()?;
-    let coord = all
-        .iter()
-        .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))?;
-    coord
-        .get("swarmState")
-        .and_then(|s| s.get("members"))
-        .and_then(Value::as_array)?
-        .iter()
-        .find(|m| {
-            m.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|n| n.eq_ignore_ascii_case(member_name))
-        })
-        .and_then(|m| m.get("provider").and_then(Value::as_str).map(str::to_string))
+    read_thread_with(tid, |coord| {
+        coord
+            .get("swarmState")
+            .and_then(|s| s.get("members"))
+            .and_then(Value::as_array)?
+            .iter()
+            .find(|m| {
+                m.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| n.eq_ignore_ascii_case(member_name))
+            })
+            .and_then(|m| m.get("provider").and_then(Value::as_str).map(str::to_string))
+    })
 }
 
 fn thread_workspace_path_by_ref(thread_ref: &str) -> Option<PathBuf> {
@@ -280,11 +297,7 @@ fn thread_workspace_path_by_ref(thread_ref: &str) -> Option<PathBuf> {
     if tid.is_empty() {
         return None;
     }
-    let (direct_dir, ws_id) = {
-        let all = crate::persist::threads().lock().ok()?;
-        let thread = all
-            .iter()
-            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))?;
+    let (direct_dir, ws_id) = read_thread_with(tid, |thread| {
         let direct = thread
             .get("worktreePath")
             .or_else(|| thread.get("workingDirectory"))
@@ -298,8 +311,8 @@ fn thread_workspace_path_by_ref(thread_ref: &str) -> Option<PathBuf> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        (direct, ws)
-    };
+        Some((direct, ws))
+    })?;
     if let Some(dir) = direct_dir {
         return Some(dir);
     }
@@ -871,6 +884,7 @@ pub(crate) fn resolve_caller_permissions(request: &Value) -> CallerPermissions {
     let explicit_agent_id = request
         .get("agentId")
         .or_else(|| request.get("profileId"))
+        .or_else(|| request.pointer("/env/KITE_AGENT_ID"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -884,17 +898,13 @@ pub(crate) fn resolve_caller_permissions(request: &Value) -> CallerPermissions {
             .map(str::trim)
             .filter(|tid| !tid.is_empty())
             .and_then(|tid| {
-                crate::persist::threads().lock().ok().and_then(|list| {
-                    list.iter()
-                        .find(|t| t.get("id").and_then(Value::as_str) == Some(tid))
-                        .and_then(|t| {
-                            t.get("profileId")
-                                .or_else(|| t.get("agentId"))
-                                .and_then(Value::as_str)
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .map(str::to_string)
-                        })
+                read_thread_with(tid, |t| {
+                    t.get("profileId")
+                        .or_else(|| t.get("agentId"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
                 })
             })
     } else {
@@ -1008,24 +1018,295 @@ fn resolve_teammate_profile(raw_target: &str) -> Option<crate::persist::AgentPro
         .find(|a| a.id == stripped || a.name.eq_ignore_ascii_case(stripped))
 }
 
+fn request_thread_id(request: &Value) -> Option<&str> {
+    request
+        .get("from")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(|s| s.strip_prefix("thread:").unwrap_or(s))
+        .filter(|s| !s.is_empty() && !matches!(*s, "human" | "agent" | "script"))
+}
+
+fn resolve_audit_agent_id(request: &Value) -> Option<String> {
+    if let Some(explicit) = request
+        .get("agentId")
+        .or_else(|| request.pointer("/env/KITE_AGENT_ID"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(explicit.to_string());
+    }
+    if let Some(tid) = request
+        .get("from")
+        .and_then(Value::as_str)
+        .and_then(|s| s.trim().strip_prefix("thread:"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(found) = read_thread_with(tid, |t| {
+            t.get("profileId")
+                .or_else(|| t.get("agentId"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        }) {
+            return Some(found);
+        }
+    }
+    let targeting_agent = request
+        .get("address")
+        .and_then(Value::as_str)
+        .is_some_and(|a| a.starts_with("agent:"));
+    if caller_of(request) != Caller::Human && !targeting_agent {
+        return request
+            .get("profileId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    None
+}
+
+fn normalize_cmp_path(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let stripped = trimmed
+        .strip_prefix(r"\\?\")
+        .unwrap_or(trimmed)
+        .replace('\\', "/");
+    let no_trail = stripped.trim_end_matches('/');
+    if cfg!(windows) {
+        no_trail.to_ascii_lowercase()
+    } else {
+        no_trail.to_string()
+    }
+}
+
+fn resolve_launch_workspace(
+    workspace_arg: Option<&str>,
+    request: &Value,
+) -> (Option<String>, Option<PathBuf>) {
+    if let Some(raw) = workspace_arg.map(str::trim).filter(|s| !s.is_empty()) {
+        let workspaces_snap = if crate::persist::is_daemon_process() {
+            crate::persist::list_workspaces_direct()
+        } else {
+            crate::persist::workspaces()
+                .lock()
+                .map(|w| w.clone())
+                .unwrap_or_default()
+        };
+        if let Some(ws) = workspaces_snap
+            .iter()
+            .find(|w| w.id == raw || w.display_name.eq_ignore_ascii_case(raw))
+        {
+            let dir = crate::persist::workspace_path(&ws.id).map(PathBuf::from);
+            return (Some(ws.id.clone()), dir);
+        }
+
+        let target_norm = normalize_cmp_path(raw);
+        let canon_target_norm = std::fs::canonicalize(raw)
+            .ok()
+            .map(|p| normalize_cmp_path(&p.to_string_lossy()));
+
+        let mut all_paths = if crate::persist::is_daemon_process() {
+            crate::persist::all_workspace_paths_direct()
+        } else {
+            crate::persist::all_workspace_paths()
+        };
+        for ws in &workspaces_snap {
+            if !all_paths.contains_key(&ws.id) {
+                if let Some(p) = crate::persist::workspace_path(&ws.id) {
+                    all_paths.insert(ws.id.clone(), p);
+                }
+            }
+        }
+        for (ws_id, ws_path) in all_paths {
+            let ws_norm = normalize_cmp_path(&ws_path);
+            let canon_ws_norm = std::fs::canonicalize(&ws_path)
+                .ok()
+                .map(|p| normalize_cmp_path(&p.to_string_lossy()));
+            let matches_raw = ws_norm == target_norm
+                || canon_target_norm
+                    .as_ref()
+                    .is_some_and(|c| c == &ws_norm)
+                || canon_ws_norm.as_ref().is_some_and(|c| {
+                    c == &target_norm
+                        || canon_target_norm.as_ref().is_some_and(|ct| ct == c)
+                });
+            if matches_raw {
+                return (Some(ws_id), Some(PathBuf::from(ws_path)));
+            }
+        }
+
+        let direct = Path::new(raw);
+        if direct.is_dir() {
+            return (None, Some(direct.to_path_buf()));
+        }
+        return (None, None);
+    }
+
+    let caller_ws_id = request_thread_id(request).and_then(|tid| {
+        read_thread_with(tid, |t| {
+            t.get("workspaceId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+    });
+    let caller_dir = request_thread_id(request)
+        .and_then(thread_workspace_path_by_ref)
+        .or_else(|| {
+            caller_ws_id
+                .as_deref()
+                .and_then(crate::persist::workspace_path)
+                .map(PathBuf::from)
+        })
+        .or_else(|| resolve_request_workspace_path(request));
+    (caller_ws_id, caller_dir)
+}
+
+fn resolve_launch_provider(requested_provider: Option<&str>, perms: &CallerPermissions) -> String {
+    if let Some(raw) = requested_provider.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(canon) = crate::chat::models::canonical_thread_provider_id(raw) {
+            return canon.to_string();
+        }
+        if let Some(canon) = cli::canonical_thread_provider(raw) {
+            return canon.to_string();
+        }
+    }
+    if let Some(aid) = perms.agent_id.as_deref() {
+        if let Some(profile) = crate::persist::find_agent_by_id(aid) {
+            if let Some(canon) = crate::chat::models::canonical_thread_provider_id(&profile.engine) {
+                return canon.to_string();
+            }
+        }
+    }
+    "antigravity".to_string()
+}
+
+fn derive_launch_title(explicit_title: Option<&str>, prompt: &str) -> String {
+    if let Some(t) = explicit_title.map(str::trim).filter(|s| !s.is_empty()) {
+        return t.to_string();
+    }
+    let first_line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("Launched Thread");
+    let clipped: String = first_line.chars().take(60).collect();
+    if clipped.is_empty() {
+        "Launched Thread".to_string()
+    } else {
+        clipped
+    }
+}
+
+fn agent_command_tool_meta(cmd: &cli::AgentCommand) -> (String, &'static str) {
+    match cmd {
+        cli::AgentCommand::ThreadList { .. }
+        | cli::AgentCommand::ThreadSearch { .. }
+        | cli::AgentCommand::ThreadRead { .. }
+        | cli::AgentCommand::ThreadLaunch { .. } => ("kite_thread".to_string(), "thread"),
+        cli::AgentCommand::MemoryRead { .. }
+        | cli::AgentCommand::MemoryAdd { .. }
+        | cli::AgentCommand::MemorySearch { .. } => ("kite_memory".to_string(), "memory"),
+        cli::AgentCommand::RoutineList { .. }
+        | cli::AgentCommand::RoutineCreate { .. }
+        | cli::AgentCommand::RoutineToggle { .. }
+        | cli::AgentCommand::RoutineRun { .. } => ("kite_routine".to_string(), "routine"),
+        cli::AgentCommand::TeammateList
+        | cli::AgentCommand::TeammateSend { .. }
+        | cli::AgentCommand::TeammateDelegate { .. } => ("kite_teammate".to_string(), "teammate"),
+        cli::AgentCommand::Tool(tool_cmd) => {
+            let family = cli::tool_family_for_command(tool_cmd);
+            (format!("kite_{family}"), family)
+        }
+    }
+}
+
+fn describe_agent_command(cmd: &cli::AgentCommand) -> String {
+    match cmd {
+        cli::AgentCommand::ThreadList { .. } => "kite_thread.list".to_string(),
+        cli::AgentCommand::ThreadSearch { query, .. } => {
+            format!("kite_thread.search query=\"{}\"", query.chars().take(60).collect::<String>())
+        }
+        cli::AgentCommand::ThreadRead { thread_id, .. } => {
+            format!("kite_thread.read thread={thread_id}")
+        }
+        cli::AgentCommand::ThreadLaunch { title, odd_path, .. } => format!(
+            "kite_thread.launch title=\"{}\" odd={}",
+            title.as_deref().unwrap_or("(auto)").chars().take(60).collect::<String>(),
+            odd_path.as_deref().unwrap_or("-")
+        ),
+        cli::AgentCommand::MemoryRead { target, .. } => format!("kite_memory.read target={target}"),
+        cli::AgentCommand::MemoryAdd { target, .. } => format!("kite_memory.add target={target}"),
+        cli::AgentCommand::MemorySearch { target, query, .. } => format!(
+            "kite_memory.search target={target} query=\"{}\"",
+            query.chars().take(60).collect::<String>()
+        ),
+        cli::AgentCommand::RoutineList { .. } => "kite_routine.list".to_string(),
+        cli::AgentCommand::RoutineCreate { name, .. } => {
+            format!("kite_routine.create name=\"{}\"", name.chars().take(60).collect::<String>())
+        }
+        cli::AgentCommand::RoutineToggle { routine_id, enabled, .. } => {
+            format!("kite_routine.toggle id={routine_id} enabled={enabled}")
+        }
+        cli::AgentCommand::RoutineRun { routine_id, .. } => {
+            format!("kite_routine.run id={routine_id}")
+        }
+        cli::AgentCommand::TeammateList => "kite_teammate.list".to_string(),
+        cli::AgentCommand::TeammateSend { target, .. } => {
+            format!("kite_teammate.send target={target}")
+        }
+        cli::AgentCommand::TeammateDelegate { target, .. } => {
+            format!("kite_teammate.delegate target={target}")
+        }
+        cli::AgentCommand::Tool(_) => "kite_tool".to_string(),
+    }
+}
+
+fn dispatch_command_tool_name(cmd: &cli::Command, op: &str) -> String {
+    match cmd {
+        cli::Command::Run { .. } => "kite_subagent_run".to_string(),
+        cli::Command::Send { .. } => "kite_subagent_send".to_string(),
+        cli::Command::Wait { .. } => "kite_subagent_wait".to_string(),
+        cli::Command::Read { .. } => "kite_subagent_read".to_string(),
+        cli::Command::Swarm(..) => "kite_swarm".to_string(),
+        _ => format!("kite_dispatch_{op}"),
+    }
+}
+
 fn execute_agent_command(
     request: &Value,
     id: &str,
     cmd: &cli::AgentCommand,
     perms: &CallerPermissions,
 ) -> Value {
-    match cmd {
+    let started = std::time::Instant::now();
+    let (tool_name, family) = agent_command_tool_meta(cmd);
+    let aid_str = perms
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("anonymous");
+    let caller_tid = request_thread_id(request);
+
+    let denied_msg: Option<String> = match cmd {
         cli::AgentCommand::ThreadList { .. }
         | cli::AgentCommand::ThreadSearch { .. }
-        | cli::AgentCommand::ThreadRead { .. } => {
+        | cli::AgentCommand::ThreadRead { .. }
+        | cli::AgentCommand::ThreadLaunch { .. } => {
             if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite-thread")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "thread")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite_thread")
             {
-                return agent_error_envelope(
-                    id,
-                    "Permission denied: thread tool pack is disabled for this agent.",
-                );
+                Some("Permission denied: thread tool pack is disabled for this agent.".to_string())
+            } else {
+                None
             }
         }
         cli::AgentCommand::MemoryRead { .. }
@@ -1035,10 +1316,9 @@ fn execute_agent_command(
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "memory")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite_memory")
             {
-                return agent_error_envelope(
-                    id,
-                    "Permission denied: memory tool pack is disabled for this agent.",
-                );
+                Some("Permission denied: memory tool pack is disabled for this agent.".to_string())
+            } else {
+                None
             }
         }
         cli::AgentCommand::RoutineList { .. }
@@ -1046,56 +1326,158 @@ fn execute_agent_command(
         | cli::AgentCommand::RoutineToggle { .. }
         | cli::AgentCommand::RoutineRun { .. } => {
             if !perms.allow_scheduling {
-                return agent_error_envelope(
-                    id,
-                    "Permission denied: allowAgentScheduling is disabled for this agent.",
-                );
-            }
-            if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite-routine")
+                Some("Permission denied: allowAgentScheduling is disabled for this agent.".to_string())
+            } else if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite-routine")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "routine")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "routines")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite_routine")
             {
-                return agent_error_envelope(
-                    id,
-                    "Permission denied: routine tool pack is disabled for this agent.",
-                );
+                Some("Permission denied: routine tool pack is disabled for this agent.".to_string())
+            } else {
+                None
             }
         }
         cli::AgentCommand::TeammateList
         | cli::AgentCommand::TeammateSend { .. }
         | cli::AgentCommand::TeammateDelegate { .. } => {
             if !perms.allow_messaging {
-                return agent_error_envelope(
-                    id,
-                    "Permission denied: allowAgentMessaging is disabled for this agent.",
-                );
-            }
-            if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite-teammate")
+                Some("Permission denied: allowAgentMessaging is disabled for this agent.".to_string())
+            } else if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite-teammate")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "teammate")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "teammates")
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite_teammate")
             {
-                return agent_error_envelope(
-                    id,
-                    "Permission denied: teammate tool pack is disabled for this agent.",
-                );
+                Some("Permission denied: teammate tool pack is disabled for this agent.".to_string())
+            } else {
+                None
             }
         }
-        cli::AgentCommand::Tool(tool_cmd) => {
-            let family = cli::tool_family_for_command(tool_cmd);
+        cli::AgentCommand::Tool(_) => {
             if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, family)
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, &format!("kite-{family}"))
                 || crate::plugins::is_plugin_disabled(&perms.disabled_plugins, &format!("kite_{family}"))
             {
-                return agent_error_envelope(
-                    id,
-                    format!("Permission denied: {family} tool pack is disabled for this agent."),
-                );
+                Some(format!("Permission denied: {family} tool pack is disabled for this agent."))
+            } else {
+                None
             }
         }
+    };
+
+    if let Some(msg) = denied_msg {
+        crate::agents::record_agent_audit_event(
+            aid_str,
+            caller_tid,
+            &tool_name,
+            family,
+            "denied",
+            Some(&msg),
+            started.elapsed().as_millis() as i64,
+            None,
+        );
+        return agent_error_envelope(id, msg);
     }
 
+    let approved = request
+        .get("approved")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || request
+            .get("argv")
+            .and_then(Value::as_array)
+            .is_some_and(|arr| arr.iter().any(|a| a.as_str() == Some("--approved")));
+
+    if let cli::AgentCommand::Tool(tool_cmd) = cmd {
+        let caller_from = request
+            .get("from")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let ws_path = resolve_request_workspace_path(request);
+        return match cli::execute_agent_tool(
+            tool_cmd,
+            perms.agent_id.as_deref(),
+            caller_from,
+            ws_path.as_deref(),
+            approved,
+        ) {
+            Ok(val) => agent_ok_envelope(val),
+            Err(msg) => agent_error_envelope(id, msg),
+        };
+    }
+
+    let detail = describe_agent_command(cmd);
+    let _ = approved;
+    let policy_decision = match cli::check_agent_tool_policy_interactive(
+        perms.agent_id.as_deref(),
+        caller_tid,
+        family,
+        &tool_name,
+        &detail,
+    ) {
+        Ok(decision) => decision,
+        Err(err) => {
+            let verdict_label = if err.starts_with("Approval required:") {
+                "asked"
+            } else {
+                "denied"
+            };
+            crate::agents::record_agent_audit_event(
+                aid_str,
+                caller_tid,
+                &tool_name,
+                family,
+                verdict_label,
+                Some(&err),
+                started.elapsed().as_millis() as i64,
+                None,
+            );
+            return agent_error_envelope(id, err);
+        }
+    };
+
+    let response = execute_agent_command_inner(request, id, cmd, perms);
+    let verdict_label = if policy_decision == "ask" {
+        "asked"
+    } else {
+        "allowed"
+    };
+    let exit_ok = response.get("exit").and_then(Value::as_i64).unwrap_or(1) == 0;
+    let reason = if exit_ok {
+        None
+    } else {
+        response
+            .get("textOut")
+            .and_then(Value::as_str)
+            .or_else(|| response.pointer("/receipt/text").and_then(Value::as_str))
+            .or_else(|| response.pointer("/receipt/error").and_then(Value::as_str))
+            .map(str::to_string)
+    };
+    let audit_thread_id = caller_tid.or_else(|| {
+        response
+            .pointer("/result/threadId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    });
+    crate::agents::record_agent_audit_event(
+        aid_str,
+        audit_thread_id,
+        &tool_name,
+        family,
+        verdict_label,
+        reason.as_deref(),
+        started.elapsed().as_millis() as i64,
+        None,
+    );
+    response
+}
+
+fn execute_agent_command_inner(
+    request: &Value,
+    id: &str,
+    cmd: &cli::AgentCommand,
+    perms: &CallerPermissions,
+) -> Value {
     match cmd {
         cli::AgentCommand::ThreadList {
             workspace_id,
@@ -1136,6 +1518,172 @@ fn execute_agent_command(
                 thread_id, *cursor, *limit,
             );
             agent_ok_envelope(val)
+        }
+        cli::AgentCommand::ThreadLaunch {
+            title,
+            prompt,
+            workspace_id,
+            provider,
+            model,
+            mode,
+            effort,
+            worktree,
+            odd_path,
+            open,
+            orchestrate,
+        } => {
+            let (resolved_workspace_id, resolved_ws_dir) =
+                resolve_launch_workspace(workspace_id.as_deref(), request);
+            let safe_provider = resolve_launch_provider(provider.as_deref(), perms);
+            let safe_title = derive_launch_title(title.as_deref(), prompt);
+            let created = crate::chat::create_thread(
+                None,
+                &safe_title,
+                &safe_provider,
+                resolved_workspace_id.as_deref(),
+            );
+            let tid = created
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if tid.is_empty() {
+                return agent_error_envelope(id, "Failed to create top-level thread.");
+            }
+
+            let mut patch = serde_json::Map::new();
+            patch.insert("provider".to_string(), json!(safe_provider));
+            if let Some(m) = model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                patch.insert("model".to_string(), json!(m));
+            }
+            let effective_mode = match mode.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(m) if m.eq_ignore_ascii_case("auto") => {
+                    crate::chat::models::default_mode(&safe_provider).to_string()
+                }
+                Some(m) => m.to_string(),
+                None => crate::chat::models::default_mode(&safe_provider).to_string(),
+            };
+            patch.insert("mode".to_string(), json!(effective_mode));
+            if let Some(eff) = effort.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                patch.insert("effort".to_string(), json!(eff));
+            }
+            crate::chat::configure_thread(&tid, &Value::Object(patch));
+
+            let mut wt_path_opt: Option<String> = None;
+            let mut worktree_error: Option<String> = None;
+            if *worktree {
+                if let Some(dir) = resolved_ws_dir.as_deref() {
+                    if let Some(repo_root) = crate::chat::subagents::resolve_git_repo_root(dir) {
+                        let short_id: String =
+                            tid.chars().filter(|c| *c != '-').take(8).collect();
+                        match crate::chat::subagents::provision_subagent_worktree(
+                            &repo_root,
+                            "branch",
+                            &short_id,
+                        ) {
+                            Ok(wt_path) => {
+                                wt_path_opt = Some(wt_path.to_string_lossy().to_string());
+                            }
+                            Err(err) => {
+                                worktree_error = Some(err);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(err) = worktree_error {
+                crate::chat::threads::remove_thread(&tid);
+                return agent_error_envelope(
+                    id,
+                    format!("Failed to provision git worktree for launched thread: {err}"),
+                );
+            }
+
+            let clean_odd_path = odd_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let needs_thread_patch = clean_odd_path.is_some()
+                || wt_path_opt.is_some()
+                || (resolved_workspace_id.is_none() && resolved_ws_dir.is_some());
+            if needs_thread_patch {
+                let mut mutated_thread: Option<Value> = None;
+                crate::persist::hydrate_thread(&tid);
+                {
+                    if let Ok(mut list) = crate::persist::threads().lock() {
+                        if let Some(thread) = list
+                            .iter_mut()
+                            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+                        {
+                            if let Some(ref odd) = clean_odd_path {
+                                thread["oddPath"] = json!(odd);
+                            }
+                            if let Some(ref wt_str) = wt_path_opt {
+                                thread["worktreePath"] = json!(wt_str);
+                                thread["workingDirectory"] = json!(wt_str);
+                                thread["workspaceMode"] = json!("branch");
+                            } else if resolved_workspace_id.is_none() {
+                                if let Some(ref dir) = resolved_ws_dir {
+                                    thread["workingDirectory"] =
+                                        json!(dir.to_string_lossy().to_string());
+                                }
+                            }
+                            crate::chat::threads::touch(thread);
+                            mutated_thread = Some(thread.clone());
+                        }
+                    }
+                }
+                if let Some(ref t) = mutated_thread {
+                    crate::chat::thread_index::index_thread(t);
+                    crate::persist::persist();
+                }
+            }
+
+            let final_prompt = if *orchestrate {
+                let odd_line = clean_odd_path
+                    .as_deref()
+                    .map(|p| format!("Linked ODD spec: `{p}`. Read and follow it end-to-end.\n"))
+                    .unwrap_or_default();
+                format!(
+                    "[Orchestrator Mode]\n\
+                     {odd_line}\
+                     Coordinate subtasks via `kite_subagent_run` or `kite_swarm` (`kite dispatch run --via thread` / `kite dispatch swarm`), verify changes proportionally, and report verified outcomes.\n\n\
+                     {prompt}"
+                )
+            } else {
+                prompt.clone()
+            };
+
+            let turn_res = crate::chat::start_turn(&tid, None, &final_prompt, vec![], None);
+            if let Some(err) = turn_res.get("error").and_then(Value::as_str) {
+                return agent_error_envelope(id, err.to_string());
+            }
+            let run_id = turn_res.get("runId").cloned().unwrap_or(Value::Null);
+
+            let event_payload = json!({
+                "threadId": tid,
+                "workspaceId": resolved_workspace_id,
+                "title": safe_title,
+                "open": *open,
+                "oddPath": clean_odd_path,
+            });
+            if let Some(app) = crate::get_app_handle() {
+                use tauri::Emitter;
+                let _ = app.emit("chat:thread-created", event_payload.clone());
+            }
+            crate::core_daemon::broadcast_daemon_ui_event("chat:thread-created", event_payload);
+
+            agent_ok_envelope(json!({
+                "schema": "kite.thread-launch/v1",
+                "threadId": tid,
+                "runId": run_id,
+                "provider": safe_provider,
+                "workspaceId": resolved_workspace_id,
+                "worktreePath": wt_path_opt,
+                "open": *open,
+                "status": "running",
+            }))
         }
         cli::AgentCommand::MemoryRead { target, agent_id } => {
             let Some(aid) = agent_id.as_deref().or(perms.agent_id.as_deref()) else {
@@ -1462,39 +2010,202 @@ fn execute_agent_command(
                 program: None,
                 words: Vec::new(),
             };
-            let receipt = execute_command(request, &command, id);
+            let receipt = execute_command_inner(request, &command, id, false);
             let exit = crate::dispatch::types::exit_code(&receipt);
             json!({ "exit": exit, "receipt": receipt })
         }
-        cli::AgentCommand::Tool(tool_cmd) => {
-            let caller_from = request
-                .get("from")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let ws_path = resolve_request_workspace_path(request);
-            let approved = request
-                .get("approved")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || request
-                    .get("argv")
-                    .and_then(Value::as_array)
-                    .is_some_and(|arr| arr.iter().any(|a| a.as_str() == Some("--approved")));
-            match cli::execute_agent_tool(
-                tool_cmd,
-                perms.agent_id.as_deref(),
-                caller_from,
-                ws_path.as_deref(),
-                approved,
-            ) {
-                Ok(val) => agent_ok_envelope(val),
-                Err(msg) => agent_error_envelope(id, msg),
-            }
-        }
+        cli::AgentCommand::Tool(_) => unreachable!("AgentCommand::Tool handled above"),
     }
 }
 
+fn build_correlation_query_from_argv(
+    argv: &[String],
+) -> Option<crate::chat::runtime::DispatchCorrelationQuery> {
+    let mut query = crate::chat::runtime::DispatchCorrelationQuery::default();
+    let command_hint = argv.join(" ");
+    if !command_hint.trim().is_empty() {
+        query.command_hint = Some(command_hint);
+    }
+    if cli::is_agent_argv(argv) {
+        if let Ok(agent_cmd) = cli::parse_agent_args(argv) {
+            match agent_cmd {
+                cli::AgentCommand::Tool(
+                    cli::AgentToolCommand::TasksList { .. }
+                    | cli::AgentToolCommand::TasksGet { .. }
+                    | cli::AgentToolCommand::TasksCreate { .. }
+                    | cli::AgentToolCommand::TasksUpdate { .. }
+                    | cli::AgentToolCommand::TasksMoveState { .. },
+                ) => {
+                    query.expected_tools.push("kite_tasks".to_string());
+                }
+                cli::AgentCommand::ThreadList { .. }
+                | cli::AgentCommand::ThreadRead { .. }
+                | cli::AgentCommand::ThreadLaunch { .. } => {
+                    query.expected_tools.push("kite_thread".to_string());
+                }
+                cli::AgentCommand::MemoryRead { .. }
+                | cli::AgentCommand::MemoryAdd { .. }
+                | cli::AgentCommand::MemorySearch { .. } => {
+                    query.expected_tools.push("kite_memory".to_string());
+                }
+                cli::AgentCommand::RoutineList { .. }
+                | cli::AgentCommand::RoutineCreate { .. }
+                | cli::AgentCommand::RoutineToggle { .. }
+                | cli::AgentCommand::RoutineRun { .. } => {
+                    query.expected_tools.push("kite_routine".to_string());
+                }
+                cli::AgentCommand::TeammateList
+                | cli::AgentCommand::TeammateSend { .. }
+                | cli::AgentCommand::TeammateDelegate { .. } => {
+                    query.expected_tools.push("kite_teammate".to_string());
+                }
+                cli::AgentCommand::Tool(cli::AgentToolCommand::Browser { .. }) => {
+                    query.expected_tools.push("kite_browser".to_string());
+                }
+                _ => {}
+            }
+        }
+        return Some(query);
+    }
+
+    match cli::parse_args_detailed(argv) {
+        Ok(cli::Command::Run {
+            parent,
+            role,
+            task,
+            tasks,
+            ..
+        }) => {
+            if parent
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty())
+            {
+                return None;
+            }
+            query.expected_tools.push("kite_subagent_run".to_string());
+            query.role = role;
+            query.prompt = task;
+            query.tasks = tasks;
+            query.consume_claim = true;
+            Some(query)
+        }
+        Ok(cli::Command::Swarm(swarm_cmd)) => {
+            query.expected_tools.push("kite_swarm".to_string());
+            match swarm_cmd {
+                cli::SwarmCommand::Title { title } => {
+                    query.swarm_action = Some("title".to_string());
+                    query.swarm_title = Some(title);
+                }
+                cli::SwarmCommand::Add {
+                    name,
+                    role,
+                    brief,
+                    ..
+                } => {
+                    query.swarm_action = Some("add".to_string());
+                    query.swarm_member = Some(name);
+                    query.role = role;
+                    query.prompt = Some(brief);
+                    query.consume_claim = true;
+                }
+                cli::SwarmCommand::Post { text, .. } => {
+                    query.swarm_action = Some("post".to_string());
+                    query.prompt = Some(text);
+                }
+                cli::SwarmCommand::Read { .. } => {
+                    query.swarm_action = Some("read".to_string());
+                }
+                cli::SwarmCommand::Wait { .. } => {
+                    query.swarm_action = Some("wait".to_string());
+                }
+                cli::SwarmCommand::Status => {
+                    query.swarm_action = Some("status".to_string());
+                }
+                cli::SwarmCommand::Model { name, .. } => {
+                    query.swarm_action = Some("model".to_string());
+                    query.swarm_member = Some(name);
+                }
+                cli::SwarmCommand::Kill { name } => {
+                    query.swarm_action = Some("kill".to_string());
+                    query.swarm_member = Some(name);
+                }
+                cli::SwarmCommand::Channel { .. } => {
+                    query.swarm_action = Some("channel".to_string());
+                }
+            }
+            Some(query)
+        }
+        Ok(cli::Command::Wait { .. }) => {
+            query.expected_tools.push("kite_subagent_wait".to_string());
+            Some(query)
+        }
+        Ok(cli::Command::Read { .. }) => {
+            query.expected_tools.push("kite_subagent_read".to_string());
+            Some(query)
+        }
+        Ok(cli::Command::Send { body, .. }) => {
+            query.expected_tools.push("kite_subagent_send".to_string());
+            query.prompt = body;
+            Some(query)
+        }
+        _ => Some(query),
+    }
+}
+
+/// Resolves the originating thread ID for a multiplexed daemon request whose per-thread
+/// `KITE_ADDRESS` was scrubbed (or flagged `multiplexedDaemon: true`). Uses in-flight ACP
+/// tool-call correlation first (with a brief race-guard window outside tests), falling back
+/// to `single_active_live_thread_id()` only when exactly one turn is running. Never guesses
+/// across multiple concurrent threads.
+pub(crate) fn resolve_multiplexed_caller_thread(request: &Value, argv: &[String]) -> Option<String> {
+    let raw_from = request
+        .get("from")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    let is_mux = request
+        .get("multiplexedDaemon")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let is_thread_mode = request
+        .get("threadMode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !is_mux && raw_from.starts_with("thread:") {
+        return None;
+    }
+    if !is_mux && !is_thread_mode && !raw_from.is_empty() {
+        return None;
+    }
+    let query = build_correlation_query_from_argv(argv)?;
+    if let Some(tid) = crate::chat::runtime::claim_matching_in_flight_dispatch_thread(&query) {
+        return Some(tid);
+    }
+    if !cfg!(test) && (is_mux || is_thread_mode) {
+        for _ in 0..10 {
+            thread::sleep(Duration::from_millis(15));
+            if let Some(tid) =
+                crate::chat::runtime::claim_matching_in_flight_dispatch_thread(&query)
+            {
+                return Some(tid);
+            }
+        }
+    }
+    if is_mux || is_thread_mode {
+        return crate::chat::runtime::single_active_live_thread_id();
+    }
+    None
+}
+
 fn execute_argv_dispatch(request: &Value, id: &str, argv: &[String]) -> Value {
+    let resolved_owned = resolve_multiplexed_caller_thread(request, argv).map(|tid| {
+        let mut cloned = request.clone();
+        if let Some(obj) = cloned.as_object_mut() {
+            obj.insert("from".to_string(), json!(format!("thread:{tid}")));
+        }
+        cloned
+    });
+    let request = resolved_owned.as_ref().unwrap_or(request);
     let perms = resolve_caller_permissions(request);
     if cli::is_agent_argv(argv) {
         return match cli::parse_agent_args(argv) {
@@ -1506,10 +2217,23 @@ fn execute_argv_dispatch(request: &Value, id: &str, argv: &[String]) -> Value {
         };
     }
     if crate::plugins::is_plugin_disabled(&perms.disabled_plugins, "kite-dispatch") {
-        return agent_error_envelope(
-            id,
-            "Permission denied: plugin 'kite-dispatch' is disabled for this agent.",
+        let msg = "Permission denied: plugin 'kite-dispatch' is disabled for this agent.";
+        crate::agents::record_agent_audit_event(
+            perms
+                .agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("anonymous"),
+            request_thread_id(request),
+            "kite_dispatch",
+            "subagents",
+            "denied",
+            Some(msg),
+            0,
+            None,
         );
+        return agent_error_envelope(id, msg);
     }
     match cli::parse_args_detailed(argv) {
         Ok(cli::Command::Skill) => {
@@ -1675,6 +2399,7 @@ pub fn execute_swarm_command(
     id: &str,
     swarm_cmd: &cli::SwarmCommand,
 ) -> Receipt {
+    let started = std::time::Instant::now();
     {
         let guard = match service().lock() {
             Ok(guard) => guard,
@@ -1692,7 +2417,7 @@ pub fn execute_swarm_command(
         .unwrap_or(if caller == Caller::Human { "human" } else { "agent" });
     let cwd_buf = resolve_request_workspace_path(request);
     let cwd = cwd_buf.as_ref().and_then(|p| p.to_str());
-    match crate::chat::swarm::execute_swarm_action(swarm_cmd, from, cwd, None) {
+    let receipt = match crate::chat::swarm::execute_swarm_action(swarm_cmd, from, cwd, None) {
         Ok(text) => {
             let mut receipt = Receipt::new(
                 id,
@@ -1715,10 +2440,42 @@ pub fn execute_swarm_command(
             None,
             Some(err.code().into()),
         ),
+    };
+    if let Some(aid) = resolve_audit_agent_id(request) {
+        let verdict = if receipt.status == crate::dispatch::ReceiptStatus::Rejected
+            && matches!(
+                receipt.error.as_deref(),
+                Some("force_forbidden" | "messaging_disabled" | "permission_denied")
+            ) {
+            "denied"
+        } else {
+            "allowed"
+        };
+        crate::agents::record_agent_audit_event(
+            &aid,
+            request_thread_id(request),
+            "kite_swarm",
+            "subagents",
+            verdict,
+            receipt.error.as_deref(),
+            started.elapsed().as_millis() as i64,
+            None,
+        );
     }
+    receipt
 }
 
 pub fn execute_command(request: &Value, command: &cli::Command, id: &str) -> Receipt {
+    execute_command_inner(request, command, id, true)
+}
+
+fn execute_command_inner(
+    request: &Value,
+    command: &cli::Command,
+    id: &str,
+    record_agent_audit: bool,
+) -> Receipt {
+    let started = std::time::Instant::now();
     let mut guard = match service().lock() {
         Ok(guard) => guard,
         Err(poison) => poison.into_inner(),
@@ -1831,6 +2588,7 @@ pub fn execute_command(request: &Value, command: &cli::Command, id: &str) -> Rec
             Err(err) => Receipt::new(id, "dispatch", crate::dispatch::ReceiptStatus::Rejected, "", false, None, Some(err.code().into())),
         }
     };
+    drop(guard);
     if !(receipt.op == "wait" && receipt.status == crate::dispatch::ReceiptStatus::Queued) {
         record_audit_with_target(
             &receipt,
@@ -1839,6 +2597,30 @@ pub fn execute_command(request: &Value, command: &cli::Command, id: &str) -> Rec
             &address,
             request.get("profileId").and_then(Value::as_str),
         );
+        if record_agent_audit && !receipt.replayed {
+            if let Some(aid) = resolve_audit_agent_id(request) {
+                let tool_name = dispatch_command_tool_name(command, &receipt.op);
+                let verdict = if receipt.status == crate::dispatch::ReceiptStatus::Rejected
+                    && matches!(
+                        receipt.error.as_deref(),
+                        Some("force_forbidden" | "messaging_disabled" | "permission_denied")
+                    ) {
+                    "denied"
+                } else {
+                    "allowed"
+                };
+                crate::agents::record_agent_audit_event(
+                    &aid,
+                    request_thread_id(request),
+                    &tool_name,
+                    "subagents",
+                    verdict,
+                    receipt.error.as_deref(),
+                    started.elapsed().as_millis() as i64,
+                    None,
+                );
+            }
+        }
     }
     receipt
 }
@@ -1933,6 +2715,23 @@ pub fn send_agent(
         timeout_ms: None,
     };
     let receipt = execute_command(&request, &command, &id);
+    if receipt.submitted {
+        let target_thread_id = receipt
+            .address
+            .strip_prefix("thread:")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        crate::routines::dispatch_routine_event_async(
+            "on_teammate_message",
+            json!({
+                "agentId": recipient_id,
+                "threadId": target_thread_id,
+                "from": sender_name,
+                "caller": caller,
+            }),
+        );
+    }
     json!({
         "schemaVersion": 1,
         "delivered": receipt.submitted,

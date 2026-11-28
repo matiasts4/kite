@@ -46,25 +46,77 @@ pub(super) fn swarm_state_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+pub const MAX_WAIT_HUB_ENTRIES: usize = 256;
+
 pub(super) fn wait_hub() -> &'static Mutex<HashMap<String, Arc<WaitChannel>>> {
     static HUB: OnceLock<Mutex<HashMap<String, Arc<WaitChannel>>>> = OnceLock::new();
     HUB.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(super) fn wait_channel_for(coord_thread_id: &str) -> Arc<WaitChannel> {
-    let mut map = wait_hub().lock().unwrap_or_else(|e| e.into_inner());
+pub(super) fn wait_channel_for_in(
+    map: &mut HashMap<String, Arc<WaitChannel>>,
+    coord_thread_id: &str,
+) -> Arc<WaitChannel> {
+    if let Some(existing) = map.get(coord_thread_id) {
+        return Arc::clone(existing);
+    }
+    if map.len() >= MAX_WAIT_HUB_ENTRIES {
+        let idle_keys: Vec<String> = map
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(entry) == 1)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in idle_keys {
+            if map.len() < MAX_WAIT_HUB_ENTRIES {
+                break;
+            }
+            map.remove(&key);
+        }
+    }
     map.entry(coord_thread_id.to_string())
         .or_insert_with(|| Arc::new(WaitChannel::new()))
         .clone()
 }
 
-pub(super) fn notify_swarm_waiters(coord_thread_id: &str) {
-    let channel = wait_channel_for(coord_thread_id);
-    if let Ok(mut gen_guard) = channel.condvar.0.lock() {
-        *gen_guard = gen_guard.wrapping_add(1);
-        channel.condvar.1.notify_all();
+pub(super) fn wait_channel_for(coord_thread_id: &str) -> Arc<WaitChannel> {
+    let mut map = wait_hub().lock().unwrap_or_else(|e| e.into_inner());
+    wait_channel_for_in(&mut map, coord_thread_id)
+}
+
+pub(super) fn cleanup_settled_wait_channel_in(
+    map: &mut HashMap<String, Arc<WaitChannel>>,
+    thread_id: &str,
+) -> bool {
+    if map
+        .get(thread_id)
+        .is_some_and(|entry| Arc::strong_count(entry) == 1)
+    {
+        map.remove(thread_id);
+        true
+    } else {
+        false
     }
-    channel.notify.notify_waiters();
+}
+
+pub fn cleanup_settled_wait_channel(thread_id: &str) -> bool {
+    let Ok(mut map) = wait_hub().lock() else {
+        return false;
+    };
+    cleanup_settled_wait_channel_in(&mut map, thread_id)
+}
+
+pub(super) fn notify_swarm_waiters(coord_thread_id: &str) {
+    let channel = {
+        let map = wait_hub().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(coord_thread_id).cloned()
+    };
+    if let Some(channel) = channel {
+        if let Ok(mut gen_guard) = channel.condvar.0.lock() {
+            *gen_guard = gen_guard.wrapping_add(1);
+            channel.condvar.1.notify_all();
+        }
+        channel.notify.notify_waiters();
+    }
 }
 
 pub(super) fn valid_worker_name(name: &str) -> bool {
@@ -400,4 +452,27 @@ pub(super) fn build_coordinator_wakeup_prompt(state: &SwarmState, posts: &[Swarm
         formatted,
         format_status(state),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_hub_caps_idle_entries_and_preserves_referenced_waiters() {
+        let mut map: HashMap<String, Arc<WaitChannel>> = HashMap::new();
+        let active_waiter = wait_channel_for_in(&mut map, "coord-active");
+        for i in 0..(MAX_WAIT_HUB_ENTRIES + 20) {
+            let _ = wait_channel_for_in(&mut map, &format!("coord-idle-{i}"));
+        }
+        assert_eq!(map.len(), MAX_WAIT_HUB_ENTRIES);
+        assert!(
+            map.contains_key("coord-active"),
+            "wait channel held by an active waiter (strong_count > 1) must not be evicted"
+        );
+        assert!(!cleanup_settled_wait_channel_in(&mut map, "coord-active"));
+        drop(active_waiter);
+        assert!(cleanup_settled_wait_channel_in(&mut map, "coord-active"));
+        assert!(!map.contains_key("coord-active"));
+    }
 }

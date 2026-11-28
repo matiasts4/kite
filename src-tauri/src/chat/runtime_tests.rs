@@ -351,6 +351,43 @@
             ]
         );
 
+        let agy_orch = spawn_args(
+            "antigravity",
+            "fullAccess",
+            &send(Some("gemini-pro-orchestrator-neon"), None, None, None, &[]),
+            Some("high"),
+            "hello",
+        )
+        .expect("antigravity orchestrator args");
+        assert!(
+            agy_orch
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--model", "gemini-pro-orchestrator-neon"])
+        );
+        assert!(
+            !agy_orch.args.iter().any(|arg| arg == "--effort"),
+            "orchestrator model must omit --effort on one-shot spawn, got: {:?}",
+            agy_orch.args
+        );
+
+        let agy_minimal = spawn_args(
+            "antigravity",
+            "fullAccess",
+            &send(Some("gemini-4-neon"), None, None, None, &[]),
+            Some("minimal"),
+            "hello",
+        )
+        .expect("antigravity minimal args");
+        assert!(
+            agy_minimal
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--effort", "low"]),
+            "minimal effort must normalize to low for agy CLI, got: {:?}",
+            agy_minimal.args
+        );
+
         let claude = spawn_args(
             "claude",
             "acceptEdits",
@@ -981,8 +1018,14 @@
         assert_eq!(map.get("KITE_PROJECT").map(String::as_str), Some("ws-kite"));
     }
 
+    fn ctx_db_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn assemble_thread_context_compresses_oversized_history_with_head_tail_anchors() {
+        let _env_guard = ctx_db_env_lock().lock().unwrap();
         struct TempCtxDir(PathBuf);
         impl TempCtxDir {
             fn new() -> Self {
@@ -1058,6 +1101,134 @@
             "expected provider fallback attribution 'antigravity', got {:?}",
             snap.agents
         );
+    }
+
+    #[test]
+    fn assemble_thread_context_freezes_kv_window_in_batches_and_caches_compressed_segments() {
+        let _env_guard = ctx_db_env_lock().lock().unwrap();
+        struct TempCtxDir(PathBuf);
+        impl TempCtxDir {
+            fn new() -> Self {
+                let p = std::env::temp_dir().join(format!(
+                    "kite_runtime_kv_ctx_{}_{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                ));
+                std::fs::create_dir_all(&p).unwrap();
+                Self(p)
+            }
+        }
+        impl Drop for TempCtxDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct EnvRestore(Option<String>);
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(ref prev) = self.0 {
+                    std::env::set_var(kite_ctx::ENV_DB_PATH, prev);
+                } else {
+                    std::env::remove_var(kite_ctx::ENV_DB_PATH);
+                }
+            }
+        }
+
+        let dir = TempCtxDir::new();
+        let db = dir.0.join("ctx_kv_runtime_test.db");
+        let _restore = EnvRestore(std::env::var(kite_ctx::ENV_DB_PATH).ok());
+        std::env::set_var(kite_ctx::ENV_DB_PATH, &db);
+
+        let unique_tag = format!("kvbatch-{}", std::process::id());
+        let big_body = (0..140)
+            .map(|i| format!("{unique_tag} noisy runtime log line {i}: delta check omega::sigma::tau"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let make_big_assistant = |idx: usize| {
+            format!(
+                "KV_TURN_{idx}_HEAD: milestone {idx}\n{big_body}\nKV_TURN_{idx}_TAIL: done {idx}"
+            )
+        };
+
+        let mut items: Vec<Value> = Vec::new();
+        for idx in 0..8 {
+            items.push(json!({
+                "id": format!("u-{idx}"),
+                "kind": "user",
+                "text": format!("User turn {idx} prompt")
+            }));
+            items.push(json!({
+                "id": format!("a-{idx}"),
+                "kind": "assistant",
+                "text": if idx == 0 { make_big_assistant(0) } else { format!("Short reply {idx}") }
+            }));
+        }
+        // 16 past items (> 14, < 20): window_start stays at 0 so item 0 ("User turn 0 prompt") stays pinned.
+        let thread_turn1 = json!({
+            "id": "thread-kv-batch-1",
+            "provider": "antigravity",
+            "model": "gemini-3.1-pro",
+            "items": items.clone()
+        });
+        let assembled_1 = assemble_thread_context(&thread_turn1, "Follow up 1");
+        assert!(assembled_1.contains("User turn 0 prompt"));
+        assert!(assembled_1.contains("<<ccr:"));
+
+        let reqs_after_1 = kite_ctx::ContextEngine::open(&db)
+            .unwrap()
+            .ledger()
+            .snapshot(Some("thread-kv-batch-1"))
+            .unwrap()
+            .lifetime
+            .requests;
+        assert_eq!(reqs_after_1, 1, "oversized assistant turn should log once");
+
+        // Grow history to 18 items (still within batch window 14 + 6 = 20).
+        // `window_start` must remain 0, `kv_prefix_hits` must increment, and item 0 must hit segment cache (no duplicate ledger write).
+        items.push(json!({ "id": "u-8", "kind": "user", "text": "Follow up 1" }));
+        items.push(json!({ "id": "a-8", "kind": "assistant", "text": "Short reply 8" }));
+        let thread_turn2 = json!({
+            "id": "thread-kv-batch-1",
+            "provider": "antigravity",
+            "model": "gemini-3.1-pro",
+            "items": items.clone()
+        });
+        let assembled_2 = assemble_thread_context(&thread_turn2, "Follow up 2");
+        assert!(assembled_2.contains("User turn 0 prompt"));
+        assert!(assembled_2.contains("Follow up 1"));
+
+        let snap_2 = kite_ctx::ContextEngine::open(&db)
+            .unwrap()
+            .ledger()
+            .snapshot(Some("thread-kv-batch-1"))
+            .unwrap();
+        assert!(snap_2.kv_sessions >= 1);
+        assert!(
+            snap_2.kv_prefix_hits >= 1,
+            "expected KV prefix hit while window stays frozen, got {:?}",
+            snap_2
+        );
+        assert_eq!(
+            snap_2.lifetime.requests, reqs_after_1,
+            "cached compressed segment must not re-log duplicate ledger entries"
+        );
+
+        // Grow beyond 14 + 6 (21 items) -> window advances in a batch step, dropping index 0.
+        items.push(json!({ "id": "u-9", "kind": "user", "text": "Follow up 2" }));
+        items.push(json!({ "id": "a-9", "kind": "assistant", "text": "Short reply 9" }));
+        items.push(json!({ "id": "u-10", "kind": "user", "text": "Follow up 3" }));
+        let thread_turn3 = json!({
+            "id": "thread-kv-batch-1",
+            "provider": "antigravity",
+            "model": "gemini-3.1-pro",
+            "items": items
+        });
+        let assembled_3 = assemble_thread_context(&thread_turn3, "Follow up 3");
+        assert!(!assembled_3.contains("User turn 0 prompt"));
+        assert!(assembled_3.contains("User turn 3 prompt"));
     }
 
     #[test]
@@ -1358,6 +1529,7 @@
         let start_snap = crate::chat::normalize::ToolCallSnapshot {
             id: "snap_cmd_1".into(),
             kind: "commandExecution".into(),
+            tool_name: None,
             title: "Run npx".into(),
             status: "running".into(),
             path: None,
@@ -1369,6 +1541,7 @@
             subagent_meta: None,
             swarm_meta: None,
             parent_tool_use_id: None,
+            raw_input: None,
         };
         crate::chat::runtime::pipeline::upsert_tool_snapshot(tid, rid, &start_snap);
 
@@ -2983,7 +3156,7 @@
         impl Drop for CleanupGuard {
             fn drop(&mut self) {
                 {
-                    let mut live = live_turns().lock().unwrap();
+                    let mut live = live_turns().lock().unwrap_or_else(|p| p.into_inner());
                     for rid in &self.run_ids {
                         live.runs.remove(rid);
                     }
@@ -2992,14 +3165,16 @@
                     }
                 }
                 {
-                    let mut notifs = notifications().lock().unwrap();
+                    let mut notifs = notifications().lock().unwrap_or_else(|p| p.into_inner());
                     notifs.retain(|n| {
                         let rid = n.get("runId").and_then(Value::as_str);
                         !rid.is_some_and(|id| self.run_ids.iter().any(|target| target == id))
                     });
                 }
-                for tid in &self.thread_ids {
-                    crate::chat::remove_thread(tid);
+                if !std::thread::panicking() {
+                    for tid in &self.thread_ids {
+                        crate::chat::remove_thread(tid);
+                    }
                 }
             }
         }
@@ -3498,7 +3673,12 @@
         // Simulate mid-turn account eviction clearing providerSessionId and record.resume_handle.
         {
             let mut items = threads().lock().unwrap();
-            crate::chat::runtime::state::clear_provider_thread_handles(&mut items, "antigravity");
+            if let Some(pos) = items.iter().position(|t| t["id"] == tid) {
+                crate::chat::runtime::state::clear_provider_thread_handles(
+                    &mut items[pos..=pos],
+                    "antigravity",
+                );
+            }
         }
         let after_evict = crate::chat::runtime::turn::resolve_pump_sync_handle(
             None,
@@ -3521,4 +3701,684 @@
             last_synced_handle.as_deref(),
         );
         assert_eq!(rotated, Some("rotated-session-handle"));
+    }
+
+    #[test]
+    fn cancel_chat_turn_preserve_children_keeps_active_subagent_and_swarm_worker_alive_while_explicit_stop_kills_them() {
+        let parent_id: &'static str =
+            Box::leak(format!("steer-parent-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let child_id: &'static str =
+            Box::leak(format!("steer-child-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let swarm_child_id: &'static str =
+            Box::leak(format!("steer-swarm-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let parent_run_id: &'static str =
+            Box::leak(format!("steer-prun-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let child_run_id: &'static str =
+            Box::leak(format!("steer-crun-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let swarm_run_id: &'static str =
+            Box::leak(format!("steer-srun-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+
+        let _p_guard = HeadlessProbe { thread_id: parent_id, run_id: parent_run_id };
+        let _c_guard = HeadlessProbe { thread_id: child_id, run_id: child_run_id };
+        let _s_guard = HeadlessProbe { thread_id: swarm_child_id, run_id: swarm_run_id };
+
+        {
+            let mut items = threads().lock().unwrap();
+            items.push(json!({
+                "id": parent_id,
+                "title": "Parent Orchestrator",
+                "provider": "antigravity",
+                "status": "running",
+                "items": [
+                    { "id": "u1", "kind": "user", "text": "Delegate work" },
+                    {
+                        "id": "call-sub-1",
+                        "kind": "tool",
+                        "toolKind": "subagent",
+                        "toolName": "kite_subagent_run",
+                        "title": "Subagent · Researcher",
+                        "status": "running",
+                        "streaming": true,
+                        "text": "",
+                        "subagentMeta": {
+                            "subagentId": "sub-1",
+                            "role": "Researcher",
+                            "childThreadId": child_id,
+                            "status": "running"
+                        }
+                    },
+                    {
+                        "id": "call-cmd-1",
+                        "kind": "tool",
+                        "toolKind": "commandExecution",
+                        "toolName": "run_command",
+                        "title": "Parent command",
+                        "status": "running",
+                        "streaming": true,
+                        "text": ""
+                    }
+                ],
+                "subagentRuns": [
+                    {
+                        "subagentId": "sub-1",
+                        "parentThreadId": parent_id,
+                        "parentToolCallId": "call-sub-1",
+                        "role": "Researcher",
+                        "provider": "grok",
+                        "model": "grok-fast",
+                        "status": "running",
+                        "childThreadId": child_id,
+                        "stepCount": 1,
+                        "items": [],
+                        "startedAtUnixMs": 1000,
+                        "updatedAtUnixMs": 1000
+                    }
+                ],
+                "swarmState": {
+                    "title": "Audit Swarm",
+                    "members": [
+                        {
+                            "name": "worker-1",
+                            "state": "working",
+                            "childThreadId": swarm_child_id
+                        }
+                    ]
+                }
+            }));
+            items.push(json!({
+                "id": child_id,
+                "parentThreadId": parent_id,
+                "startedByAgent": true,
+                "provider": "grok",
+                "status": "running",
+                "items": []
+            }));
+            items.push(json!({
+                "id": swarm_child_id,
+                "parentThreadId": parent_id,
+                "startedByAgent": true,
+                "provider": "grok",
+                "status": "running",
+                "items": []
+            }));
+        }
+
+        let make_run = |asst_id: &str| TurnRun {
+            revision: "rev".into(),
+            events: Vec::new(),
+            next_sequence: 0,
+            assistant_id: asst_id.into(),
+            assistant_text: String::new(),
+            child: None,
+            stdin: None,
+            closing: false,
+            finished: false,
+            started_at_ms: now_ms(),
+            finished_at_ms: None,
+            routine_id: None,
+            delivered_through: 0,
+            file_baselines: std::collections::HashMap::new(),
+        };
+        {
+            let mut live = live_turns().lock().unwrap();
+            live.runs.insert(parent_run_id.to_string(), make_run("pa"));
+            live.by_thread.insert(parent_id.to_string(), parent_run_id.to_string());
+            live.runs.insert(child_run_id.to_string(), make_run("ca"));
+            live.by_thread.insert(child_id.to_string(), child_run_id.to_string());
+            live.runs.insert(swarm_run_id.to_string(), make_run("sa"));
+            live.by_thread.insert(swarm_child_id.to_string(), swarm_run_id.to_string());
+        }
+
+        // 1. Steer / Send now cancel: preserveChildren = true must interrupt ONLY the parent turn.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(crate::chat_commands::cancel_chat_turn(Some(json!({
+            "threadId": parent_id,
+            "preserveChildren": true
+        }))));
+
+        assert!(!is_turn_running(parent_id), "parent live turn must stop on steer cancel");
+        assert!(is_turn_running(child_id), "async child subagent must stay alive on steer cancel");
+        assert!(is_turn_running(swarm_child_id), "swarm worker must stay alive on steer cancel");
+        assert!(!crate::chat::kill_registry::is_thread_killed(child_id));
+
+        {
+            let all = threads().lock().unwrap();
+            let parent = all.iter().find(|t| t["id"] == parent_id).unwrap();
+            assert_eq!(parent["status"], json!("idle"));
+            assert_eq!(parent["subagentRuns"][0]["status"], json!("running"));
+            assert_eq!(parent["swarmState"]["members"][0]["state"], json!("working"));
+            let sub_item = parent["items"].as_array().unwrap().iter().find(|it| it["id"] == "call-sub-1").unwrap();
+            assert_eq!(sub_item["status"], json!("running"));
+            assert_eq!(sub_item["subagentMeta"]["status"], json!("running"));
+            assert_eq!(sub_item["streaming"], json!(true));
+            let cmd_item = parent["items"].as_array().unwrap().iter().find(|it| it["id"] == "call-cmd-1").unwrap();
+            assert_eq!(cmd_item["status"], json!("stopped"));
+            assert_eq!(cmd_item["streaming"], json!(false));
+
+            let child = all.iter().find(|t| t["id"] == child_id).unwrap();
+            assert_eq!(child["status"], json!("running"));
+        }
+
+        // 2. Explicit Stop button (default preserveChildren = false) MUST still stop parent + children.
+        rt.block_on(crate::chat_commands::cancel_chat_turn(Some(json!({
+            "threadId": parent_id
+        }))));
+
+        assert!(!is_turn_running(child_id), "explicit Stop must cancel child subagent");
+        assert!(!is_turn_running(swarm_child_id), "explicit Stop must cancel swarm worker");
+        {
+            let all = threads().lock().unwrap();
+            let parent = all.iter().find(|t| t["id"] == parent_id).unwrap();
+            assert_eq!(parent["subagentRuns"][0]["status"], json!("killed"));
+            assert_eq!(parent["swarmState"]["members"][0]["state"], json!("stopped"));
+        }
+        crate::chat::kill_registry::clear_thread_killed(child_id);
+        crate::chat::kill_registry::clear_thread_killed(swarm_child_id);
+    }
+
+    #[test]
+    fn cancel_chat_turn_preserve_children_without_live_run_heals_parent_without_killing_active_child_subagent() {
+        let parent_id: &'static str =
+            Box::leak(format!("steer-orphan-parent-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let child_id: &'static str =
+            Box::leak(format!("steer-orphan-child-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+        let child_run_id: &'static str =
+            Box::leak(format!("steer-orphan-crun-{}", uuid::Uuid::new_v4().simple()).into_boxed_str());
+
+        let _p_guard = HeadlessProbe { thread_id: parent_id, run_id: "steer-orphan-unused" };
+        let _c_guard = HeadlessProbe { thread_id: child_id, run_id: child_run_id };
+
+        {
+            let mut items = threads().lock().unwrap();
+            items.push(json!({
+                "id": parent_id,
+                "title": "Orphan Parent",
+                "provider": "antigravity",
+                "status": "running",
+                "items": [
+                    {
+                        "id": "call-sub-orphan",
+                        "kind": "tool",
+                        "toolKind": "subagent",
+                        "toolName": "kite_subagent_run",
+                        "status": "running",
+                        "streaming": true,
+                        "text": "",
+                        "subagentMeta": {
+                            "subagentId": "sub-orphan-1",
+                            "role": "Executor",
+                            "childThreadId": child_id,
+                            "status": "running"
+                        }
+                    }
+                ],
+                "subagentRuns": [
+                    {
+                        "subagentId": "sub-orphan-1",
+                        "parentThreadId": parent_id,
+                        "parentToolCallId": "call-sub-orphan",
+                        "role": "Executor",
+                        "status": "running",
+                        "childThreadId": child_id,
+                        "stepCount": 1,
+                        "items": [],
+                        "startedAtUnixMs": 1000,
+                        "updatedAtUnixMs": 1000
+                    }
+                ]
+            }));
+            items.push(json!({
+                "id": child_id,
+                "parentThreadId": parent_id,
+                "startedByAgent": true,
+                "provider": "grok",
+                "status": "running",
+                "items": []
+            }));
+        }
+        {
+            let mut live = live_turns().lock().unwrap();
+            live.runs.insert(
+                child_run_id.to_string(),
+                TurnRun {
+                    revision: "rev".into(),
+                    events: Vec::new(),
+                    next_sequence: 0,
+                    assistant_id: "ca".into(),
+                    assistant_text: String::new(),
+                    child: None,
+                    stdin: None,
+                    closing: false,
+                    finished: false,
+                    started_at_ms: now_ms(),
+                    finished_at_ms: None,
+                    routine_id: None,
+                    delivered_through: 0,
+                    file_baselines: std::collections::HashMap::new(),
+                },
+            );
+            live.by_thread.insert(child_id.to_string(), child_run_id.to_string());
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(crate::chat_commands::cancel_agent_chat_turn(Some(json!({
+            "threadId": parent_id,
+            "preserveChildren": true
+        }))));
+
+        assert!(is_turn_running(child_id), "child subagent must stay alive even when parent has no live run");
+        let all = threads().lock().unwrap();
+        let parent = all.iter().find(|t| t["id"] == parent_id).unwrap();
+        assert_eq!(parent["status"], json!("idle"));
+        assert_eq!(parent["subagentRuns"][0]["status"], json!("running"));
+        assert_eq!(parent["items"][0]["status"], json!("running"));
+        assert_eq!(parent["items"][0]["streaming"], json!(true));
+    }
+
+    #[test]
+    fn active_background_subagents_context_appends_running_children_and_dedups_in_assemble_thread_context() {
+        let thread = json!({
+            "id": "parent-ctx-1",
+            "provider": "antigravity",
+            "model": "gemini-4-argon",
+            "items": [
+                { "id": "u1", "kind": "user", "text": "Start audit", "streaming": false },
+                { "id": "a1", "kind": "assistant", "text": "Launched subagent.", "streaming": false },
+                { "id": "u2", "kind": "user", "text": "Also consider edge case B", "streaming": false }
+            ],
+            "subagentRuns": [
+                {
+                    "subagentId": "sub-active",
+                    "parentThreadId": "parent-ctx-1",
+                    "parentToolCallId": "c1",
+                    "role": "Code Researcher",
+                    "provider": "grok",
+                    "model": "grok-fast",
+                    "status": "running",
+                    "childThreadId": "child-active-1"
+                },
+                {
+                    "subagentId": "sub-done",
+                    "parentThreadId": "parent-ctx-1",
+                    "parentToolCallId": "c2",
+                    "role": "Old Runner",
+                    "status": "completed",
+                    "childThreadId": "child-done-1"
+                }
+            ],
+            "swarmState": {
+                "members": [
+                    { "name": "worker-a", "role": "Tester", "state": "working", "childThreadId": "swarm-child-1" },
+                    { "name": "worker-b", "role": "Idle", "state": "waiting", "childThreadId": "swarm-child-2" }
+                ]
+            }
+        });
+
+        let enriched = crate::chat::runtime::turn::append_active_subagents_context(
+            &thread,
+            "Also consider edge case B",
+        );
+        assert!(enriched.starts_with("Also consider edge case B"));
+        assert!(enriched.contains("[Active Background Subagents]"));
+        assert!(enriched.contains("thread:child-active-1"));
+        assert!(enriched.contains("role: Code Researcher"));
+        assert!(enriched.contains("model: grok/grok-fast"));
+        assert!(enriched.contains("thread:swarm-child-1"));
+        assert!(enriched.contains("member: @worker-a"));
+        assert!(!enriched.contains("child-done-1"), "completed subagents must not be listed");
+        assert!(!enriched.contains("swarm-child-2"), "waiting swarm workers must not be listed");
+
+        // assemble_thread_context must deduplicate the trailing user message even with appended context
+        let assembled = assemble_thread_context(&thread, &enriched);
+        let occurrences = assembled.matches("Also consider edge case B").count();
+        assert_eq!(
+            occurrences, 1,
+            "current user message must not be duplicated in assembled history: {assembled}"
+        );
+        assert!(assembled.contains("[Active Background Subagents]"));
+
+        // When no active async subagents remain, prompt stays verbatim
+        let idle_thread = json!({
+            "id": "parent-ctx-2",
+            "subagentRuns": [
+                { "subagentId": "sub-done", "status": "completed", "childThreadId": "child-done-1" }
+            ]
+        });
+        assert_eq!(
+            crate::chat::runtime::turn::append_active_subagents_context(&idle_thread, "Plain message"),
+            "Plain message"
+        );
+    }
+
+    struct AcpWireTestGuard {
+        tid: String,
+        rid: String,
+    }
+
+    impl Drop for AcpWireTestGuard {
+        fn drop(&mut self) {
+            clear_acp_approval_wire(&self.tid);
+            clear_session_auto_approved(&self.tid);
+            {
+                let mut live = live_turns().lock().unwrap();
+                live.runs.remove(&self.rid);
+                live.by_thread.remove(&self.tid);
+            }
+            {
+                let mut items = threads().lock().unwrap();
+                items.retain(|t| t.get("id").and_then(Value::as_str) != Some(self.tid.as_str()));
+            }
+            notifications()
+                .lock()
+                .unwrap()
+                .retain(|n| n.pointer("/target/id").and_then(Value::as_str) != Some(self.tid.as_str()));
+        }
+    }
+
+    #[test]
+    fn acp_accept_edits_prompts_for_run_command_and_session_allow_persists_until_cleared() {
+        let uid = uuid::Uuid::new_v4().simple().to_string();
+        let tid = format!("acp-wire-t-{uid}");
+        let rid = format!("acp-wire-r-{uid}");
+        let _guard = AcpWireTestGuard {
+            tid: tid.clone(),
+            rid: rid.clone(),
+        };
+
+        threads().lock().unwrap().push(json!({
+            "id": tid,
+            "status": "running",
+            "title": "ACP Permission Test",
+            "provider": "antigravity",
+            "mode": "acceptEdits",
+            "items": []
+        }));
+        {
+            let mut live = live_turns().lock().unwrap();
+            live.runs.insert(
+                rid.clone(),
+                TurnRun {
+                    revision: "rev-acp".into(),
+                    events: Vec::new(),
+                    next_sequence: 0,
+                    assistant_id: "asst-acp".into(),
+                    assistant_text: String::new(),
+                    child: None,
+                    stdin: None,
+                    closing: false,
+                    finished: false,
+                    started_at_ms: now_ms(),
+                    finished_at_ms: None,
+                    routine_id: None,
+                    delivered_through: 0,
+                    file_baselines: std::collections::HashMap::new(),
+                },
+            );
+            live.by_thread.insert(tid.clone(), rid.clone());
+        }
+
+        let handled = apply_known_turn_pipeline(
+            &tid,
+            &rid,
+            "asst-acp",
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "s-1",
+                    "toolCall": {
+                        "toolCallId": "call_1",
+                        "name": "run_command",
+                        "kind": "execute",
+                        "title": "git status",
+                        "rawInput": { "CommandLine": "git status" }
+                    },
+                    "options": [
+                        { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                        { "optionId": "deny", "name": "Deny", "kind": "reject_once" }
+                    ]
+                },
+                "id": "1"
+            }),
+        );
+        assert!(handled);
+
+        let stored = threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+            .cloned()
+            .unwrap();
+        assert_eq!(stored["status"], json!("waiting"));
+        assert_eq!(stored["pendingApproval"]["id"], json!("1"));
+        assert_eq!(stored["pendingApproval"]["toolName"], json!("run_command"));
+        assert_eq!(stored["pendingApproval"]["command"], json!("git status"));
+
+        let notif_exists = notifications()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|n| n.get("id").and_then(Value::as_str) == Some("1")
+                && n.pointer("/target/id").and_then(Value::as_str) == Some(tid.as_str()));
+        assert!(notif_exists, "needsInput notification must be emitted for ACP command approval");
+
+        write_approval_to_run(&tid, "1", "allowForSession");
+
+        let after_reply = threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+            .cloned()
+            .unwrap();
+        assert!(after_reply["pendingApproval"].is_null());
+        assert_eq!(after_reply["status"], json!("running"));
+
+        // Next command permission in same session should auto-approve instead of re-opening modal
+        let handled_second = apply_known_turn_pipeline(
+            &tid,
+            &rid,
+            "asst-acp",
+            &json!({
+                "jsonrpc": "2.0",
+                "method": "session/request_permission",
+                "params": {
+                    "sessionId": "s-1",
+                    "toolCall": {
+                        "toolCallId": "call_2",
+                        "name": "run_command",
+                        "rawInput": { "CommandLine": "cargo test" }
+                    },
+                    "options": [{ "optionId": "allow", "kind": "allow_once" }]
+                },
+                "id": "2"
+            }),
+        );
+        assert!(handled_second);
+        let after_second = threads()
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(tid.as_str()))
+            .cloned()
+            .unwrap();
+        assert!(after_second["pendingApproval"].is_null());
+    }
+
+    #[test]
+    fn multiplexed_caller_correlation_isolates_concurrent_sibling_threads() {
+        crate::chat::runtime::clear_in_flight_dispatch_calls_for_test();
+        let tid_a = format!("mux-thread-a-{}", uuid::Uuid::new_v4().simple());
+        let tid_b = format!("mux-thread-b-{}", uuid::Uuid::new_v4().simple());
+
+        crate::chat::runtime::register_in_flight_dispatch_call(
+            crate::chat::runtime::InFlightDispatchCall {
+                thread_id: tid_a.clone(),
+                tool_call_id: "call_a_1".into(),
+                tool_name: "kite_subagent_run".into(),
+                role: Some("Frontend Auditor".into()),
+                prompt: Some("Audit CSS tokens in src/".into()),
+                tasks: Vec::new(),
+                command: None,
+                swarm_action: None,
+                swarm_member: None,
+                swarm_title: None,
+                created_at_ms: crate::chat::utils::now_ms(),
+                claimed: false,
+            },
+        );
+        crate::chat::runtime::register_in_flight_dispatch_call(
+            crate::chat::runtime::InFlightDispatchCall {
+                thread_id: tid_b.clone(),
+                tool_call_id: "call_b_1".into(),
+                tool_name: "kite_subagent_run".into(),
+                role: Some("Backend Verifier".into()),
+                prompt: Some("Verify ACP daemon pool isolation".into()),
+                tasks: Vec::new(),
+                command: None,
+                swarm_action: None,
+                swarm_member: None,
+                swarm_title: None,
+                created_at_ms: crate::chat::utils::now_ms(),
+                claimed: false,
+            },
+        );
+
+        let mux_req = json!({
+            "from": "",
+            "threadMode": true,
+            "multiplexedDaemon": true
+        });
+        let argv_b: Vec<String> = vec![
+            "kite",
+            "dispatch",
+            "run",
+            "--via",
+            "thread",
+            "--role",
+            "Backend Verifier",
+            "Verify ACP daemon pool isolation",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let resolved_b =
+            crate::dispatch_wire::server::resolve_multiplexed_caller_thread(&mux_req, &argv_b);
+        assert_eq!(resolved_b.as_deref(), Some(tid_b.as_str()));
+
+        let argv_a: Vec<String> = vec![
+            "kite",
+            "dispatch",
+            "run",
+            "--via",
+            "thread",
+            "--role",
+            "Frontend Auditor",
+            "Audit CSS tokens in src/",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let resolved_a =
+            crate::dispatch_wire::server::resolve_multiplexed_caller_thread(&mux_req, &argv_a);
+        assert_eq!(resolved_a.as_deref(), Some(tid_a.as_str()));
+
+        // Ambiguous ties across two threads must return None instead of leaking across threads.
+        crate::chat::runtime::clear_in_flight_dispatch_calls_for_test();
+        for tid in [&tid_a, &tid_b] {
+            crate::chat::runtime::register_in_flight_dispatch_call(
+                crate::chat::runtime::InFlightDispatchCall {
+                    thread_id: tid.clone(),
+                    tool_call_id: format!("call_tie_{tid}"),
+                    tool_name: "kite_subagent_run".into(),
+                    role: Some("Worker".into()),
+                    prompt: Some("Identical prompt".into()),
+                    tasks: Vec::new(),
+                    command: None,
+                    swarm_action: None,
+                    swarm_member: None,
+                    swarm_title: None,
+                    created_at_ms: crate::chat::utils::now_ms(),
+                    claimed: false,
+                },
+            );
+        }
+        let argv_tie: Vec<String> = vec![
+            "kite",
+            "dispatch",
+            "run",
+            "--via",
+            "thread",
+            "--role",
+            "Worker",
+            "Identical prompt",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            crate::dispatch_wire::server::resolve_multiplexed_caller_thread(&mux_req, &argv_tie),
+            None
+        );
+        crate::chat::runtime::clear_in_flight_dispatch_calls_for_test();
+    }
+
+    #[test]
+    fn wait_timeout_receipt_heals_persisted_false_failed_subagent_state() {
+        let mut thread =
+            crate::chat::threads::blank_thread("heal-timeout-1", None, "Parent", "antigravity", None);
+        let timeout_json = json!({
+            "schemaVersion": 1,
+            "id": "cli",
+            "op": "wait",
+            "status": "failed",
+            "address": "thread:child-healed-1",
+            "submitted": false,
+            "error": "timeout"
+        })
+        .to_string();
+        thread["items"] = json!([{
+            "id": "call_timeout_1",
+            "kind": "tool",
+            "toolKind": "subagent",
+            "toolName": "kite_subagent_run",
+            "title": "Subagent · Auditor",
+            "status": "failed",
+            "streaming": false,
+            "text": timeout_json,
+            "subagentMeta": {
+                "subagentId": "child-healed-1",
+                "childThreadId": "child-healed-1",
+                "role": "Auditor",
+                "status": "failed",
+                "latestActivity": timeout_json,
+                "stepCount": 6
+            }
+        }]);
+        thread["subagentRuns"] = json!([{
+            "subagentId": "child-healed-1",
+            "parentThreadId": "heal-timeout-1",
+            "parentToolCallId": "call_timeout_1",
+            "childThreadId": "child-healed-1",
+            "role": "Auditor",
+            "status": "failed",
+            "latestActivity": timeout_json,
+            "stepCount": 6,
+            "items": [{
+                "id": "asst-1",
+                "kind": "assistant",
+                "text": "Audit complete with zero blockers."
+            }]
+        }]);
+
+        crate::chat::subagents::reconcile_duplicate_subagent_state(&mut thread);
+
+        assert_eq!(thread["subagentRuns"][0]["status"], json!("completed"));
+        assert!(
+            thread["subagentRuns"][0].get("latestActivity").is_none(),
+            "bogus wait-timeout latestActivity must be cleared"
+        );
+        assert_eq!(thread["items"][0]["status"], json!("completed"));
+        assert_eq!(thread["items"][0]["subagentMeta"]["status"], json!("completed"));
     }

@@ -9,6 +9,8 @@ pub mod cli_wire;
 pub mod envelope;
 pub mod files;
 pub mod keys;
+pub mod mcp_hub;
+pub mod mcp_http;
 pub mod osc;
 pub mod policy;
 pub mod port;

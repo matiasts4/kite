@@ -44,6 +44,21 @@ pub(crate) fn is_invoke_subagent_tool_name(name: &str) -> bool {
 pub(super) fn resolve_item_clean_tool_name(item: &Value) -> (Option<String>, String) {
     let raw_name = item.get("toolName").and_then(Value::as_str).unwrap_or("");
     let (mut server_name, mut clean) = crate::acp::strip_mcp_prefix(raw_name, item);
+    if clean.trim().is_empty() {
+        if let Some(derived) = item
+            .get("title")
+            .and_then(Value::as_str)
+            .and_then(crate::chat::normalize::normalize_acp_tool_name)
+        {
+            let (t_srv, t_clean) = crate::acp::strip_mcp_prefix(&derived, item);
+            if server_name.is_none() {
+                server_name = t_srv;
+            }
+            if !t_clean.trim().is_empty() {
+                clean = t_clean;
+            }
+        }
+    }
     if server_name.is_none() {
         server_name = item
             .get("serverName")
@@ -427,11 +442,35 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
     let item_status = tool_item
         .get("status")
         .and_then(Value::as_str)
-        .unwrap_or(meta.status.as_str());
+        .unwrap_or(meta.status.as_str())
+        .to_string();
     let item_text = tool_item.get("text").and_then(Value::as_str);
+    let is_wait_timeout = crate::acp::is_wait_timeout_receipt(item_text);
+    if is_wait_timeout {
+        if meta.child_thread_id.is_none() {
+            if let Some(cid) = item_text.and_then(super::dedup::extract_started_thread_id_from_text)
+            {
+                meta.child_thread_id = Some(cid.clone());
+                if meta.subagent_id.is_empty() || meta.subagent_id == item_id_raw {
+                    meta.subagent_id = cid;
+                }
+            }
+        }
+        if meta.status == "failed" {
+            meta.status = "running".to_string();
+        }
+        if meta
+            .latest_activity
+            .as_deref()
+            .is_some_and(|la| crate::acp::is_wait_timeout_receipt(Some(la)))
+        {
+            meta.latest_activity = None;
+        }
+    }
     let mut is_failed = false;
     if meta.status != "killed"
-        && crate::acp::response_indicates_failure(item_status, Some(tool_item), None, item_text)
+        && !is_wait_timeout
+        && crate::acp::response_indicates_failure(&item_status, Some(tool_item), None, item_text)
     {
         meta.status = "failed".to_string();
         is_failed = true;
@@ -538,42 +577,87 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let runs = thread["subagentRuns"].as_array_mut().unwrap();
-            let pos = runs.iter().position(|r| {
-                let r_cid = r.get("childThreadId").and_then(Value::as_str);
-                let r_call = r
-                    .get("parentToolCallId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let r_is_terminal = matches!(
-                    r.get("status").and_then(Value::as_str),
-                    Some("completed" | "failed" | "killed")
-                );
-                let role_or_prompt_matches = (meta.prompt.as_deref().is_some_and(|p| {
-                    !p.trim().is_empty()
-                        && r.get("prompt").and_then(Value::as_str).map(str::trim) == Some(p.trim())
-                })) || (!meta.role.is_empty()
-                    && r.get("role").and_then(Value::as_str) == Some(meta.role.as_str()));
+            let incoming_cid = meta
+                .child_thread_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let pos = runs
+                .iter()
+                .position(|r| {
+                    let r_cid = r
+                        .get("childThreadId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let r_sid = r
+                        .get("subagentId")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    (incoming_cid.is_some() && (r_cid == incoming_cid || r_sid == incoming_cid))
+                        || (!meta.subagent_id.is_empty()
+                            && meta.subagent_id != tool_call_id
+                            && (r_sid == Some(meta.subagent_id.as_str())
+                                || r_cid == Some(meta.subagent_id.as_str())))
+                })
+                .or_else(|| {
+                    runs.iter().position(|r| {
+                        let r_cid = r
+                            .get("childThreadId")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        if let (Some(rc), Some(ic)) = (r_cid, incoming_cid) {
+                            if rc != ic {
+                                return false;
+                            }
+                        }
+                        if r_cid.is_some()
+                            && incoming_cid.is_none()
+                            && !meta.subagent_id.is_empty()
+                            && meta.subagent_id != tool_call_id
+                            && r_cid != Some(meta.subagent_id.as_str())
+                        {
+                            return false;
+                        }
+                        let r_call = r
+                            .get("parentToolCallId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let r_is_terminal = matches!(
+                            r.get("status").and_then(Value::as_str),
+                            Some("completed" | "failed" | "killed")
+                        );
+                        let role_or_prompt_matches = (meta.prompt.as_deref().is_some_and(|p| {
+                            !p.trim().is_empty()
+                                && r.get("prompt").and_then(Value::as_str).map(str::trim)
+                                    == Some(p.trim())
+                        })) || (!meta.role.is_empty()
+                            && r.get("role").and_then(Value::as_str) == Some(meta.role.as_str()));
 
-                r.get("subagentId").and_then(Value::as_str) == Some(meta.subagent_id.as_str())
-                    || r_call == tool_call_id.as_str()
-                    || (meta.child_thread_id.is_some()
-                        && r_cid == meta.child_thread_id.as_deref())
-                    || (!r_is_terminal
-                        && r_cid.is_none()
-                        && meta.child_thread_id.is_some()
-                        && role_or_prompt_matches
-                        && (tool_call_id.starts_with("dispatch-subagent-")
-                            || r_call.is_empty()
-                            || r_call.starts_with("dispatch-subagent-")
-                            || r_call == tool_call_id.as_str()))
-                    || (!r_is_terminal
-                        && r_cid.is_some()
-                        && meta.child_thread_id.is_none()
-                        && role_or_prompt_matches
-                        && (r_call.is_empty()
-                            || r_call.starts_with("dispatch-subagent-")
-                            || r_call == tool_call_id.as_str()))
-            });
+                        r.get("subagentId").and_then(Value::as_str) == Some(meta.subagent_id.as_str())
+                            || (r_call == tool_call_id.as_str()
+                                && (r_cid.is_none()
+                                    || incoming_cid.is_none()
+                                    || r_cid == incoming_cid))
+                            || (!r_is_terminal
+                                && r_cid.is_none()
+                                && meta.child_thread_id.is_some()
+                                && role_or_prompt_matches
+                                && (tool_call_id.starts_with("dispatch-subagent-")
+                                    || r_call.is_empty()
+                                    || r_call.starts_with("dispatch-subagent-")
+                                    || r_call == tool_call_id.as_str()))
+                            || (!r_is_terminal
+                                && r_cid.is_some()
+                                && meta.child_thread_id.is_none()
+                                && role_or_prompt_matches
+                                && (r_call.is_empty()
+                                    || r_call.starts_with("dispatch-subagent-")
+                                    || r_call == tool_call_id.as_str()))
+                    })
+                });
             let is_terminal = matches!(meta.status.as_str(), "completed" | "failed" | "killed");
             let mut synced_model: Option<String> = None;
             let mut synced_subagent_id = meta.subagent_id.clone();
@@ -675,7 +759,9 @@ pub fn record_subagent_tool_call(thread_id: &str, tool_item: &Value) {
                     run["childThreadId"] = json!(ctid);
                 }
                 if let Some(ref latest) = merged.latest_activity {
-                    run["latestActivity"] = json!(latest);
+                    if !crate::acp::is_wait_timeout_receipt(Some(latest)) {
+                        run["latestActivity"] = json!(latest);
+                    }
                 }
                 let existing_steps = run.get("stepCount").and_then(Value::as_u64).unwrap_or(0) as usize;
                 run["stepCount"] = json!(existing_steps.max(merged.step_count));

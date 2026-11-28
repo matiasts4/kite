@@ -3,8 +3,9 @@
 //! Each active UI sidecar gets its own ephemeral `127.0.0.1:<proxy_port>`
 //! listener so root-relative assets and WebSocket endpoints (`/api/*`,
 //! `/mirror/ws`) work natively at `/`. Requests are authenticated using a
-//! per-sidecar 256-bit token (`?__kite_token=<token>` -> `HttpOnly` cookie
-//! + `302`), upstream `Host`/`Origin`/`Referer` headers are rewritten to
+//! per-sidecar 256-bit token (`?__kite_token=<token>` -> `HttpOnly;
+//! SameSite=None; Secure; Partitioned` cookie + `302` for cross-site WebView2
+//! iframes), upstream `Host`/`Origin`/`Referer` headers are rewritten to
 //! `127.0.0.1:<upstream_port>`, framing restrictions (`X-Frame-Options`,
 //! CSP `frame-ancestors`) are stripped, and WebSocket `101` upgrades are
 //! tunneled bidirectionally.
@@ -24,7 +25,7 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const BODY_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const UPSTREAM_HEAD_TIMEOUT: Duration = Duration::from_secs(30);
-const PROXY_TOKIO_WORKERS: usize = 4;
+const PROXY_TOKIO_WORKERS: usize = 2;
 const PROXY_TOKIO_MAX_BLOCKING: usize = 16;
 
 const AUTH_COOKIE_NAME: &str = "kite_sidecar_auth";
@@ -892,7 +893,15 @@ async fn write_302_auth_redirect(
     location: &str,
     token: &str,
 ) {
-    let cookie = format!("{AUTH_COOKIE_NAME}={token}; HttpOnly; SameSite=Lax; Path=/");
+    // Production Tauri WebView2 serves the host UI on `http://tauri.localhost` while
+    // sidecar frames load `http://127.0.0.1:<proxy_port>` (cross-site). Chromium
+    // strips `SameSite=Lax` cookies on cross-site iframe navigations, whereas
+    // `SameSite=None; Secure; Partitioned` is accepted on loopback (`127.0.0.1` is
+    // a W3C potentially trustworthy origin) and keeps the cookie isolated to Kite's
+    // top-level site even when third-party cookies are restricted.
+    let cookie = format!(
+        "{AUTH_COOKIE_NAME}={token}; HttpOnly; SameSite=None; Secure; Partitioned; Path=/"
+    );
     let head = format!(
         "HTTP/1.1 302 Found\r\nLocation: {location}\r\nSet-Cookie: {cookie}\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
@@ -1496,7 +1505,7 @@ mod tests {
         );
         assert!(
             head_302.contains(&format!(
-                "Set-Cookie: kite_sidecar_auth={}; HttpOnly; SameSite=Lax; Path=/",
+                "Set-Cookie: kite_sidecar_auth={}; HttpOnly; SameSite=None; Secure; Partitioned; Path=/",
                 ep.token
             )),
             "Set-Cookie header mismatch: {head_302}"

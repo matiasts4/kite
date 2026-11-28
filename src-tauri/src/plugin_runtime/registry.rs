@@ -1498,13 +1498,13 @@ mod tests {
 
         let defaults = load_runtime_settings_at(&app_dir);
         assert!(defaults.enable_shared_system_roots);
-        assert!(defaults.auto_start_ui_sidecars);
+        assert!(!defaults.auto_start_ui_sidecars);
         assert!(defaults.extra_plugin_dirs.is_empty());
 
         let custom = PluginRuntimeSettings {
             enable_shared_system_roots: false,
             extra_plugin_dirs: vec![temp.join("extra").to_string_lossy().into_owned()],
-            auto_start_ui_sidecars: false,
+            auto_start_ui_sidecars: true,
         };
         save_runtime_settings_at(&app_dir, &custom).unwrap();
         assert_eq!(load_runtime_settings_at(&app_dir), custom);

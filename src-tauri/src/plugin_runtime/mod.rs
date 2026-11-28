@@ -1,10 +1,16 @@
 //! Core runtime orchestration for extensible plugins, sidecars, and loopback proxies.
 
+pub mod catalog;
 pub mod cli;
 pub mod commands;
+pub mod context;
+pub mod hooks;
 pub mod manifest;
+pub mod mcp_apps;
+pub mod mcp_bridge;
 pub mod proxy;
 pub mod registry;
+pub mod scheduler;
 pub mod sidecar;
 pub mod types;
 
@@ -13,15 +19,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::logger::log_trace;
-use crate::plugin_runtime::proxy::{global_sidecar_proxy_pool, ProxyEndpoint};
+use crate::plugin_runtime::proxy::{
+    global_sidecar_proxy_pool, ProxyEndpoint, SidecarProxyPool, UpstreamPortLookup,
+};
 use crate::plugin_runtime::registry::{
     discover_plugins, install_from_archive, install_from_folder, install_from_git,
     load_runtime_settings, save_runtime_settings, set_plugin_enabled, uninstall_plugin,
 };
-use crate::plugin_runtime::sidecar::global_sidecar_supervisor;
+use crate::plugin_runtime::sidecar::{global_sidecar_supervisor, SidecarSupervisor};
 use crate::plugin_runtime::types::{
     DiscoveredPlugin, PluginMcpSummaryDto, PluginMcpTransport, PluginRecordDto,
-    PluginRuntimeSettings, PluginSkillSummaryDto, SidecarSpec, SidecarStatusSnapshot,
+    PluginRuntimeSettings, PluginSkillSummaryDto, SidecarSpec, SidecarStateKind,
+    SidecarStatusSnapshot,
 };
 
 static ACTIVE_PLUGINS: OnceLock<Mutex<Vec<DiscoveredPlugin>>> = OnceLock::new();
@@ -55,21 +64,73 @@ pub fn cached_discovered_plugins() -> Vec<DiscoveredPlugin> {
         .unwrap_or_default()
 }
 
-fn ensure_proxy_for_sidecar(spec: &SidecarSpec, view_path: Option<&str>) -> Option<ProxyEndpoint> {
+fn global_upstream_port_lookup(namespaced_id: &str) -> UpstreamPortLookup {
+    let key = namespaced_id.to_string();
+    Arc::new(move || global_sidecar_supervisor().upstream_port(&key))
+}
+
+fn ensure_proxy_for_sidecar_on(
+    spec: &SidecarSpec,
+    pool: &SidecarProxyPool,
+    lookup: UpstreamPortLookup,
+) -> Option<ProxyEndpoint> {
     if !spec.has_web_ui || spec.builtin.is_some() {
         return None;
     }
-    let key = spec.namespaced_id.clone();
-    let pool = global_sidecar_proxy_pool();
-    pool.ensure_proxy(
-        &spec.namespaced_id,
-        Arc::new(move || global_sidecar_supervisor().upstream_port(&key)),
+    pool.ensure_proxy(&spec.namespaced_id, lookup).ok()
+}
+
+fn ensure_proxy_for_sidecar(spec: &SidecarSpec, view_path: Option<&str>) -> Option<ProxyEndpoint> {
+    let _ = view_path;
+    ensure_proxy_for_sidecar_on(
+        spec,
+        global_sidecar_proxy_pool(),
+        global_upstream_port_lookup(&spec.namespaced_id),
     )
-    .ok()
-    .map(|ep| {
-        let _ = view_path;
-        ep
-    })
+}
+
+fn reconcile_proxies_with_lookup<F>(
+    plugins: &[DiscoveredPlugin],
+    supervisor: &SidecarSupervisor,
+    pool: &SidecarProxyPool,
+    make_lookup: F,
+) where
+    F: Fn(&str) -> UpstreamPortLookup,
+{
+    let mut keep_ui_ids = HashSet::new();
+    for plugin in plugins {
+        if !plugin.enabled {
+            continue;
+        }
+        for spec in &plugin.sidecars {
+            if !spec.has_web_ui || spec.builtin.is_some() {
+                continue;
+            }
+            let current_state = supervisor
+                .snapshot(&spec.namespaced_id)
+                .map(|snap| snap.state);
+            match current_state {
+                Some(
+                    SidecarStateKind::Starting
+                    | SidecarStateKind::Running
+                    | SidecarStateKind::Unhealthy,
+                ) => {
+                    keep_ui_ids.insert(spec.namespaced_id.clone());
+                    let _ =
+                        ensure_proxy_for_sidecar_on(spec, pool, make_lookup(&spec.namespaced_id));
+                }
+                Some(SidecarStateKind::Crashed | SidecarStateKind::Stopping)
+                    if pool.get_endpoint(&spec.namespaced_id).is_some() =>
+                {
+                    keep_ui_ids.insert(spec.namespaced_id.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Remove proxies for disabled, uninstalled, or stopped sidecars.
+    pool.retain_proxies(&keep_ui_ids);
 }
 
 fn enrich_snapshot(
@@ -111,22 +172,14 @@ pub fn sync_runtime_with_workspace(workspace_dir: Option<&Path>) -> Vec<Discover
 
     let supervisor = global_sidecar_supervisor();
     supervisor.sync_plugins(&plugins, settings.auto_start_ui_sidecars);
+    crate::plugin_runtime::mcp_bridge::sync_plugin_mcp_hub(&plugins);
 
-    let mut active_ui_ids = HashSet::new();
-    for plugin in &plugins {
-        if !plugin.enabled {
-            continue;
-        }
-        for spec in &plugin.sidecars {
-            if spec.has_web_ui && spec.builtin.is_none() {
-                active_ui_ids.insert(spec.namespaced_id.clone());
-                let _ = ensure_proxy_for_sidecar(spec, None);
-            }
-        }
-    }
-
-    // Remove proxies for disabled or uninstalled sidecars.
-    global_sidecar_proxy_pool().retain_proxies(&active_ui_ids);
+    reconcile_proxies_with_lookup(
+        &plugins,
+        supervisor,
+        global_sidecar_proxy_pool(),
+        global_upstream_port_lookup,
+    );
 
     plugins
 }
@@ -392,7 +445,13 @@ pub fn sidecar_action(
     let snap = match action.trim().to_ascii_lowercase().as_str() {
         "start" => {
             let _ = ensure_proxy_for_sidecar(&spec, view_path);
-            supervisor.start_sidecar(&spec.namespaced_id)?
+            match supervisor.start_sidecar(&spec.namespaced_id) {
+                Ok(s) => s,
+                Err(err) => {
+                    pool.remove_proxy(&spec.namespaced_id);
+                    return Err(err);
+                }
+            }
         }
         "stop" => {
             let s = supervisor.stop_sidecar(&spec.namespaced_id)?;
@@ -401,7 +460,13 @@ pub fn sidecar_action(
         }
         "restart" => {
             let _ = ensure_proxy_for_sidecar(&spec, view_path);
-            supervisor.restart_sidecar(&spec.namespaced_id)?
+            match supervisor.restart_sidecar(&spec.namespaced_id) {
+                Ok(s) => s,
+                Err(err) => {
+                    pool.remove_proxy(&spec.namespaced_id);
+                    return Err(err);
+                }
+            }
         }
         "open" => {
             let _ = ensure_proxy_for_sidecar(&spec, view_path);
@@ -416,7 +481,13 @@ pub fn sidecar_action(
                 {
                     s
                 }
-                _ => supervisor.start_sidecar(&spec.namespaced_id)?,
+                _ => match supervisor.start_sidecar(&spec.namespaced_id) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        pool.remove_proxy(&spec.namespaced_id);
+                        return Err(err);
+                    }
+                },
             }
         }
         other => {
@@ -448,7 +519,6 @@ pub fn list_ui_sidecars(workspace_dir: Option<&Path>) -> Vec<SidecarStatusSnapsh
         }
         for spec in &plugin.sidecars {
             if spec.has_web_ui && spec.builtin.is_none() {
-                let _ = ensure_proxy_for_sidecar(spec, None);
                 let snap = supervisor
                     .snapshot(&spec.namespaced_id)
                     .unwrap_or_else(|| fallback_snapshot(spec));
@@ -467,7 +537,7 @@ pub fn sidecar_logs(namespaced_id: &str, tail_lines: usize) -> Vec<String> {
     global_sidecar_supervisor().read_logs(&target, tail)
 }
 
-/// Initializes plugin discovery and auto-started UI sidecars in a background thread.
+/// Initializes plugin discovery and any configured auto-started UI sidecars in a background thread.
 pub fn init_plugin_runtime_background() {
     let _ = std::thread::Builder::new()
         .name("kite-plugin-runtime-init".to_string())
@@ -482,6 +552,7 @@ pub fn init_plugin_runtime_background() {
 
 /// Shuts down all managed sidecars and loopback reverse proxies cleanly.
 pub fn shutdown_plugin_runtime() {
+    crate::plugin_runtime::mcp_bridge::sync_plugin_mcp_hub(&[]);
     global_sidecar_supervisor().shutdown_all();
     global_sidecar_proxy_pool().shutdown_all();
 }
@@ -593,7 +664,13 @@ setInterval(() => {}, 1000);
         let mut resp1 = String::new();
         conn.read_to_string(&mut resp1).unwrap();
         assert!(resp1.starts_with("HTTP/1.1 302"), "got: {resp1}");
-        assert!(resp1.contains("kite_sidecar_auth="));
+        assert!(
+            resp1.contains(&format!(
+                "Set-Cookie: kite_sidecar_auth={}; HttpOnly; SameSite=None; Secure; Partitioned; Path=/",
+                ep.token
+            )),
+            "expected cross-site iframe auth cookie in: {resp1}"
+        );
 
         // 2) Authenticated request with cookie gets 200 OK with X-Frame-Options stripped and Origin rewritten.
         let mut conn2 = TcpStream::connect(("127.0.0.1", ep.port)).unwrap();
@@ -683,6 +760,105 @@ setInterval(() => {}, 1000);
 
         supervisor.shutdown_all();
         pool.shutdown_all();
+    }
+
+    #[test]
+    fn default_settings_do_not_auto_start_ui_sidecars() {
+        let defaults = PluginRuntimeSettings::default();
+        assert!(defaults.enable_shared_system_roots);
+        assert!(!defaults.auto_start_ui_sidecars);
+
+        let parsed: PluginRuntimeSettings =
+            serde_json::from_str("{}").expect("empty JSON deserializes with defaults");
+        assert!(parsed.enable_shared_system_roots);
+        assert!(!parsed.auto_start_ui_sidecars);
+    }
+
+    #[test]
+    fn stopped_ui_sidecars_do_not_bind_loopback_proxies_until_started() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "kite-plugin-lazy-proxy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let plugin_dir = temp_root.join("plugins").join("echo-plugin");
+        let sidecar_dir = plugin_dir.join("sidecars").join("echo-ui");
+        fs_create_dir_all(&sidecar_dir);
+
+        let server_js = r#"
+import http from 'node:http';
+const port = Number(process.env.KITE_SIDECAR_WEB_PORT || 0);
+const server = http.createServer((_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end('{"ok":true}');
+});
+server.listen(port, '127.0.0.1');
+setInterval(() => {}, 1000);
+"#;
+        std::fs::write(sidecar_dir.join("server.mjs"), server_js).unwrap();
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"name":"echo-plugin","description":"Lazy UI plugin"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sidecar_dir.join("sidecar.json"),
+            r#"{
+              "command": "node",
+              "args": ["server.mjs"],
+              "restart_policy": "never",
+              "display_name": "Echo UI",
+              "has_web_ui": true,
+              "ui_config": {
+                "display_name": "Echo UI",
+                "views": [{ "title": "Echo UI", "path": "/", "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE" }]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let plugin = crate::plugin_runtime::manifest::parse_plugin_bundle(
+            &plugin_dir,
+            &temp_root.join("plugin_data"),
+            crate::plugin_runtime::types::PluginSourceKind::GlobalKite,
+        )
+        .expect("bundle parses");
+        let plugins = vec![plugin];
+
+        let supervisor = Arc::new(
+            crate::plugin_runtime::sidecar::SidecarSupervisor::with_data_root(
+                temp_root.join("data"),
+            ),
+        );
+        let pool = crate::plugin_runtime::proxy::SidecarProxyPool::new();
+        let make_lookup = |id: &str| {
+            let sup = Arc::clone(&supervisor);
+            let key = id.to_string();
+            Arc::new(move || sup.upstream_port(&key)) as UpstreamPortLookup
+        };
+
+        // When auto_start_ui_sidecars is false, syncing plugins keeps sidecar stopped and binds no proxy.
+        supervisor.sync_plugins(&plugins, false);
+        reconcile_proxies_with_lookup(&plugins, &supervisor, &pool, &make_lookup);
+        assert!(pool.get_endpoint("echo-plugin/echo-ui").is_none());
+
+        // Starting the sidecar and reconciling binds its proxy lazily.
+        supervisor
+            .start_sidecar("echo-plugin/echo-ui")
+            .expect("sidecar starts");
+        reconcile_proxies_with_lookup(&plugins, &supervisor, &pool, &make_lookup);
+        assert!(pool.get_endpoint("echo-plugin/echo-ui").is_some());
+
+        // Stopping the sidecar and reconciling tears down its loopback proxy.
+        supervisor
+            .stop_sidecar("echo-plugin/echo-ui")
+            .expect("sidecar stops");
+        reconcile_proxies_with_lookup(&plugins, &supervisor, &pool, &make_lookup);
+        assert!(pool.get_endpoint("echo-plugin/echo-ui").is_none());
+
+        supervisor.shutdown_all();
+        pool.shutdown_all();
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     fn fs_create_dir_all(path: &Path) {

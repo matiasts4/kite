@@ -158,7 +158,7 @@ pub struct PluginRuntimeSettings {
     pub enable_shared_system_roots: bool,
     #[serde(default)]
     pub extra_plugin_dirs: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub auto_start_ui_sidecars: bool,
 }
 
@@ -167,7 +167,7 @@ impl Default for PluginRuntimeSettings {
         Self {
             enable_shared_system_roots: true,
             extra_plugin_dirs: Vec::new(),
-            auto_start_ui_sidecars: true,
+            auto_start_ui_sidecars: false,
         }
     }
 }

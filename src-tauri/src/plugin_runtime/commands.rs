@@ -1,7 +1,10 @@
 //! Tauri IPC commands for Kite Code's extensible plugin runtime.
 
 use crate::persist::{body, workspace_path};
+use crate::plugin_runtime::catalog::{PluginCatalogFetchResult, PluginCatalogSource};
+use crate::plugin_runtime::mcp_apps::{McpAppEntrypointDto, McpAppResourcePayload};
 use crate::plugin_runtime::registry::load_runtime_settings;
+use crate::plugin_runtime::scheduler::ScheduledSidecarStatusDto;
 use crate::plugin_runtime::types::{
     PluginRecordDto, PluginRuntimeSettings, SidecarStatusSnapshot,
 };
@@ -295,4 +298,128 @@ pub async fn plugin_runtime_list_sidecars(
     })
     .await
     .map_err(|e| format!("plugin_runtime_list_sidecars task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn plugin_mcp_app_list_entrypoints(
+    request: Option<Value>,
+) -> Result<Vec<McpAppEntrypointDto>, String> {
+    let req = body(&request).cloned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ws = resolve_workspace_from_req(req.as_ref());
+        Ok(crate::plugin_runtime::mcp_apps::list_mcp_app_entrypoints(
+            ws.as_deref(),
+        ))
+    })
+    .await
+    .map_err(|e| format!("plugin_mcp_app_list_entrypoints task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn plugin_mcp_app_read_resource(
+    request: Option<Value>,
+) -> Result<McpAppResourcePayload, String> {
+    let req = body(&request)
+        .cloned()
+        .ok_or_else(|| "Missing MCP App resource request payload.".to_string())?;
+    let server_name =
+        required_str_field(&req, &["serverName", "server_name"], "serverName")?.to_string();
+    let uri = required_str_field(&req, &["uri", "resourceUri"], "uri")?.to_string();
+    let ws = resolve_workspace_from_req(Some(&req));
+    crate::plugin_runtime::mcp_apps::read_mcp_app_resource(&server_name, &uri, ws.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn plugin_mcp_app_call_tool(request: Option<Value>) -> Result<Value, String> {
+    let req = body(&request)
+        .cloned()
+        .ok_or_else(|| "Missing MCP App tool call payload.".to_string())?;
+    let instance_id =
+        required_str_field(&req, &["instanceId", "instance_id"], "instanceId")?.to_string();
+    let server_name =
+        required_str_field(&req, &["serverName", "server_name"], "serverName")?.to_string();
+    let tool_name =
+        required_str_field(&req, &["toolName", "tool_name"], "toolName")?.to_string();
+    let arguments = req
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let ws = resolve_workspace_from_req(Some(&req));
+    crate::plugin_runtime::mcp_apps::call_mcp_app_tool(
+        &instance_id,
+        &server_name,
+        &tool_name,
+        arguments,
+        ws.as_deref(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn plugin_catalog_list_sources() -> Result<Vec<PluginCatalogSource>, String> {
+    tauri::async_runtime::spawn_blocking(crate::plugin_runtime::catalog::list_catalog_sources)
+        .await
+        .map_err(|e| format!("plugin_catalog_list_sources task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn plugin_catalog_save_sources(
+    request: Option<Value>,
+) -> Result<Vec<PluginCatalogSource>, String> {
+    let req = body(&request)
+        .cloned()
+        .ok_or_else(|| "Missing catalog sources payload.".to_string())?;
+    let sources_val = req
+        .get("sources")
+        .cloned()
+        .ok_or_else(|| "Missing 'sources' array in catalog payload.".to_string())?;
+    let sources: Vec<PluginCatalogSource> = serde_json::from_value(sources_val)
+        .map_err(|e| format!("Invalid catalog sources payload: {e}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::plugin_runtime::catalog::save_catalog_sources(sources)
+    })
+    .await
+    .map_err(|e| format!("plugin_catalog_save_sources task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn plugin_catalog_fetch(
+    request: Option<Value>,
+) -> Result<PluginCatalogFetchResult, String> {
+    let req = body(&request).cloned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ws = resolve_workspace_from_req(req.as_ref());
+        crate::plugin_runtime::catalog::fetch_catalog(ws.as_deref())
+    })
+    .await
+    .map_err(|e| format!("plugin_catalog_fetch task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn plugin_catalog_install(request: Option<Value>) -> Result<PluginRecordDto, String> {
+    let req = body(&request)
+        .cloned()
+        .ok_or_else(|| "Missing catalog install payload.".to_string())?;
+    let source_id =
+        required_str_field(&req, &["sourceId", "source_id"], "sourceId")?.to_string();
+    let entry_id = required_str_field(&req, &["entryId", "entry_id"], "entryId")?.to_string();
+    let ws = resolve_workspace_from_req(Some(&req));
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::plugin_runtime::catalog::install_catalog_entry(&source_id, &entry_id, ws.as_deref())
+    })
+    .await
+    .map_err(|e| format!("plugin_catalog_install task failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn plugin_scheduled_sidecars_status(
+    request: Option<Value>,
+) -> Result<Vec<ScheduledSidecarStatusDto>, String> {
+    let req = body(&request).cloned();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ws = resolve_workspace_from_req(req.as_ref());
+        Ok(crate::plugin_runtime::scheduler::list_scheduled_sidecars_status(ws.as_deref()))
+    })
+    .await
+    .map_err(|e| format!("plugin_scheduled_sidecars_status task failed: {e}"))?
 }

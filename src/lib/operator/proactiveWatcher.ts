@@ -426,6 +426,13 @@ export function suppressProactiveAnnouncement(sessionId: string): void {
   const id = typeof sessionId === 'string' ? sessionId.trim() : '';
   if (!id) return;
   suppressedSessionIds.add(id);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('kite:suppress-terminal-notification', {
+        detail: { sessionId: id },
+      })
+    );
+  }
 }
 
 /** Clears all watcher state. Test-only. */

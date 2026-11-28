@@ -103,6 +103,7 @@ export interface BrowserSurfaceView {
   schemaVersion: number;
   surfaceId: string;
   descriptorId: string;
+  workspaceId?: string | null;
   revision: number;
   displayUrl: string;
   transportSecurity: 'secure' | 'local' | 'insecure';
@@ -112,6 +113,14 @@ export interface BrowserSurfaceView {
   canGoForward: boolean;
   visible: boolean;
   designMode: boolean;
+  ownerKind?: 'user' | 'agent' | string;
+  ownerThreadId?: string | null;
+  agentActive?: boolean;
+  statusPill?: string | null;
+  pausedForAuth?: boolean;
+  pauseReason?: string | null;
+  takeoverRequested?: boolean;
+  isolated?: boolean;
 }
 
 export interface SubagentMeta {
@@ -292,13 +301,17 @@ export interface NotificationRecord {
   id: string;
   runId?: string;
   target?: {
-    source: 'agentChat' | 'codeThread' | 'codeTerminal' | 'task' | 'accountVault' | string;
+    source: 'agentChat' | 'codeThread' | 'codeTerminal' | 'terminal' | 'task' | 'accountVault' | string;
     id: string;
   };
   profileId?: string | null;
   routineId?: string | null;
+  actorName?: string | null;
+  threadTitle?: string | null;
+  workspaceId?: string | null;
+  module?: 'agent' | 'code' | 'chat' | null;
   kind?: {
-    kind: 'settled' | 'needsInput' | 'autoSwitchConfirm' | string;
+    kind: 'settled' | 'needsInput' | 'autoSwitchConfirm' | 'modelQuotaExhausted' | string;
     outcome?: 'completed' | 'failed' | 'cancelled' | string;
     requestKind?:
       | 'toolApproval'

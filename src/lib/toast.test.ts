@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { toast, registerToastNavigator } from './toast';
+import { toast, registerToastNavigator, APPROVAL_TOAST_DURATION_MS } from './toast';
 import { sileo } from 'sileo';
 import type { NotificationRecord } from '../types';
 
@@ -96,22 +96,34 @@ describe('Kite Toast System (Sileo integration)', () => {
       isWaitingForInput: true,
     };
 
-    toast.agentApproval(record);
+    const toastId = toast.agentApproval(record);
+    expect(toastId).toBe('toast-5');
 
     expect(sileo.action).toHaveBeenCalledWith(
       expect.objectContaining({
-        title: 'Code thread: Approval Required',
+        title: 'Approval needed',
         description: 'Waiting for your approval to proceed.',
-        duration: null,
+        roundness: 12,
+        duration: APPROVAL_TOAST_DURATION_MS,
+        autopilot: expect.objectContaining({
+          expand: 120,
+          collapse: APPROVAL_TOAST_DURATION_MS - 800,
+        }),
+        styles: expect.objectContaining({
+          badge: 'kite-toast-approval__badge',
+          title: 'kite-toast-approval__title',
+          button: 'kite-toast-approval__button',
+        }),
         button: expect.objectContaining({
           title: 'Review',
         }),
       })
     );
 
-    // Call the button onClick
+    // Clicking Review dismisses the toast and navigates to the thread
     const callArgs = (sileo.action as unknown as { mock: { calls: Array<[any]> } }).mock.calls[0][0];
     callArgs.button.onClick();
+    expect(sileo.dismiss).toHaveBeenCalledWith('toast-5');
     expect(onNavigateThread).toHaveBeenCalledWith('thread-42', undefined);
 
     unregister();
@@ -184,5 +196,76 @@ describe('Kite Toast System (Sileo integration)', () => {
         title: 'Copied to clipboard',
       })
     );
+  });
+
+  it('uses characteristic actor names and navigates directly to agentChat threads and terminal sessions', () => {
+    const onNavigateThread = vi.fn();
+    const onNavigateTerminal = vi.fn();
+    const unregister = registerToastNavigator({ onNavigateThread, onNavigateTerminal });
+
+    const agentSettledRecord: NotificationRecord = {
+      id: 'notif-agent-1',
+      runId: 'run-should-not-win',
+      target: {
+        source: 'agentChat',
+        id: 'agent-thread-7',
+      },
+      profileId: 'agent-chip',
+      threadTitle: 'Refactor auth',
+      kind: {
+        kind: 'settled',
+        outcome: 'completed',
+      },
+      createdAtUnixMs: Date.now(),
+      isRead: false,
+    };
+
+    toast.agentSettled(agentSettledRecord, undefined, {
+      agents: [{ id: 'agent-chip', name: 'Chip Worker' }],
+    });
+
+    expect(sileo.success).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Chip Worker finished',
+        description: 'Refactor auth',
+      })
+    );
+
+    const agentCall = (sileo.success as unknown as { mock: { calls: Array<[any]> } }).mock.calls[0][0];
+    agentCall.button.onClick();
+    expect(onNavigateThread).toHaveBeenCalledWith('agent-thread-7', 'agent-chip');
+
+    const terminalApprovalRecord: NotificationRecord = {
+      id: 'notif-term-1',
+      target: {
+        source: 'terminal',
+        id: 'term-sess-9',
+      },
+      workspaceId: 'ws-kite',
+      actorName: 'Orion · Codex',
+      body: 'Approve running vitest?',
+      kind: {
+        kind: 'needsInput',
+        requestKind: 'question',
+      },
+      createdAtUnixMs: Date.now(),
+      isRead: false,
+      isWaitingForInput: true,
+    };
+
+    toast.agentApproval(terminalApprovalRecord);
+
+    expect(sileo.action).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Orion · Codex has a question',
+        description: 'Approve running vitest?',
+      })
+    );
+
+    const termCall = (sileo.action as unknown as { mock: { calls: Array<[any]> } }).mock.calls[0][0];
+    termCall.button.onClick();
+    expect(onNavigateTerminal).toHaveBeenCalledWith('term-sess-9', 'ws-kite');
+
+    unregister();
   });
 });

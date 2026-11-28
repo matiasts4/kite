@@ -6,8 +6,8 @@
 @import 'sileo/styles.css';
 
 :root {
-  --sileo-width: 360px;
-  --sileo-height: 42px;
+  --sileo-width: 350px;
+  --sileo-height: 40px;
   --sileo-duration: 520ms;
 
   /* State colors aligned with active Kite theme tokens */
@@ -30,37 +30,94 @@ html[data-surface-glass='true'] [data-sileo-canvas] {
   opacity: clamp(74%, calc(var(--theme-surface-opacity, 56%) + 26%), 94%);
 }
 
-/* Toast drop-shadow for native desktop depth */
+/* Toast crisp edge ring + drop-shadow for native desktop depth */
 [data-sileo-toast] {
-  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.35)) drop-shadow(0 2px 8px rgba(0, 0, 0, 0.2));
+  filter: drop-shadow(0 0 0.75px var(--vl-stroke-emphasis, rgba(255, 255, 255, 0.16)))
+    drop-shadow(0 10px 26px rgba(0, 0, 0, 0.38))
+    drop-shadow(0 2px 8px rgba(0, 0, 0, 0.22));
   user-select: none;
 }
 
-/* Typography refinement */
+/* Hard-contain header inside Sileo's fixed 350px SVG canvas without clipping initial measurement */
+[data-sileo-header] {
+  max-width: min(var(--_pw, var(--sileo-width)), var(--sileo-width)) !important;
+  box-sizing: border-box;
+}
+
+[data-sileo-header-stack] {
+  width: max-content;
+}
+
+[data-sileo-header-inner] {
+  max-width: calc(var(--sileo-width) - 26px);
+}
+
+/* Typography refinement (override Sileo's text-transform: capitalize) */
 [data-sileo-title] {
   font-size: 0.8125rem;
   letter-spacing: -0.01em;
-  font-weight: 550;
+  font-weight: 600;
+  text-transform: none !important;
+  white-space: nowrap;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(var(--sileo-width) - 64px);
   color: var(--text-primary, rgba(255, 255, 255, 0.95));
 }
 
 [data-sileo-description] {
+  box-sizing: border-box;
   font-size: 0.8125rem;
-  line-height: 1.35;
+  line-height: 1.4;
   letter-spacing: -0.005em;
-  padding: 0.875rem 1rem 1rem 1rem;
-  color: var(--text-secondary, rgba(255, 255, 255, 0.72)) !important;
+  padding: 0.75rem 0.9375rem 0.875rem 0.9375rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.78)) !important;
+}
+
+/* Approval toast amber attention styling aligned with ChatApprovalCard */
+.kite-toast-approval__badge,
+.kite-toast-approval__title,
+.kite-toast-approval__button {
+  --_c: var(--sileo-state-warning);
+}
+
+.kite-toast-approval__badge {
+  color: var(--sileo-state-warning) !important;
+  background-color: color-mix(in srgb, var(--sileo-state-warning) 18%, transparent) !important;
+}
+
+.kite-toast-approval__title {
+  color: var(--text-primary, rgba(255, 255, 255, 0.96)) !important;
+}
+
+.kite-toast-approval__button {
+  color: var(--sileo-state-warning) !important;
+  background-color: color-mix(in srgb, var(--sileo-state-warning) 16%, transparent) !important;
+  border: 1px solid color-mix(in srgb, var(--sileo-state-warning) 28%, transparent) !important;
+}
+
+.kite-toast-approval__button:hover {
+  background-color: color-mix(in srgb, var(--sileo-state-warning) 24%, transparent) !important;
 }
 
 /* Kite Button sizing and radius standards (AGENTS.md) */
+a[data-sileo-button],
 [data-sileo-button] {
   border-radius: var(--control-radius, 8px) !important;
   height: var(--control-row, 28px) !important;
-  padding: 0 12px !important;
+  width: fit-content !important;
+  min-width: 72px;
+  padding: 0 14px !important;
+  margin-top: 10px !important;
   font-size: 0.75rem !important;
   font-weight: 600 !important;
   letter-spacing: -0.01em !important;
-  display: inline-flex;
+  text-decoration: none !important;
+  text-decoration-line: none !important;
+  display: flex !important;
   align-items: center;
   justify-content: center;
   cursor: pointer;

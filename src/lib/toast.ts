@@ -1,12 +1,39 @@
-import type { ReactNode } from 'react';
+import { createElement, type ReactNode } from 'react';
 import { sileo, Toaster as SileoToaster } from 'sileo';
 import type { SileoOptions, SileoPosition, SileoState, SileoButton } from 'sileo';
 import type { NotificationRecord } from '../types';
+import {
+  getNotificationToastContent,
+  resolveNotificationModule,
+  type NotificationDisplayLookups,
+} from './notifications/presentation';
 import './toast.css';
+
+export const APPROVAL_TOAST_DURATION_MS = 12_000;
+const KITE_TOAST_ROUNDNESS = 12;
+
+const APPROVAL_SHIELD_ICON = createElement(
+  'svg',
+  {
+    width: 14,
+    height: 14,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 2,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': 'true',
+  },
+  createElement('path', { d: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z' }),
+  createElement('path', { d: 'M12 8v4' }),
+  createElement('path', { d: 'M12 16h.01' })
+);
 
 export interface ToastNavigationHandlers {
   onNavigateAgent?: (agentId: string) => void;
   onNavigateThread?: (threadId: string, agentId?: string | null) => void;
+  onNavigateTerminal?: (sessionId: string, workspaceId?: string | null) => void;
   onNavigateMode?: (mode: 'agent' | 'code' | 'chat') => void;
 }
 
@@ -70,48 +97,33 @@ function resolveOptions(
     title,
     description,
     fill: resolveToastFill(),
+    roundness: KITE_TOAST_ROUNDNESS,
     duration: 4500,
     ...options,
   };
 }
 
-/**
- * Formats human-readable actor name from NotificationRecord
- */
-function getNotificationActor(rec: NotificationRecord): string {
-  if (rec.routineId) return 'Routine Automation';
-  if (rec.target?.source === 'agentChat') return 'Agent chat';
-  if (rec.target?.source === 'codeThread') return 'Code thread';
-  if (rec.target?.source === 'codeTerminal') return 'Terminal runner';
-  if (rec.target?.source === 'task') return 'Background task';
-  return 'Kite Agent';
-}
+function navigateToNotificationTarget(rec: NotificationRecord): void {
+  const source = rec.target?.source;
+  const targetId = rec.target?.id;
 
-/**
- * Formats detail description for a notification record
- */
-function getNotificationDetail(rec: NotificationRecord): string {
-  const kind = rec.kind;
-  if (!kind) return 'System notice received.';
-
-  if (kind.kind === 'needsInput') {
-    switch (kind.requestKind) {
-      case 'toolApproval':
-        return 'Waiting for your approval to proceed.';
-      case 'question':
-        return 'The agent has a question for you.';
-      default:
-        return 'Waiting for your input.';
+  if (source === 'terminal' || source === 'codeTerminal') {
+    if (activeNavigator?.onNavigateTerminal && targetId) {
+      activeNavigator.onNavigateTerminal(targetId, rec.workspaceId);
+    } else if (activeNavigator?.onNavigateMode) {
+      activeNavigator.onNavigateMode('code');
     }
+    return;
   }
 
-  if (kind.kind === 'settled') {
-    if (kind.outcome === 'failed') return 'Agent execution stopped with errors.';
-    if (kind.outcome === 'cancelled') return 'Operation was cancelled.';
-    return 'Execution completed successfully.';
+  const targetThreadId = targetId || rec.runId;
+  if (activeNavigator?.onNavigateThread && targetThreadId) {
+    activeNavigator.onNavigateThread(targetThreadId, rec.profileId);
+  } else if (source === 'agentChat' && rec.profileId && activeNavigator?.onNavigateAgent) {
+    activeNavigator.onNavigateAgent(rec.profileId);
+  } else if (activeNavigator?.onNavigateMode) {
+    activeNavigator.onNavigateMode(resolveNotificationModule(rec) ?? 'code');
   }
-
-  return 'Agent status updated.';
 }
 
 /**
@@ -231,83 +243,99 @@ export const toast = {
   /**
    * Trigger an ambient notification toast for an agent approval request
    */
-  agentApproval(rec: NotificationRecord, onAction?: () => void): string {
-    const actor = getNotificationActor(rec);
-    const detail = getNotificationDetail(rec);
+  agentApproval(
+    rec: NotificationRecord,
+    onAction?: () => void,
+    lookups?: NotificationDisplayLookups
+  ): string {
+    const content = getNotificationToastContent(rec, lookups);
+    let toastId = '';
 
     const handleNavigate = () => {
+      if (toastId) {
+        sileo.dismiss(toastId);
+      }
       if (onAction) {
         onAction();
         return;
       }
-      const targetThreadId = rec.target?.source === 'codeThread' ? rec.target.id : rec.runId;
-      if (activeNavigator?.onNavigateThread && targetThreadId) {
-        activeNavigator.onNavigateThread(targetThreadId, rec.profileId);
-      } else if (rec.target?.source === 'agentChat' && rec.profileId && activeNavigator?.onNavigateAgent) {
-        activeNavigator.onNavigateAgent(rec.profileId);
-      } else if (activeNavigator?.onNavigateMode) {
-        activeNavigator.onNavigateMode('code');
-      }
+      navigateToNotificationTarget(rec);
     };
 
-    return sileo.action({
-      title: `${actor}: Approval Required`,
-      description: detail,
+    toastId = sileo.action({
+      title: content.title,
+      description: content.description,
       fill: resolveToastFill(),
-      duration: null, // Persistent until attended
+      roundness: KITE_TOAST_ROUNDNESS,
+      duration: APPROVAL_TOAST_DURATION_MS,
+      autopilot: {
+        expand: 120,
+        collapse: APPROVAL_TOAST_DURATION_MS - 800,
+      },
+      icon: APPROVAL_SHIELD_ICON,
+      styles: {
+        badge: 'kite-toast-approval__badge',
+        title: 'kite-toast-approval__title',
+        description: 'kite-toast-approval__desc',
+        button: 'kite-toast-approval__button',
+      },
       button: {
         title: 'Review',
         onClick: handleNavigate,
       },
     });
+    return toastId;
   },
 
   /**
    * Trigger an ambient notification toast for an agent run completion
    */
-  agentSettled(rec: NotificationRecord, onView?: () => void): string {
-    const actor = getNotificationActor(rec);
-    const detail = getNotificationDetail(rec);
-    const isError = rec.kind?.outcome === 'failed';
+  agentSettled(
+    rec: NotificationRecord,
+    onView?: () => void,
+    lookups?: NotificationDisplayLookups
+  ): string {
+    const content = getNotificationToastContent(rec, lookups);
+    let toastId = '';
 
     const handleView = () => {
+      if (toastId) {
+        sileo.dismiss(toastId);
+      }
       if (onView) {
         onView();
         return;
       }
-      const targetThreadId = rec.target?.source === 'codeThread' ? rec.target.id : rec.runId;
-      if (activeNavigator?.onNavigateThread && targetThreadId) {
-        activeNavigator.onNavigateThread(targetThreadId, rec.profileId);
-      } else if (rec.target?.source === 'agentChat' && rec.profileId && activeNavigator?.onNavigateAgent) {
-        activeNavigator.onNavigateAgent(rec.profileId);
-      } else if (activeNavigator?.onNavigateMode) {
-        activeNavigator.onNavigateMode('code');
-      }
+      navigateToNotificationTarget(rec);
     };
 
-    if (isError) {
-      return sileo.error({
-        title: `${actor}: Attention Required`,
-        description: detail,
+    if (content.isError) {
+      toastId = sileo.error({
+        title: content.title,
+        description: content.description,
         fill: resolveToastFill(),
+        roundness: KITE_TOAST_ROUNDNESS,
         duration: 7000,
         button: {
           title: 'Inspect',
           onClick: handleView,
         },
       });
+      return toastId;
     }
 
-    return sileo.success({
-      title: `${actor}: Completed`,
-      description: detail,
+    toastId = sileo.success({
+      title: content.title,
+      description: content.description,
       fill: resolveToastFill(),
+      roundness: KITE_TOAST_ROUNDNESS,
       duration: 5000,
       button: {
         title: 'Open',
         onClick: handleView,
       },
     });
+    return toastId;
   },
 
   /**

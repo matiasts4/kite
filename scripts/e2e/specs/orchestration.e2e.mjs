@@ -312,7 +312,7 @@ export async function run(ctx) {
   await captureArtifactScreenshot(page, artifactsDir, '03-swarm-board-live');
   await closeRightDockIfOpen(page);
 
-  // 3. ORCH-FAIL-01: Failing child exits non-zero and renders visible failed state (never hung running).
+  // 3. ORCH-FAIL-01: Failing child exits non-zero and collapses into a discreet non-red disclosure (never hung running).
   await openNewThreadFromHeader(page);
   await submitThreadPrompt(page, 'E2E failing child check');
 
@@ -320,18 +320,54 @@ export async function run(ctx) {
     () => {
       const text = document.body.innerText || '';
       const hasRole = text.includes('Crasher Worker');
-      const hasFailedCard = Boolean(document.querySelector('.chat-subagent-card.chat-subagent-card--failed'));
+      const hasDisclosure = Boolean(document.querySelector('[data-testid="subagent-failed-disclosure"]'));
       const parentDone = Array.from(document.querySelectorAll('.chat-turn--assistant')).some((el) =>
         (el.textContent || '').includes('Observed child crash exit cleanly.'),
       );
       const idleHeader = Boolean(document.querySelector('.chat-thread-header__status--idle'));
-      return hasRole && hasFailedCard && parentDone && idleHeader;
+      return hasRole && hasDisclosure && parentDone && idleHeader;
     },
     null,
     { timeout: 25_000 },
   );
 
   await captureArtifactScreenshot(page, artifactsDir, '04-orchestration-child-failed');
+
+  const failedDisclosureToggle = page.locator('[data-testid="subagent-failed-disclosure"] .chat-subagent-failed-disclosure__toggle').last();
+  await assertVisibleAndClickableRect(failedDisclosureToggle, 'Failed subagent discreet disclosure toggle');
+  await failedDisclosureToggle.click();
+
+  await page.waitForFunction(
+    () => Boolean(document.querySelector('.chat-subagent-card.chat-subagent-card--failed')),
+    null,
+    { timeout: 10_000 },
+  );
+
+  // Verify zero red (--danger-ink) tinting on both the discreet disclosure and the expanded failed card.
+  const redCheck = await page.evaluate(() => {
+    const isReddish = (rgb) => {
+      const m = /^rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/i.exec(rgb || '');
+      if (!m) return false;
+      const r = Number(m[1]);
+      const g = Number(m[2]);
+      const b = Number(m[3]);
+      return r >= 180 && r - Math.max(g, b) >= 60;
+    };
+    const toggle = document.querySelector('[data-testid="subagent-failed-disclosure"] .chat-subagent-failed-disclosure__toggle');
+    const card = document.querySelector('.chat-subagent-card.chat-subagent-card--failed');
+    const state = document.querySelector('.chat-subagent-card__state--failed');
+    const samples = [
+      toggle && ['toggle.color', getComputedStyle(toggle).color],
+      toggle && ['toggle.border', getComputedStyle(toggle).borderColor],
+      card && ['card.border', getComputedStyle(card).borderColor],
+      card && ['card.bg', getComputedStyle(card).backgroundColor],
+      state && ['state.color', getComputedStyle(state).color],
+    ].filter(Boolean);
+    return samples.filter(([, val]) => isReddish(val));
+  });
+  if (redCheck.length > 0) {
+    throw new Error(`Expected non-red neutral styling on failed subagent disclosure/card, found reddish values: ${JSON.stringify(redCheck)}`);
+  }
 
   // Cross-check real backend call logs from the sandboxed driver.
   const driverCalls = await readDriverCallLog(sandbox);

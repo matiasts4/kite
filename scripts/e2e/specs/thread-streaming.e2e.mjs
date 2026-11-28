@@ -1,5 +1,7 @@
 import {
   assertNativeTauriShell,
+  assertNoSiblingOverlap,
+  assertVisibleAndClickableRect,
   captureArtifactScreenshot,
   waitForBootCoverCleared,
 } from '../assertions.mjs';
@@ -92,6 +94,25 @@ export async function run(ctx) {
   if (!interruptVisible && !runningHeaderVisible) {
     throw new Error('Expected active streaming indicator while mid-turn delta was emitted.');
   }
+  const hasWorkingShelf = await page.locator('[aria-label="Working threads"]').count();
+  if (hasWorkingShelf > 0) {
+    throw new Error('Expected no separate Working threads shelf while streaming.');
+  }
+  const railRunningIndicators = await page
+    .locator('.chat-rail [data-testid="agent-status-indicator"][data-status="running"]')
+    .count();
+  if (railRunningIndicators < 1) {
+    throw new Error('Expected inline AgentStatusIndicator on running thread row in .chat-rail.');
+  }
+  await assertVisibleAndClickableRect(
+    page.locator('[data-rail-toggle]'),
+    'TitleBar sidebar toggle during live stream',
+  );
+  await assertNoSiblingOverlap(
+    page.locator('.titlebar__leading > *'),
+    'TitleBar leading controls during live stream',
+    { minCount: 2 },
+  );
 
   await captureArtifactScreenshot(page, artifactsDir, '01-thread-streaming-midturn');
 
@@ -153,6 +174,10 @@ export async function run(ctx) {
   );
   await captureArtifactScreenshot(page, artifactsDir, '04-thread-b-settled');
 
+  const threadBTitle = (
+    await page.locator('.chat-thread-row--selected .chat-thread-row__title').first().innerText()
+  ).trim();
+
   // Switch back to Thread A in Sidebar and confirm delayed chunk + completion arrived cleanly.
   await switchToSidebarThread(page, threadATitle);
 
@@ -171,6 +196,18 @@ export async function run(ctx) {
   );
 
   await captureArtifactScreenshot(page, artifactsDir, '05-thread-a-settled-after-switch');
+
+  // Once both have settled, Thread B (started after Thread A) must remain above Thread A in Settled.
+  const settledTitles = await page
+    .locator('.chat-rail__band--settled .chat-thread-row .chat-thread-row__title')
+    .allInnerTexts();
+  const idxB = settledTitles.indexOf(threadBTitle);
+  const idxA = settledTitles.indexOf(threadATitle);
+  if (idxB === -1 || idxA === -1 || idxB >= idxA) {
+    throw new Error(
+      `Expected newer Thread B (${JSON.stringify(threadBTitle)}) above older Thread A (${JSON.stringify(threadATitle)}) after both settled, got: ${JSON.stringify(settledTitles)}`,
+    );
+  }
 
   const driverCalls = await readDriverCallLog(sandbox);
   const claudeTurns = driverCalls.filter((c) => c.driver === 'claude' && !c.args.includes('--version'));

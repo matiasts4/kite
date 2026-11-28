@@ -301,6 +301,24 @@
         "visualReview": true
       },
       {
+        "id": "agentic-browser",
+        "patterns": [
+          "src/components/views/BrowserView*",
+          "src/components/views/browser/**",
+          "src/components/views/browser.css",
+          "src/lib/ipc/browser.ts",
+          "src-tauri/src/browser.rs",
+          "src-tauri/src/browser_cdp.rs",
+          "src-tauri/src/browser_policy.rs",
+          "src-tauri/src/browser_discovery.rs",
+          "src-tauri/crates/kite-ctx/src/browser_*.rs"
+        ],
+        "vitestPaths": ["src/components/views/BrowserView.test.tsx", "src/components/RightDock.test.tsx"],
+        "cargoFilters": ["browser::", "browser_cdp::", "browser_policy::", "browser_discovery::"],
+        "e2eSpecs": ["browser-agent"],
+        "visualReview": true
+      },
+      {
         "id": "quality-infrastructure",
         "patterns": [
           "scripts/quality/**",

@@ -89,36 +89,96 @@ export async function run(ctx) {
 
   await auditAgentViewport(page, artifactsDir, '01-agent-mode-1366x840', 1366, 840);
 
-  // 3. Navigate to Routines if reachable from Agent Settings via genuine clicks.
-  const agentSettingsBtn = page.locator('section.agent-pane button.agent-settings-toggle');
-  if (await agentSettingsBtn.isVisible().catch(() => false)) {
-    await assertVisibleAndClickableRect(agentSettingsBtn, 'Agent settings toggle');
-    await agentSettingsBtn.click();
+  // 3. Navigate to Routines via genuine Sidebar "Routines" trigger.
+  const sidebarRoutinesBtn = page.locator('[data-testid="sidebar"] button[aria-label="Routines"]');
+  await sidebarRoutinesBtn.waitFor({ state: 'visible', timeout: 10_000 });
+  await assertVisibleAndClickableRect(sidebarRoutinesBtn, 'Sidebar Routines button');
+  await sidebarRoutinesBtn.click();
 
-    const openRoutinesBtn = page.locator('button', { hasText: 'Open Routines' }).first();
-    if (await openRoutinesBtn.isVisible().catch(() => false)) {
-      await openRoutinesBtn.scrollIntoViewIfNeeded();
-      await page.waitForTimeout(120);
-      await assertVisibleAndClickableRect(openRoutinesBtn, 'Open Routines button');
-      await openRoutinesBtn.click();
+  const routinePane = page.locator('section.routine-pane');
+  await routinePane.waitFor({ state: 'visible', timeout: 10_000 });
 
-      const routinePane = page.locator('section.routine-pane');
-      await routinePane.waitFor({ state: 'visible', timeout: 10_000 });
-      await assertNoHorizontalOverflow(page, 'Routines surface (1366x840)', [
-        '.titlebar',
-        'section.routine-pane',
-      ]);
-      await captureArtifactScreenshot(page, artifactsDir, '02-routines-1366x840');
-    } else {
-      await captureArtifactScreenshot(page, artifactsDir, '02-routines-1366x840');
-    }
-  } else {
-    // Isolated sandbox has no pre-configured agents; capture the clean empty-roster state.
-    await captureArtifactScreenshot(page, artifactsDir, '02-routines-1366x840');
+  // Verify clean "+ New routine" -> single icon + "New routine" text, no duplicate '+'.
+  const newRoutineBtn = routinePane.getByRole('button', { name: /New routine/i });
+  await assertVisibleAndClickableRect(newRoutineBtn, 'New routine button');
+  const newRoutineText = ((await newRoutineBtn.textContent()) || '').trim();
+  if (newRoutineText !== 'New routine') {
+    throw new Error(`Expected button label "New routine", got ${JSON.stringify(newRoutineText)}`);
   }
 
-  // 4. Verify compact viewport layout (960x680) without overflow or TitleBar overlap.
-  await auditAgentViewport(page, artifactsDir, '03-agents-compact-960x680', 960, 680);
+  // Verify filter & triage layout has zero overlap at 1366x840.
+  await assertNoHorizontalOverflow(page, 'Routines surface (1366x840)', [
+    '.titlebar',
+    'section.routine-pane',
+  ]);
+  await assertNoSiblingOverlap(
+    routinePane.locator('.routine-triage-bar > *'),
+    'Routines triage bar controls at 1366x840',
+    { minCount: 2 },
+  );
+
+  // Toggle seeded routine switch off and back on cleanly without error alerts.
+  const seededSwitch = routinePane.getByRole('switch', { name: /Daily Project Health Check/i });
+  await seededSwitch.waitFor({ state: 'visible', timeout: 10_000 });
+  await assertVisibleAndClickableRect(seededSwitch, 'Seeded routine toggle switch');
+  const initialChecked = await seededSwitch.getAttribute('aria-checked');
+  await seededSwitch.click();
+  await page.waitForFunction(
+    (expected) => {
+      const sw = document.querySelector('section.routine-pane [role="switch"]');
+      const err = document.querySelector('section.routine-pane .routine-feedback--error');
+      return err || (sw && sw.getAttribute('aria-checked') === expected);
+    },
+    initialChecked === 'true' ? 'false' : 'true',
+    { timeout: 10_000 },
+  );
+  const toggleError = await routinePane.locator('.routine-feedback--error').textContent().catch(() => null);
+  if (toggleError) {
+    throw new Error(`Routine toggle threw unexpected error alert: ${toggleError}`);
+  }
+  // Toggle back to restore initial state.
+  await seededSwitch.click();
+  await page.waitForFunction(
+    (expected) => {
+      const sw = document.querySelector('section.routine-pane [role="switch"]');
+      return sw && sw.getAttribute('aria-checked') === expected;
+    },
+    initialChecked,
+    { timeout: 10_000 },
+  );
+
+  await captureArtifactScreenshot(page, artifactsDir, '02-routines-1366x840');
+
+  // Verify compact viewport layout inside Routines (960x680) without overlap or overflow.
+  await page.setViewportSize({ width: 960, height: 680 });
+  await page.waitForTimeout(180);
+  await assertNoHorizontalOverflow(page, 'Routines surface (960x680)', [
+    '.titlebar',
+    'section.routine-pane',
+  ]);
+  await assertNoSiblingOverlap(
+    routinePane.locator('.routine-triage-bar > *'),
+    'Routines triage bar controls at 960x680',
+    { minCount: 2 },
+  );
+  await captureArtifactScreenshot(page, artifactsDir, '03-routines-compact-960x680');
+
+  // Verify TitleBar mode switch exits Routines immediately.
+  const codeModeBtn = page.locator('fieldset[aria-label="Work mode"] button[data-label="Code"]');
+  await codeModeBtn.click();
+  await routinePane.waitFor({ state: 'detached', timeout: 10_000 });
+
+  // Return to Agent -> open Routines -> verify Back button returns to Agents.
+  await agentModeBtn.click();
+  await sidebarRoutinesBtn.click();
+  await routinePane.waitFor({ state: 'visible', timeout: 10_000 });
+  const backBtn = routinePane.getByRole('button', { name: /Back to Agents/i });
+  await assertVisibleAndClickableRect(backBtn, 'Routines Back button');
+  await backBtn.click();
+  await routinePane.waitFor({ state: 'detached', timeout: 10_000 });
+
+  // 4. Verify compact viewport layout in Agent mode (960x680).
+  await auditAgentViewport(page, artifactsDir, '04-agents-compact-960x680', 960, 680);
 
   if (pageErrors.length > 0) {
     throw new Error(`Uncaught page errors during AGENTS-ROUTINES-01:\n${pageErrors.join('\n')}`);

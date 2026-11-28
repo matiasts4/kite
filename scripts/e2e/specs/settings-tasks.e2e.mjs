@@ -80,7 +80,9 @@ export async function run(ctx) {
   // 2. Verify Settings tabs switch cleanly via genuine clicks with zero overlap/overflow.
   const tabsToVerify = [
     { id: 'general', screenshot: '01-settings-general-1366x840' },
-    { id: 'notifications', screenshot: '02-settings-notifications-1366x840' },
+    { id: 'quotas', screenshot: '01b-settings-quotas-1366x840' },
+    { id: 'customizations', screenshot: '02-settings-customizations-1366x840' },
+    { id: 'notifications', screenshot: '03-settings-notifications-1366x840' },
     { id: 'zed', screenshot: null },
     { id: 'subagents', screenshot: null },
   ];
@@ -103,6 +105,73 @@ export async function run(ctx) {
       `Settings rail rows (${tab.id})`,
       { minCount: 4 },
     );
+
+    if (tab.id === 'quotas') {
+      const connPanel = pane.locator('.qt-conn-panel').first();
+      if (!(await connPanel.isVisible().catch(() => false))) {
+        const addBtn = pane.getByRole('button', { name: /\+ Agregar proveedor/i }).first();
+        if (await addBtn.isVisible().catch(() => false)) {
+          await addBtn.click();
+          const addModal = page.locator('div[role="dialog"]', { hasText: 'Agregar proveedores de IA' });
+          await addModal.waitFor({ state: 'visible', timeout: 5_000 });
+          const agyCard = addModal.locator('.qt-provider-pick-card', { hasText: 'Antigravity' }).first();
+          await agyCard.click();
+          const confirmBtn = addModal.getByRole('button', { name: /Agregar 1 proveedor/i });
+          await confirmBtn.click();
+          await addModal.waitFor({ state: 'hidden', timeout: 5_000 });
+        }
+      }
+      if (await connPanel.isVisible().catch(() => false)) {
+        await connPanel.scrollIntoViewIfNeeded();
+        await page.waitForTimeout(160);
+        await assertNoHorizontalOverflow(page, 'Settings Quotas ProviderConnectionPanel (1366x840)', [
+          '.qt-conn-panel',
+        ]);
+        const nestedCount = await connPanel.locator('.qt-cli-row .qt-lifecycle').count();
+        if (nestedCount > 0) {
+          throw new Error('ProviderConnectionPanel .qt-lifecycle must not be nested inside .qt-cli-row');
+        }
+      }
+    }
+
+    if (tab.id === 'customizations') {
+      // Exercise agent activity indicator color swatches + custom in-app ColorPickerPopover
+      const cyanBtn = pane.locator('button.customizations-indicator-swatch[aria-label="Cian"]');
+      await assertVisibleAndClickableRect(cyanBtn, 'Indicator Cian swatch');
+      await cyanBtn.click();
+      await page.waitForTimeout(100);
+      const previewIndicator = pane.locator('[data-testid="agent-indicator-live-preview"] [data-testid="agent-status-indicator"]').first();
+      const colorMode = await previewIndicator.getAttribute('data-color-mode');
+      if (colorMode !== 'cyan') {
+        throw new Error(`Expected indicator color mode "cyan" after clicking Cian swatch, got "${colorMode}"`);
+      }
+
+      const customTrigger = pane.locator('button[aria-label="Color personalizado del indicador"]');
+      await assertVisibleAndClickableRect(customTrigger, 'Indicator custom color popover trigger');
+      await customTrigger.click();
+      const popover = page.locator('[data-testid="color-picker-popover"]');
+      await popover.waitFor({ state: 'visible', timeout: 5_000 });
+      await captureArtifactScreenshot(page, artifactsDir, '02b-settings-color-picker-1366x840');
+      const hexInput = popover.locator('input[aria-label="Código hexadecimal"]');
+      await hexInput.fill('#22d3ee');
+      await hexInput.press('Enter');
+      await popover.waitFor({ state: 'hidden', timeout: 5_000 });
+      const customMode = await previewIndicator.getAttribute('data-color-mode');
+      if (customMode !== '#22d3ee') {
+        throw new Error(`Expected indicator color mode "#22d3ee" after hex input, got "${customMode}"`);
+      }
+
+      // Scroll down to verify new backdrops and animated hero figures render cleanly
+      const backdropHeading = pane.locator('h2', { hasText: 'Fondo de Escenario y Atmósfera' });
+      await backdropHeading.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(220);
+      await captureArtifactScreenshot(page, artifactsDir, '02c-settings-backdrops-figures-1366x840');
+
+      const figureHeading = pane.locator('h2', { hasText: 'Figuras de portada y marca de agua' });
+      await figureHeading.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(220);
+      await captureArtifactScreenshot(page, artifactsDir, '02d-settings-hero-figures-1366x840');
+    }
 
     if (tab.screenshot) {
       await captureArtifactScreenshot(page, artifactsDir, tab.screenshot);

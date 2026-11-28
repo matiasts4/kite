@@ -45,6 +45,19 @@ const SCENARIO = {
       ],
     },
     {
+      driver: 'grok',
+      promptIncludes: 'Verificando eco en voz',
+      steps: [
+        {
+          delayMs: 900,
+          rawLine: JSON.stringify({
+            reply: 'Eco de voz verificado correctamente.',
+            actions: [],
+          }),
+        },
+      ],
+    },
+    {
       driver: 'claude',
       promptIncludes: 'Revisar el modulo auth y sus tests',
       steps: [
@@ -74,6 +87,7 @@ export async function run(ctx) {
 
   await assertNativeTauriShell(page);
   await waitForBootCoverCleared(page);
+  await page.setViewportSize({ width: 1366, height: 840 });
 
   // Configure Argos operator to route Grok planning through the sandbox fake `grok` CLI
   // and disable TTS audio output in headless/E2E runs.
@@ -114,11 +128,84 @@ export async function run(ctx) {
     throw new Error(`Expected VoiceModeFooterBar data-transport attribute, got ${JSON.stringify(footerTransport)}`);
   }
   await page.locator('[data-testid="thread-voice-hero"]').waitFor({ state: 'visible', timeout: 10_000 });
+  await page.locator('[data-testid="voice-stage-atmosphere"]').waitFor({ state: 'visible', timeout: 10_000 });
+  await page.locator('[data-testid="voice-wave-ribbon"]').waitFor({ state: 'visible', timeout: 10_000 });
+  await page.locator('.kite-composer-main--voice-active').waitFor({ state: 'visible', timeout: 10_000 });
 
   const statusPill = page.locator('[data-testid="voice-live-status-pill"]');
   await statusPill.waitFor({ state: 'visible', timeout: 10_000 });
 
+  await page.waitForFunction(
+    () => {
+      const chips = Array.from(document.querySelectorAll('[data-testid="thread-voice-quick-prompts"] button'));
+      const ribbon = document.querySelector('[data-testid="voice-wave-ribbon"]');
+      if (chips.length < 3 || !ribbon) return false;
+      const r = ribbon.getBoundingClientRect();
+      return (
+        r.width > 120 &&
+        r.height >= 20 &&
+        chips.every((btn) => Number.parseFloat(getComputedStyle(btn).opacity || '1') >= 0.95)
+      );
+    },
+    null,
+    { timeout: 5_000 },
+  );
+
+  // Verify draft Voice Hero orb & all 3 quick-prompt chips fit cleanly unclipped inside 1366x840 viewport.
+  const heroFitCheck = await page.evaluate(() => {
+    const hero = document.querySelector('[data-testid="thread-voice-hero"]');
+    const chips = Array.from(document.querySelectorAll('[data-testid="thread-voice-quick-prompts"] button'));
+    if (!hero || chips.length < 3) {
+      return { ok: false, reason: `hero=${Boolean(hero)} chips=${chips.length}` };
+    }
+    const vh = window.innerHeight;
+    const heroRect = hero.getBoundingClientRect();
+    const outOfBounds = [];
+    if (heroRect.top < 0 || heroRect.bottom > vh) {
+      outOfBounds.push(`hero(${Math.round(heroRect.top)}..${Math.round(heroRect.bottom)})`);
+    }
+    for (const chip of chips) {
+      const r = chip.getBoundingClientRect();
+      if (r.width < 10 || r.height < 10 || r.top < 0 || r.bottom > vh) {
+        outOfBounds.push(`chip("${chip.textContent?.trim()}" ${Math.round(r.top)}..${Math.round(r.bottom)})`);
+      }
+    }
+    return {
+      ok: outOfBounds.length === 0,
+      viewportHeight: vh,
+      outOfBounds,
+    };
+  });
+  if (!heroFitCheck.ok) {
+    throw new Error(`Draft Voice Hero viewport fit check failed: ${JSON.stringify(heroFitCheck)}`);
+  }
+
   await captureArtifactScreenshot(page, artifactsDir, '01-voice-mode-active');
+
+  // Verify T1-T2 WebGL ComposerVoiceGlow & frosted-glass VoiceTeleprompterDock appear while Voice Mode is active.
+  const voiceGlow = page.locator('[data-testid="voice-speaking-glow"][data-active="true"]');
+  await voiceGlow.waitFor({ state: 'attached', timeout: 10_000 });
+
+  const teleprompterDock = page.locator('[data-testid="voice-teleprompter-dock"]');
+  await teleprompterDock.waitFor({ state: 'visible', timeout: 10_000 });
+  const collapseToggle = page.locator('[data-testid="voice-teleprompter-collapse"]');
+  await assertVisibleAndClickableRect(collapseToggle, 'VoiceCallBar collapse toggle');
+  await collapseToggle.click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="voice-teleprompter-dock"]')?.getAttribute('data-collapsed') ===
+      'true',
+    null,
+    { timeout: 5_000 },
+  );
+  await collapseToggle.click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="voice-teleprompter-dock"]')?.getAttribute('data-collapsed') ===
+      'false',
+    null,
+    { timeout: 5_000 },
+  );
 
   // Verify geometry and zero sibling overlap on VoiceModeFooterBar controls.
   await assertNoHorizontalOverflow(page, 'Voice Mode active footer', [
@@ -162,13 +249,38 @@ export async function run(ctx) {
   await speakerUnmuteBtn.click();
   await speakerMuteBtn.waitFor({ state: 'visible', timeout: 5_000 });
 
-  // 4. Submit a voice-mode text turn triggering `propose_task` -> ConsultativeDraftCard.
+  // 3b. Verify teleprompter stays agent-only while the agent is thinking (never duplicating user speech).
   const voiceTextarea = page.locator('.chat-surface--thread textarea[placeholder="Escribir en la sesión de voz…"]').first();
+  const sendVoiceTurnBtn = page.locator('.chat-surface--thread button[aria-label="Enviar a la sesión de voz"]').first();
+  await assertVisibleAndClickableRect(voiceTextarea, 'Voice Mode composer textarea');
+  await voiceTextarea.click();
+  await voiceTextarea.fill('Verificando eco en voz');
+  await assertVisibleAndClickableRect(sendVoiceTurnBtn, 'Voice Mode send turn button');
+  await sendVoiceTurnBtn.click();
+
+  const liveThinkingTurn = page.locator('[data-testid="live-thinking-turn"]');
+  await liveThinkingTurn.waitFor({ state: 'visible', timeout: 5_000 });
+  if ((await page.locator('[data-testid="live-user-echo"]').count()) !== 0) {
+    throw new Error('Expected live-user-echo count to be 0 in agent-only teleprompter');
+  }
+  if ((await page.locator('[data-testid="live-user-turn"]').count()) !== 0) {
+    throw new Error('Expected live-user-turn count to be 0 in agent-only teleprompter');
+  }
+  await captureArtifactScreenshot(page, artifactsDir, '01b-voice-agent-thinking');
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.chat-turn--assistant')).some((el) =>
+        (el.textContent || '').includes('Eco de voz verificado correctamente.'),
+      ),
+    null,
+    { timeout: 10_000 },
+  );
+
+  // 4. Submit a voice-mode text turn triggering `propose_task` -> ConsultativeDraftCard.
   await assertVisibleAndClickableRect(voiceTextarea, 'Voice Mode composer textarea');
   await voiceTextarea.click();
   await voiceTextarea.fill('Revisar autenticacion en voz');
 
-  const sendVoiceTurnBtn = page.locator('.chat-surface--thread button[aria-label="Enviar a la sesión de voz"]').first();
   await assertVisibleAndClickableRect(sendVoiceTurnBtn, 'Voice Mode send turn button');
   await sendVoiceTurnBtn.click();
 
@@ -178,6 +290,13 @@ export async function run(ctx) {
   if (!draftText.includes('Auditar modulo auth')) {
     throw new Error(`Expected ConsultativeDraftCard to display proposal title, got: ${JSON.stringify(draftText)}`);
   }
+  await page.waitForFunction(
+    () =>
+      document.querySelectorAll('[data-testid="live-agent-turn"] .kite-voice-teleprompter__word--spoken')
+        .length > 0,
+    null,
+    { timeout: 5_000 },
+  );
   await captureArtifactScreenshot(page, artifactsDir, '02-consultative-draft-card');
 
   // 5. Confirm the consultative draft via real pointer click -> spawns real claude subagent.
@@ -237,6 +356,13 @@ export async function run(ctx) {
     throw new Error(`Voice timeline ordering assertion failed: ${JSON.stringify(orderingCheck)}`);
   }
 
+  await page.waitForFunction(
+    () =>
+      document.querySelectorAll('[data-testid="live-agent-turn"] .kite-voice-teleprompter__word--spoken')
+        .length > 0,
+    null,
+    { timeout: 5_000 },
+  );
   await captureArtifactScreenshot(page, artifactsDir, '03-voice-timeline-ordered');
 
   // Verify fake `grok` planner and `claude` child subagent actually executed in sandbox.
@@ -257,6 +383,7 @@ export async function run(ctx) {
   await endBtn.click();
 
   await voiceFooter.waitFor({ state: 'hidden', timeout: 10_000 });
+  await teleprompterDock.waitFor({ state: 'hidden', timeout: 5_000 });
   await startVoiceBtn.waitFor({ state: 'visible', timeout: 10_000 });
 
   // Verify T8 post-call receipt persistence after closing voice session.
@@ -278,7 +405,114 @@ export async function run(ctx) {
     { timeout: 10_000 },
   );
 
+  // Verify T7 post-call VoiceTranscriptCard renders inside the scrollable timeline without duplicate inline summary row.
+  const transcriptCard = page.locator('[data-testid="voice-transcript-card"]');
+  await transcriptCard.waitFor({ state: 'visible', timeout: 10_000 });
+  const timelinePlacementCheck = await page.evaluate(() => {
+    const card = document.querySelector('[data-testid="voice-transcript-card"]');
+    const insideTimeline = Boolean(card && card.closest('.chat-transcript__column'));
+    const workRows = Array.from(document.querySelectorAll('.chat-work-entry')).map((el) =>
+      (el.textContent || '').trim()
+    );
+    const hasDuplicateSummary = workRows.some((txt) => txt.includes('Resumen de sesión de voz'));
+    return {
+      ok: insideTimeline && !hasDuplicateSummary,
+      insideTimeline,
+      hasDuplicateSummary,
+    };
+  });
+  if (!timelinePlacementCheck.ok) {
+    throw new Error(
+      `Expected VoiceTranscriptCard inside timeline without duplicate summary row: ${JSON.stringify(timelinePlacementCheck)}`
+    );
+  }
   await captureArtifactScreenshot(page, artifactsDir, '04-voice-mode-ended');
+
+  await assertVisibleAndClickableRect(transcriptCard, 'VoiceTranscriptCard button');
+  await transcriptCard.click();
+
+  const transcriptPane = page.locator('[data-testid="voice-transcript-pane"]');
+  await transcriptPane.waitFor({ state: 'visible', timeout: 10_000 });
+  await page.waitForTimeout(200);
+
+  const assertTranscriptSplitGeometry = async (label, minCenterWidth) => {
+    await assertNoHorizontalOverflow(page, label, [
+      '.titlebar',
+      'section.chat-surface--thread',
+      '[data-testid="app-browser-sidebar"]',
+      '[data-testid="voice-transcript-pane"]',
+    ]);
+    const splitGeometry = await page.evaluate((minW) => {
+      const center = document.querySelector('section.chat-surface--thread');
+      const badge = document.querySelector('.kite-voice-transcript-card__icon-badge');
+      const chip = document.querySelector('.kite-voice-transcript-card__open-chip');
+      const centerW = center ? Math.round(center.getBoundingClientRect().width) : 0;
+      let headerOverlap = false;
+      if (badge && chip) {
+        const a = badge.getBoundingClientRect();
+        const b = chip.getBoundingClientRect();
+        headerOverlap = !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+      }
+      return {
+        ok: centerW >= minW && !headerOverlap,
+        centerWidth: centerW,
+        minCenterWidth: minW,
+        headerOverlap,
+      };
+    }, minCenterWidth);
+    if (!splitGeometry.ok) {
+      throw new Error(`${label} split geometry check failed: ${JSON.stringify(splitGeometry)}`);
+    }
+  };
+
+  await assertTranscriptSplitGeometry('VoiceTranscriptPane open (1366x840)', 320);
+  await captureArtifactScreenshot(page, artifactsDir, '05-voice-transcript-pane');
+
+  // Verify compact viewport layout (960x680) preserves center thread width and non-overlapping header.
+  await page.setViewportSize({ width: 960, height: 680 });
+  await page.waitForTimeout(200);
+  await assertTranscriptSplitGeometry('VoiceTranscriptPane compact (960x680)', 280);
+  await captureArtifactScreenshot(page, artifactsDir, '06-voice-transcript-compact-960x680');
+
+  // Verify S8 Settings -> Argos Audio -> VoicePickerModal interactive carousel at 1366x840.
+  await page.setViewportSize({ width: 1366, height: 840 });
+  await page.waitForTimeout(180);
+  const settingsBtn = page.locator('.sidebar__footer button[aria-label="Settings"]');
+  await assertVisibleAndClickableRect(settingsBtn, 'Sidebar Footer Settings button');
+  await settingsBtn.click();
+
+  const dialog = page.locator('div[role="dialog"][aria-labelledby="settings-heading"]');
+  await dialog.waitFor({ state: 'visible', timeout: 10_000 });
+  const argosTab = dialog.locator('button[data-settings-nav="zed"]');
+  await assertVisibleAndClickableRect(argosTab, 'Settings nav tab "zed"');
+  await argosTab.click();
+
+  const argosVoiceSubtab = dialog.getByRole('button', { name: /^Voz$/ });
+  await assertVisibleAndClickableRect(argosVoiceSubtab, 'Argos Voz subtab');
+  await argosVoiceSubtab.click();
+
+  const openPickerBtn = dialog.locator('[data-testid="open-voice-picker-btn"]');
+  await openPickerBtn.waitFor({ state: 'attached', timeout: 10_000 });
+  await openPickerBtn.scrollIntoViewIfNeeded();
+  await assertVisibleAndClickableRect(openPickerBtn, 'Open VoicePickerModal button');
+  await openPickerBtn.click();
+
+  const voicePicker = page.locator('[data-testid="voice-picker"]');
+  await voicePicker.waitFor({ state: 'visible', timeout: 10_000 });
+  await page.waitForTimeout(180);
+  await assertNoHorizontalOverflow(page, 'VoicePickerModal (1366x840)', ['[data-testid="voice-picker"]']);
+  await captureArtifactScreenshot(page, artifactsDir, '07-voice-picker-modal');
+
+  const closePickerBtn = voicePicker.locator('button[aria-label="Cerrar selector de voz"]');
+  await assertVisibleAndClickableRect(closePickerBtn, 'VoicePickerModal close button');
+  await closePickerBtn.click();
+  await voicePicker.waitFor({ state: 'hidden', timeout: 10_000 });
+
+  const closeSettingsBtn = dialog.locator('button.settings-modal-close');
+  await closeSettingsBtn.scrollIntoViewIfNeeded();
+  await assertVisibleAndClickableRect(closeSettingsBtn, 'Settings modal close button');
+  await closeSettingsBtn.click();
+  await dialog.waitFor({ state: 'hidden', timeout: 10_000 });
 
   if (pageErrors.length > 0) {
     throw new Error(`Uncaught page errors in VOICE-MODE-01:\n${pageErrors.join('\n')}`);

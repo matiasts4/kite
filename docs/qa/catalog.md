@@ -19,6 +19,7 @@ Fuente de verdad para ids, áreas, tipos y estado. Historial de ejecuciones de b
 | SETTINGS-TASKS-01 | `settings-tasks` | Modal Settings (General, Notifications, Audio/Argos, Subagents) + pestaña Tasks/Tickets en RightDock con IPC real y cero overlap | passed | 2026-11-25 verify:desktop:e2e | Agregado en Fase 2 (`odd/tasks/engineering-quality-gate-and-delivery-loop.md`) |
 | CODE-DIFFS-01 | `code-diffs` | Modo Code + canvas de workspace + pestaña Diffs sin overflow/overlap ni errores en `1366x840` y `960x680` | passed | 2026-11-25 verify:desktop:e2e | Agregado en Fase 2 (`odd/tasks/engineering-quality-gate-and-delivery-loop.md`) |
 | UI-KIT-01 | `ui-kit` | Ruta dev `?ui-kit=1` de primitivos core (`Button`, `Field`, `Card`, `Modal`, `Tabs`, `Badge`, `EmptyState`, `SelectMenu`) con interacción y capturas `1366x840`/`960x680` | passed | 2026-11-25 verify:desktop:e2e | Agregado en Fase 3 (`odd/tasks/engineering-quality-gate-and-delivery-loop.md`) |
+| BROWSER-AGENT-01 | `browser-agent` | WebView2 COM CDP real (`open`, `snapshot` AX + `unchanged_stub` vía `kite-ctx` v3, `batch` click + `assert_text`), multi-tab + `Stop / Take Over` / `Resume Agent`, Local Dev Servers, captura a hilo y geometría `1366x840`/`960x680` | passed | 2026-11-27 verify:desktop:e2e | Sabotage `--sabotage=overlay` verificado + Independent Visual Verifier `APPROVE` (`odd/tasks/agentic-browser-and-context-reuse.md`) |
 
 ---
 

@@ -19,6 +19,430 @@ export type {
 /** Official historical and current releases for Kite Code Desktop */
 export const KITE_RELEASES: RawReleaseNote[] = [
   {
+    version: '0.1.96',
+    tag: 'v0.1.96',
+    date: 'Nov 27, 2026',
+    title: 'Browser agentico, estabilidad de subagentes y sesiones ACP reanudadas',
+    items: [
+      {
+        kind: 'added',
+        description: 'Motor de browser agentico integrado in-process con WebView2 CDP, multiples pestanas por agente, herramienta MCP kite_browser, CLI kite browser, rol browser y cache semantico kite-ctx v3',
+      },
+      {
+        kind: 'fixed',
+        description: 'Bloqueo de replay de historial y notificaciones huerfanas al reanudar sesiones ACP (antigravity_acp, grok_pool y grok) para evitar respuestas previas duplicadas debajo del prompt en Agents y Threads',
+      },
+      {
+        kind: 'fixed',
+        description: 'Normalizacion de nombres de herramientas ACP en subagentes/fallback, manejo silencioso de timeouts parciales en wait, alineacion de conteo MCP (13 herramientas), limite <2KB en reglas dispatch y carga lazy en AgentsView',
+      },
+    ],
+  },
+  {
+    version: '0.1.95',
+    tag: 'v0.1.95',
+    date: 'Nov 27, 2026',
+    title: 'Runtime extensible de plugins, arranque lazy de sidecars y diagnostico de fallos',
+    items: [
+      {
+        kind: 'added',
+        description: 'Runtime extensible de plugins con soporte de manifiestos multi-formato, instalacion desde carpeta local, repositorio Git o archivo .zip, catalogo configurable por feeds, paneles Web UI de sidecars en RightDock, enlaces clicables sidecar:// en chat, integracion MCP/skills/reglas/perfiles de agente, MCP Apps sandboxeadas (ui://), hooks nativos de ciclo de vida y sidecars programados por cron.',
+      },
+      {
+        kind: 'changed',
+        description: 'Arranque bajo demanda (lazy) por defecto para sidecars Web UI (autoStartUiSidecars en false), inicializacion diferida del proxy loopback (2 workers Tokio solo cuando un sidecar esta activo), consulta diferida de MCP Apps al abrir el menu New tab y detencion automatica del sidecar al cerrar su ultima pestana en RightDock para reducir el consumo base de RAM.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Persistencia de panics fatales en crash.log tambien en builds release y mejora del script update-and-launch.ps1 para limpiar bloqueos de WebView2 y lanzar la aplicacion en el escritorio interactivo del usuario.',
+      },
+    ],
+  },
+  {
+    version: '0.1.94',
+    tag: 'v0.1.94',
+    date: 'Nov 26, 2026',
+    title: 'Correccion de permisos ACP y cambio rapido entre modos',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Correccion del flujo de permisos ACP (session/request_permission con params.toolCall, preservacion del tipo de id JSON-RPC, normalizacion camelCase/optionId y alcance de aprobacion por sesion) para evitar rechazos silenciosos en modo acceptEdits.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Soporte para frames usage_update (used/size), preservacion de result.usage y stopReason en el adaptador persistente, y deduplicacion del fallback de transcript frente a llamadas call_* ya recibidas por ACP.',
+      },
+      {
+        kind: 'changed',
+        description: 'Reduccion drastica de latencia al cambiar entre Agent, Code y Thread mediante aislamiento con React.memo, callbacks estabilizados, carga diferida de subtabs y perfil/mente en AgentsView, fast-path sin reflow en ChatComposer, cache TTL en listConnections, cortocircuito en capas ocultas de useTranscriptMotion y agrupamiento memoizado en ThreadRoster.',
+      },
+    ],
+  },
+  {
+    version: '0.1.93',
+    tag: 'v0.1.93',
+    date: 'Nov 26, 2026',
+    title: 'Optimizacion integral de RAM, daemons multiplexados, Hub MCP y Fast Lane nativo',
+    items: [
+      {
+        kind: 'added',
+        description: 'Motor Fast Lane nativo en Rust para API Keys oficiales y gateway OpenCode Go con herramientas de workspace sandboxeadas, cliente MCP HTTP/stdio, compactacion en 2 etapas y telemetria en tiempo real.',
+      },
+      {
+        kind: 'added',
+        description: 'Pools multiplexados compartidos para daemons persistentes (Antigravity ACP, OpenCode server y Grok ACP), Hub MCP HTTP/Stdio centralizado en kite-core, ProcessGovernor FIFO (limite configurable 1-8) y cierre inmediato de subagentes efimeros.',
+      },
+      {
+        kind: 'changed',
+        description: 'Reduccion del consumo base de RAM en Rust (-84% Private Bytes en pruebas aisladas) mediante stubs lazy de hilos (LRU de 8), aislamiento SQLite del daemon, compactacion unica de bloat legado, code-splitting de arranque (780 kB) y ventana inicial de 48 filas en AgentChatShell.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminacion de fugas de referencias LRU en chat, liberacion de workers de diff y canvas de terminal ocultos con tope DPR 1.5, cierre de WebViews secundarios por workspace inactivo y limpieza de listeners/timers en segundo plano.',
+      },
+    ],
+  },
+  {
+    version: '0.1.92',
+    tag: 'v0.1.92',
+    date: 'Nov 26, 2026',
+    title: 'Correcciones en Automated Routines y navegación de modos',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Botón Back, Escape y cambio de modo desde Automated Routines a Agent/Code/Thread, con estado activo en el sidebar.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Migración automática del ID legacy de la rutina inicial a UUID válido para pausar/reanudar sin errores ni mensajes [object Object].',
+      },
+      {
+        kind: 'fixed',
+        description: 'Barra de filtros y Actionable only alineados sin solapamientos, acciones del footer visibles, eliminación de \'+ +\' en New routine y SelectMenu en editor de rutinas.',
+      },
+    ],
+  },
+  {
+    version: '0.1.91',
+    tag: 'v0.1.91',
+    date: 'Nov 26, 2026',
+    title: 'Modo Agent simplificado, aislamiento estricto con Thread y translucidez uniforme',
+    items: [
+      {
+        kind: 'changed',
+        description: 'Modo Agent en 2 filas limpias: módulos ocultos detrás del botón Edit (Back to chat para volver), eliminación del toggle Chat | Terminal en agentes conversacionales y acciones Open in Thread + Auto integradas en el riel de pestañas.',
+      },
+      {
+        kind: 'changed',
+        description: 'Teammate inbox auto-oculto cuando no hay mensajes y translucidez vidrio uniforme (backdrop-filter: none) igualada a los modos Code y Thread.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Aislamiento estricto entre Agent y Thread sin saltos inesperados de modo al enviar prompts ni mezcla de hilos ajenos en SQLite o pestañas.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Corrección de layout en Open in Thread y Routines del sidebar más limpieza de encabezados Markdown (## Job, etc.) en subtítulos de agentes.',
+      },
+    ],
+  },
+  {
+    version: '0.1.90',
+    tag: 'v0.1.90',
+    date: 'Nov 26, 2026',
+    title: 'Plataforma Agents v3 funcional y especialistas Ship Guard y Discovery Architect',
+    items: [
+      {
+        kind: 'added',
+        description: 'Skills vinculables desde .agents/skills/ y raíces globales con gating de requisitos (requires), flags manual-only/context: fork y captura directa desde chats.',
+      },
+      {
+        kind: 'added',
+        description: 'Nuevo comando kite_thread launch para abrir Threads de primer nivel (con worktree y orquestador) desde un agente, menciones @agente en Thread mode y tabs visibles en Agents.',
+      },
+      {
+        kind: 'added',
+        description: 'Broker interactivo de aprobaciones con botón Always allow, hooks deterministas PreToolUse con bloqueo exit 2 (políticas y verificación clean-room) y Readiness Score de 8 pilares.',
+      },
+      {
+        kind: 'added',
+        description: 'Skill manual pre-push-cleanroom-gate y plantillas especializadas Ship Guard y Discovery Architect sobre Antigravity con instalación idempotente.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Playbooks reales sin stub de Antigravity (espera de cierre, waves paralelas y worktrees), triggers de eventos y quiet ticks HEARTBEAT_OK en Routines, y ejecución .cmd en Windows para AutoPilot.',
+      },
+    ],
+  },
+  {
+    version: '0.1.89',
+    tag: 'v0.1.89',
+    date: 'Nov 25, 2026',
+    title: 'Asistente Argos: persistencia confiable del proveedor y limpieza automática de caché',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Limpieza automática no destructiva de cachés heredadas de hilos en localStorage (>200 KB al iniciar y recuperación progresiva en 3 fases ante QuotaExceededError) sin afectar configuraciones, temas, favoritos ni credenciales.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Persistencia desacoplada entre localStorage, la bóveda SQLite (operator_settings_json con updatedAtMs monotónico y guardia contra condiciones de carrera) y eventos en vivo, evitando que cambiar el proveedor a Antigravity (gemini-4-hydrogen-low) vuelva a OpenCode.',
+      },
+      {
+        kind: 'changed',
+        description: 'Indicador completo de proveedor y modelo activo en la tarjeta superior de Ajustes del asistente (Antigravity · <modelo>, Grok · <modelo> y Local · Heurístico).',
+      },
+    ],
+  },
+  {
+    version: '0.1.88',
+    tag: 'v0.1.88',
+    date: 'Nov 25, 2026',
+    title: 'Modo de voz: errores claros de proveedor, dictado en vivo estable y teleprompter sin parpadeos',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Avisos claros cuando el proveedor del asistente rechaza una solicitud por permisos o suscripción (HTTP 401/403), preservando el detalle sin descartarlo por incluir URLs y alineando la migración del vault hacia gemini-4-hydrogen-low.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Transcripción en vivo más fluida y sin reescrituras hacia atrás mediante normalización por palabra, estabilizador monótono de prefijo (LiveTranscriptStabilizer), prioridad estricta de streaming STT frente a WebSpeech/rolling WAV y scroll automático inferior en el compositor.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Estabilización con histéresis en el panel superior del teleprompter para eliminar los cambios rápidos al iniciar la sesión de voz y mantener el indicador estable en Argos.',
+      },
+    ],
+  },
+  {
+    version: '0.1.87',
+    tag: 'v0.1.87',
+    date: 'Nov 25, 2026',
+    title: 'Modo de voz: teleprompter exclusivo de Argos, modelos Antigravity y errores claros',
+    items: [
+      {
+        kind: 'changed',
+        description: 'Teleprompter superior reservado exclusivamente para Argos (onda reactiva, estados de escucha/transcripción/pensamiento y karaoke), manteniendo la transcripción en vivo del usuario solo en el cuadro de entrada inferior sin duplicación.',
+      },
+      {
+        kind: 'added',
+        description: 'Catálogo dinámico y seleccionable de modelos de suscripción de Antigravity CLI en Ajustes → Argos → Proveedor (por defecto gemini-4-hydrogen-low con precalentamiento automático al iniciar Voice Mode, delegando tareas pesadas a modelos Thinker).',
+      },
+      {
+        kind: 'fixed',
+        description: 'Exposición clara de errores reales del proveedor/CLI en lugar del fallback genérico y preservación de la precedencia de PATH en Windows (terminal/launcher.rs).',
+      },
+    ],
+  },
+  {
+    version: '0.1.86',
+    tag: 'v0.1.86',
+    date: 'Nov 25, 2026',
+    title: 'Modo de voz: escenario atmosférico, teleprompter editorial y transcripción en vivo',
+    items: [
+      {
+        kind: 'added',
+        description: 'Rediseño visual del Modo de Voz con escenario atmosférico en todo el panel, orbe cinético con retícula orbital, cinta acústica reactiva (VoiceWaveRibbon), teleprompter traslúcido editorial con karaoke y cápsula de entrada con haz de borde animado.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Corregida la transcripción en vivo del usuario en modos Cascaded y Realtime: resolución de IDs de micrófono WebView2 a nombres WASAPI, VAD nativo más sensible (0.008 RMS) y previews cloud continuos mediante captura WAV no destructiva (voice_audio_snapshot_wav).',
+      },
+      {
+        kind: 'fixed',
+        description: 'Acumulación incremental de deltas de transcripción en Realtime (xAI, OpenAI y Gemini Live), aislamiento de eventos input_audio_transcription fuera de la respuesta del agente y visibilidad continua del texto del usuario (live-user-echo) y estado "Transcribiendo tu voz" en el teleprompter.',
+      },
+    ],
+  },
+  {
+    version: '0.1.85',
+    tag: 'v0.1.85',
+    date: 'Nov 25, 2026',
+    title: 'Personalización: selector de color integrado, figuras reactivas y fondos 2K',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Reemplazado el selector de color nativo en Personalización por un popover integrado (ColorPickerPopover) con paleta, código hexadecimal y sincronización en vivo del indicador de actividad de agentes en cabeceras, turnos y enjambres.',
+      },
+      {
+        kind: 'added',
+        description: 'Rediseñadas las 6 figuras de portada y la marca de agua con animaciones de saludo al abrir chat, reacciones al interactuar, seguimiento sutil del puntero y estado atento al escribir, respetando movimiento reducido y ventana minimizada.',
+      },
+      {
+        kind: 'added',
+        description: 'Renovados los fondos de escenario y atmósfera en 2K: nuevos Crepúsculo Alpino invernal, Horizonte de Eventos, Claro de Luna sobre océano abierto, Tokio Sakura, Pradera Celeste, Nebulosa Astral y Bosque de Niebla, conservando Horizonte Solar y Aurora Boreal.',
+      },
+      {
+        kind: 'changed',
+        description: 'Migrados los selectores tipográficos de Personalización al componente unificado SelectMenu y actualizadas las descripciones y miniaturas de la galería de escenarios.',
+      },
+    ],
+  },
+  {
+    version: '0.1.84',
+    tag: 'v0.1.84',
+    date: 'Nov 25, 2026',
+    title: 'Motor de contexto kite-ctx v0.2, búsqueda FTS5/BM25 y monitor renovado',
+    items: [
+      {
+        kind: 'added',
+        description: 'Contabilidad neta real en kite-ctx v0.2.0 (ahorro bruto menos recuperaciones CCR, excluyendo hits falsos de caché) y búsqueda indexada FTS5/BM25 por fragmentos con límite de 16K caracteres.',
+      },
+      {
+        kind: 'added',
+        description: 'Caché de comandos inmutables en git (tool_cache aislado por directorio y worktree), congelación KV por lotes en el historial de hilos (assemble_thread_context) y auditor estático Turn-0 (kite ctx audit --fix).',
+      },
+      {
+        kind: 'added',
+        description: 'Monitor de Contexto renovado en el popover de recursos con desglose neto/bruto, grilla de salud del motor (Caché real, KV Prefix Hits, CCR FTS5 y Tool Cache), tarjeta de Auditoría Turn-0 e IPC refresh_context_monitor.',
+      },
+      {
+        kind: 'changed',
+        description: 'Hooks fail-open de Windows optimizados con fast-path directo al binario en AppData (Kite Code/bin/kite.exe), apertura SQLite acelerada con PRAGMA user_version = 2 y caché de escaneos del host de 30s.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Corregida fuga de stderr/Error en vitest con código de salida 0, truncamiento con preservación de errores finales en build/playwright/docker, seguridad UTF-8 en reescritura 2>&1 y exclusión de comandos gh/docker interactivos o streaming.',
+      },
+    ],
+  },
+  {
+    version: '0.1.83',
+    tag: 'v0.1.83',
+    date: 'Nov 25, 2026',
+    title: 'Modo de voz inmersivo, teleprompter sincronizado y arquitectura Talker multi-proveedor',
+    items: [
+      {
+        kind: 'added',
+        description: 'Anillo concéntrico y resplandor ambiental WebGL reactivo al volumen de voz y paleta activa en el compositor.',
+      },
+      {
+        kind: 'added',
+        description: 'Teleprompter acoplado con efecto vidrio esmerilado, animación de entrada/salida, karaoke sincronizado por audio a 60 fps y selector de velocidad 0.75x a 2.0x.',
+      },
+      {
+        kind: 'added',
+        description: 'Adaptadores Speech-to-Speech multi-proveedor en Rust (xAI Realtime, Google Gemini Live y OpenAI Realtime) con delegación asíncrona al Thinker y fallback automático a modo cascada.',
+      },
+      {
+        kind: 'added',
+        description: 'Auto-pausa configurable por inactividad para proteger cuota de audio, vaciado de silencio en mute y telemetría de segundos de stream.',
+      },
+      {
+        kind: 'added',
+        description: 'Tarjeta post-llamada con resumen asíncrono en español, visor completo de transcripción en RightDock y selector de 9 voces con paletas de color.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminados avisos falsos de silencio en modo voz continuo y corregido el montaje diferido de RightDock al abrir transcripciones.',
+      },
+    ],
+  },
+  {
+    version: '0.1.82',
+    tag: 'v0.1.82',
+    date: 'Nov 25, 2026',
+    title: 'Correccion de escucha nativa WASAPI, VAD adaptativo y barge-in en Argos',
+    items: [
+      {
+        kind: 'fixed',
+        description: 'Corregida la deteccion de voz (VAD), endpointing automatico por silencio y transcripcion en el motor de captura nativa Rust WASAPI (cpal).',
+      },
+      {
+        kind: 'fixed',
+        description: 'Restaurado el barge-in acustico continuo con captura WASAPI persistente entre turnos, control de mute nativo y audio ducking.',
+      },
+      {
+        kind: 'added',
+        description: 'Conectado el streaming STT nativo en Rust (voice:stt-partial y voice:stt-final) con pre-roll de 400 ms y fallback automatico a WAV.',
+      },
+    ],
+  },
+  {
+    version: '0.1.81',
+    tag: 'v0.1.81',
+    date: 'Nov 25, 2026',
+    title: 'Mejoras de contraste, bordes, uniformidad visual y barra superior translucida',
+    items: [
+      {
+        kind: 'changed',
+        description: 'Jerarquia de bordes y contraste renovada (--glass-border, --glass-card-border, --glass-inner-border, --glass-field-bg) con calibracion dedicada en modales y modo claro/oscuro.',
+      },
+      {
+        kind: 'changed',
+        description: 'Selector superior Agent | Code | Thread adaptado al patron translucido consciente de tema y modo vidrio preservando su geometria y animacion.',
+      },
+      {
+        kind: 'changed',
+        description: 'Diseno unificado entre Configuraciones, Plugins, Rutinas (con modo embebido) y vistas secundarias eliminando dobles marcos, alturas/radios arbitrarios y colores fijos de modo oscuro.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Preservada la elevacion de superficies (--pane, --composer, --menu-plate) y --accent-fill solido en packs de temas, corregidos textos de error (--danger-ink) y el token --warning-text en Changelog.',
+      },
+    ],
+  },
+  {
+    version: '0.1.80',
+    tag: 'v0.1.80',
+    date: 'Nov 25, 2026',
+    title: 'Voice Mode v2 nativo y Realtime, Argos Assistant v2 y Agentes Autonomos v2',
+    items: [
+      {
+        kind: 'added',
+        description: 'Motor de voz v2 de baja latencia: split inmutable de cache KV (messages[0]), poda dinamica de herramientas por intencion, routing hibrido L0/L1/L2, pre-captura especulativa y HUD de latencia TTFA/cache en Ajustes.',
+      },
+      {
+        kind: 'added',
+        description: 'Streaming TTS persistente por WebSocket (stream-input) con fallback automatico y barge-in atomico menor a 50 ms, captura nativa Rust WASAPI (cpal) con STT offline local (Whisper/Parakeet) y modo opcional full-duplex Realtime 24 kHz.',
+      },
+      {
+        kind: 'added',
+        description: 'Configuracion unificada de Audio, Voz y Dictado con recibos persistentes post-llamada (voice-calls/*.json) e historial desplegable en Ajustes de Argos.',
+      },
+      {
+        kind: 'added',
+        description: 'Argos Assistant v2 con alcance total sobre el workspace: manage_tasks, control_subagent, coordinate_swarm, manage_routines, manage_memory, read_diff, run_check y navigate_view, planes consultivos multipaso y atajo global del sistema operativo.',
+      },
+      {
+        kind: 'added',
+        description: 'Plataforma de Agentes Autonomos v2: AutoPilot con LLM multi-proveedor para hilos y terminales con Verification Gates, herramientas kite_tasks/kite_ctx/kite_diff con politicas por agente, Knowledge Packs bajo demanda, rutinas por eventos con historial SQLite, Playbooks multi-agente, auditoria de herramientas y bundles portables.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Eliminada la doble narracion TTS al transmitir por cola de streaming, corregido el truncado de observaciones ReAct con sobres estructurados kite-ctx y ampliada la cobertura E2E de Voice Mode.',
+      },
+    ],
+  },
+  {
+    version: '0.1.79',
+    tag: 'v0.1.79',
+    date: 'Nov 22, 2026',
+    title: 'Argos: asistente de voz consultivo unificado, streaming STT, kite-ctx y Companion Bar',
+    items: [
+      {
+        kind: 'added',
+        description: 'Unificacion del asistente de voz bajo Argos (Opcion A): sesion continua compartida entre el Stage y Footer de Thread y Agent, la capsula flotante ArgosStrip en Code y la nueva barra global ArgosCompanionBar (Alt+Space).',
+      },
+      {
+        kind: 'added',
+        description: 'Cerebro consultivo multi-turno con herramientas rapidas de inspeccion (peek_changes, peek_runs, peek_agents, peek_files, recall_conversations), tarjeta interactiva ConsultativeDraftCard (Confirmar, Refinar, Cancelar) y ejecucion DAG paralela.',
+      },
+      {
+        kind: 'added',
+        description: 'Compresion de contexto de voz con kite-ctx (< 250 tokens), alineacion de cache KV sin marcas de tiempo relativas y handoffs comprimidos <<ccr:HASH>> para subagentes.',
+      },
+      {
+        kind: 'added',
+        description: 'Streaming STT por WebSocket con parciales palabra por palabra, deteccion de clausulas abiertas en espanol (1950 ms), ventana manos libres anti-eco (180 ms) y rampa de barge-in de 20 ms con truncado exacto a lo escuchado.',
+      },
+      {
+        kind: 'fixed',
+        description: 'Orden cronologico real de tarjetas de subagentes e items de voz en el timeline del hilo (createdAtUnixMs y completedAt), deduplicacion de recibos spawn_subagent y diagnostico WASAPI de privacidad de microfono en Windows.',
+      },
+    ],
+  },
+  {
     version: '0.1.78',
     tag: 'v0.1.78',
     date: 'Nov 21, 2026',

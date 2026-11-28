@@ -4,11 +4,59 @@
 //! CLI and desktop agent session contributes to live telemetry without relying on
 //! external HTTP proxies.
 
-use kite_ctx::ContextEngine;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use kite_ctx::{audit_host_prompts, discover_from_host, ContextEngine, DiscoverySummary, PromptAuditSummary};
 use serde_json::{json, Value};
 
-#[tauri::command]
-pub fn fetch_context_monitor() -> Value {
+const HOST_SCAN_CACHE_TTL: Duration = Duration::from_secs(30);
+
+struct CachedHostScan {
+    captured_at: Instant,
+    discovery: DiscoverySummary,
+    audit: PromptAuditSummary,
+}
+
+fn scan_cache() -> &'static Mutex<Option<CachedHostScan>> {
+    static CACHE: OnceLock<Mutex<Option<CachedHostScan>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn invalidate_scan_cache() {
+    if let Ok(mut guard) = scan_cache().lock() {
+        *guard = None;
+    }
+}
+
+fn get_host_scans(force_refresh: bool) -> (DiscoverySummary, PromptAuditSummary) {
+    if !force_refresh {
+        if let Ok(guard) = scan_cache().lock() {
+            if let Some(ref cached) = *guard {
+                if cached.captured_at.elapsed() < HOST_SCAN_CACHE_TTL {
+                    return (cached.discovery.clone(), cached.audit.clone());
+                }
+            }
+        }
+    }
+
+    let home = kite_ctx::resolve_home_dir();
+    let workspace = std::env::current_dir().unwrap_or_else(|_| home.clone());
+    let discovery = discover_from_host(&home, &workspace);
+    let audit = audit_host_prompts(&home, &workspace);
+
+    if let Ok(mut guard) = scan_cache().lock() {
+        *guard = Some(CachedHostScan {
+            captured_at: Instant::now(),
+            discovery: discovery.clone(),
+            audit: audit.clone(),
+        });
+    }
+
+    (discovery, audit)
+}
+
+fn build_context_monitor_payload(force_refresh: bool) -> Value {
     let engine = match ContextEngine::open_default() {
         Ok(e) => e,
         Err(err) => {
@@ -21,9 +69,9 @@ pub fn fetch_context_monitor() -> Value {
 
     match engine.ledger().snapshot(None) {
         Ok(mut snapshot) => {
-            let home = kite_ctx::resolve_home_dir();
-            let workspace = std::env::current_dir().unwrap_or_else(|_| home.clone());
-            snapshot.discovery = kite_ctx::discover_from_host(&home, &workspace);
+            let (discovery, audit) = get_host_scans(force_refresh);
+            snapshot.discovery = discovery;
+            snapshot.audit = audit;
             serde_json::to_value(snapshot).unwrap_or_else(|err| {
                 json!({
                     "ok": false,
@@ -39,7 +87,19 @@ pub fn fetch_context_monitor() -> Value {
 }
 
 #[tauri::command]
+pub fn fetch_context_monitor() -> Value {
+    build_context_monitor_payload(false)
+}
+
+#[tauri::command]
+pub fn refresh_context_monitor() -> Value {
+    invalidate_scan_cache();
+    build_context_monitor_payload(true)
+}
+
+#[tauri::command]
 pub fn reset_context_monitor() -> Value {
+    invalidate_scan_cache();
     let engine = match ContextEngine::open_default() {
         Ok(e) => e,
         Err(err) => {
@@ -124,6 +184,10 @@ mod tests {
         assert_eq!(payload["lifetime"]["tokens_saved"], 1800);
         assert_eq!(payload["session"]["requests"], 1);
         assert_eq!(payload["agents"][0]["agent"], "Orion");
+
+        let refreshed = refresh_context_monitor();
+        assert_eq!(refreshed["ok"], true);
+        assert!(refreshed["audit"].is_object());
 
         let reset = reset_context_monitor();
         assert_eq!(reset["ok"], true);

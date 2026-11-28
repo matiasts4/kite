@@ -5,6 +5,7 @@ import {
   AGENT_UPDATES_INITIAL_DELAY_MS,
   fetchAgentUpdatesSummary,
   resetAgentUpdatesForTest,
+  triggerAgentToolJob,
   useAgentUpdates,
   type AgentUpdatesSummary,
 } from './agentUpdates';
@@ -138,5 +139,24 @@ describe('agentUpdates singleton store', () => {
     const finalSummary = await pForcedB;
     expect(invokeCommandMock).toHaveBeenCalledTimes(2);
     expect(finalSummary.outdatedCount).toBe(0);
+  });
+
+  it('publishes initial running job from triggerAgentToolJob without overwriting newer terminal events', async () => {
+    const h = renderHook(() => useAgentUpdates());
+
+    invokeCommandMock.mockResolvedValueOnce({
+      jobId: 'job-1',
+      engine: 'antigravity',
+      action: 'update',
+      status: 'running',
+      startedAtUnixMs: 1_000,
+    });
+
+    await act(async () => {
+      await triggerAgentToolJob('antigravity', 'update');
+    });
+
+    expect(h.result.current.activeJobs.antigravity?.status).toBe('running');
+    h.unmount();
   });
 });

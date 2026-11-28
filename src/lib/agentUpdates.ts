@@ -206,7 +206,19 @@ export async function triggerAgentToolJob(
     return mockJob;
   }
 
-  return await invokeCommand<ToolJobProgress>('start_agent_tool_job', { engine, action });
+  const job = await invokeCommand<ToolJobProgress>('start_agent_tool_job', { engine, action });
+  if (job && typeof job === 'object' && job.engine) {
+    const existing = cachedActiveJobs[job.engine];
+    const existingIsTerminalForSameJob =
+      existing?.jobId === job.jobId &&
+      (existing.status === 'succeeded' ||
+        existing.status === 'failed' ||
+        existing.status === 'cancelled');
+    if (!existingIsTerminalForSameJob) {
+      notifyJob(job);
+    }
+  }
+  return job;
 }
 
 function notifySummary(summary: AgentUpdatesSummary) {

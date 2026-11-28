@@ -42,6 +42,7 @@ export const ProviderConnectionPanel: React.FC<ProviderConnectionPanelProps> = (
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
   const { summary: updatesSummary, activeJobs, triggerJob, refresh: refreshUpdates } = useAgentUpdates();
   const [isUpdating, setIsUpdating] = useState(false);
+  const [jobStartError, setJobStartError] = useState<string | null>(null);
 
   // Switch default tab if provider only supports API Key (e.g. DeepSeek)
   useEffect(() => {
@@ -52,6 +53,7 @@ export const ProviderConnectionPanel: React.FC<ProviderConnectionPanelProps> = (
     }
     setApiKeyInput('');
     setStatusMessage(null);
+    setJobStartError(null);
   }, [providerId, meta]);
 
   if (!meta) return null;
@@ -199,168 +201,192 @@ export const ProviderConnectionPanel: React.FC<ProviderConnectionPanelProps> = (
       {activeTab === 'cli' && meta.supportsCli ? (
         <div className="qt-conn-panel__body">
           <div className="qt-spec-card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-{/* Version & Update Lifecycle Section */}
-          {updatesSummary?.advisories[providerId] && (() => {
-            const adv = updatesSummary.advisories[providerId];
-            const job = activeJobs[providerId];
-            const isRunning = job?.status === 'running' || isUpdating;
-            const isSucceeded = job?.status === 'succeeded';
+            {/* Version & Update Lifecycle Section */}
+            {updatesSummary?.advisories[providerId] && (() => {
+              const adv = updatesSummary.advisories[providerId];
+              const job = activeJobs[providerId];
+              const isRunning = isUpdating || job?.status === 'running';
+              const isSucceeded = !isRunning && job?.status === 'succeeded';
+              const isFailed = !isRunning && (job?.status === 'failed' || Boolean(jobStartError));
+              const failureMessage =
+                jobStartError ||
+                (job?.status === 'failed'
+                  ? job.error || 'No se pudo completar la operación.'
+                  : null);
 
-            return (
-              <div
-                style={{
-                  marginBottom: '14px',
-                  paddingBottom: '12px',
-                  borderBottom: '1px solid var(--border-subtle, rgba(255,255,255,0.06))',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span className="qt-spec-card__label" style={{ fontWeight: 600 }}>
-                    Estado del CLI / Agente
-                  </span>
+              const runToolJob = async (action: 'update' | 'install') => {
+                setJobStartError(null);
+                setIsUpdating(true);
+                try {
+                  const started = await triggerJob(providerId, action);
+                  if (started?.status === 'failed' && started.error) {
+                    setJobStartError(started.error);
+                  }
+                } catch (err) {
+                  const message =
+                    err instanceof Error
+                      ? err.message
+                      : String(err || 'No se pudo iniciar el proceso.');
+                  setJobStartError(message);
+                } finally {
+                  setIsUpdating(false);
+                }
+              };
 
-                  {adv.state === 'outdated' ? (
-                    <span className="qt-chip" data-tone="warn">
-                      <span className="qt-status-dot" data-tone="warn" />
-                      Actualización disponible
+              return (
+                <div className="qt-lifecycle">
+                  <div className="qt-lifecycle__head">
+                    <span className="qt-spec-card__label qt-lifecycle__title">
+                      Estado del CLI / Agente
                     </span>
-                  ) : adv.state === 'up_to_date' ? (
-                    <span className="qt-chip" data-tone="ok">
-                      <span className="qt-status-dot" data-tone="ok" />
-                      Al día
-                    </span>
-                  ) : adv.state === 'not_installed' ? (
-                    <span className="qt-chip" data-tone="idle">
-                      <span className="qt-status-dot" data-tone="idle" />
-                      No instalado
-                    </span>
-                  ) : null}
-                </div>
 
-                {adv.state === 'outdated' && (
-                  <div style={{ marginTop: '8px' }}>
-                    <p style={{ margin: '0 0 10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                      Nueva versión disponible para <strong>{meta.name}</strong>.
-                      {adv.currentVersion && adv.latestVersion ? (
-                        <span style={{ display: 'block', marginTop: '3px', color: 'var(--text-primary)' }}>
-                          Instalada: <code>v{adv.currentVersion}</code> → Nueva: <strong style={{ color: 'var(--accent, #5c8fff)' }}>v{adv.latestVersion}</strong>
-                        </span>
-                      ) : null}
-                    </p>
+                    {adv.state === 'outdated' ? (
+                      <span className="qt-chip" data-tone="warn">
+                        <span className="qt-status-dot" data-tone="warn" />
+                        Actualización disponible
+                      </span>
+                    ) : adv.state === 'up_to_date' ? (
+                      <span className="qt-chip" data-tone="ok">
+                        <span className="qt-status-dot" data-tone="ok" />
+                        Al día
+                      </span>
+                    ) : adv.state === 'not_installed' ? (
+                      <span className="qt-chip" data-tone="idle">
+                        <span className="qt-status-dot" data-tone="idle" />
+                        No instalado
+                      </span>
+                    ) : null}
+                  </div>
 
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  {adv.state === 'outdated' && (
+                    <div className="qt-lifecycle__body">
+                      <p className="qt-lifecycle__desc">
+                        Nueva versión disponible para <strong>{meta.name}</strong>.
+                        {adv.currentVersion && adv.latestVersion ? (
+                          <span className="qt-lifecycle__ver">
+                            Instalada: <code>v{adv.currentVersion}</code> → Nueva:{' '}
+                            <strong className="qt-lifecycle__ver-next">v{adv.latestVersion}</strong>
+                          </span>
+                        ) : null}
+                      </p>
+
+                      <div className="qt-lifecycle__actions">
+                        <button
+                          type="button"
+                          className="qt-button qt-button--primary"
+                          disabled={isRunning}
+                          onClick={() => void runToolJob('update')}
+                        >
+                          {isRunning ? (
+                            <>
+                              <span className="qt-lifecycle__spinner" aria-hidden="true" />
+                              <span>Actualizando en segundo plano...</span>
+                            </>
+                          ) : isSucceeded ? (
+                            <>
+                              <CheckIcon size={13} />
+                              <span>¡Actualizado con éxito!</span>
+                            </>
+                          ) : isFailed ? (
+                            <>
+                              <AlertCircleIcon size={13} />
+                              <span>Reintentar actualización</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M12 19V5" />
+                                <polyline points="5 12 12 5 19 12" />
+                              </svg>
+                              <span>Actualizar a v{adv.latestVersion}</span>
+                            </>
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          className="qt-button qt-button--ghost"
+                          onClick={() => handleCopy(adv.updateCommand)}
+                          title="Copiar comando de actualización"
+                        >
+                          {copiedCmd === adv.updateCommand ? (
+                            <>
+                              <CheckIcon size={13} />
+                              <span>Copiado</span>
+                            </>
+                          ) : (
+                            <>
+                              <CopyIcon size={13} />
+                              <span>Copiar comando ({adv.updateCommand})</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {job?.lastLine && isRunning && (
+                        <div className="qt-lifecycle__log">{job.lastLine}</div>
+                      )}
+
+                      {isFailed && failureMessage && (
+                        <div className="qt-banner qt-lifecycle__error" data-tone="error" role="alert">
+                          <AlertCircleIcon size={14} />
+                          <span>{failureMessage}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {adv.state === 'up_to_date' && (
+                    <div className="qt-lifecycle__uptodate">
+                      <span className="qt-lifecycle__uptodate-ver">
+                        Versión instalada: <strong>v{adv.currentVersion || 'detectada'}</strong>
+                      </span>
+                      <button
+                        type="button"
+                        className="qt-button qt-button--ghost qt-lifecycle__check-btn"
+                        onClick={() => refreshUpdates(true)}
+                      >
+                        Revisar actualizaciones
+                      </button>
+                    </div>
+                  )}
+
+                  {adv.state === 'not_installed' && (
+                    <div className="qt-lifecycle__body">
+                      <p className="qt-lifecycle__install-copy">
+                        No se detectó el binario de <strong>{meta.name}</strong> en el sistema. Puedes instalarlo con un clic:
+                      </p>
                       <button
                         type="button"
                         className="qt-button qt-button--primary"
                         disabled={isRunning}
-                        onClick={async () => {
-                          setIsUpdating(true);
-                          try {
-                            await triggerJob(providerId, 'update');
-                          } finally {
-                            setIsUpdating(false);
-                          }
-                        }}
+                        onClick={() => void runToolJob('install')}
                       >
                         {isRunning ? (
                           <>
-                            <span style={{ display: 'inline-block', width: '12px', height: '12px', borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', animation: 'spin 0.8s linear infinite' }} />
-                            <span>Actualizando en segundo plano...</span>
+                            <span className="qt-lifecycle__spinner" aria-hidden="true" />
+                            <span>Instalando en segundo plano...</span>
                           </>
-                        ) : isSucceeded ? (
-                          <>
-                            <CheckIcon size={13} />
-                            <span>¡Actualizado con éxito!</span>
-                          </>
+                        ) : isFailed ? (
+                          <span>Reintentar instalación</span>
                         ) : (
-                          <>
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                              <path d="M12 19V5" />
-                              <polyline points="5 12 12 5 19 12" />
-                            </svg>
-                            <span>Actualizar a v{adv.latestVersion}</span>
-                          </>
+                          <span>Instalar {meta.name} CLI</span>
                         )}
                       </button>
 
-                      <button
-                        type="button"
-                        className="qt-button qt-button--ghost"
-                        onClick={() => handleCopy(adv.updateCommand)}
-                        title="Copiar comando de actualización"
-                      >
-                        {copiedCmd === adv.updateCommand ? (
-                          <>
-                            <CheckIcon size={13} />
-                            <span>Copiado</span>
-                          </>
-                        ) : (
-                          <>
-                            <CopyIcon size={13} />
-                            <span>Copiar comando ({adv.updateCommand})</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                    {job?.lastLine && isRunning && (
-                      <div style={{ marginTop: '8px', fontSize: '11px', fontFamily: 'monospace', color: 'var(--text-secondary)', background: 'var(--glass-elevated-bg, rgba(0,0,0,0.2))', border: '1px solid var(--glass-border, var(--block-stroke))', padding: '4px 8px', borderRadius: '4px' }}>
-                        {job.lastLine}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {adv.state === 'up_to_date' && (
-                  <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                      Versión instalada: <strong style={{ color: 'var(--text-primary)' }}>v{adv.currentVersion || 'detectada'}</strong>
-                    </span>
-                    <button
-                      type="button"
-                      className="qt-button qt-button--ghost"
-                      style={{ height: '26px', fontSize: '11px', padding: '0 8px' }}
-                      onClick={() => refreshUpdates(true)}
-                    >
-                      Revisar actualizaciones
-                    </button>
-                  </div>
-                )}
-
-                {adv.state === 'not_installed' && (
-                  <div style={{ marginTop: '8px' }}>
-                    <p style={{ margin: '0 0 8px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                      No se detectó el binario de <strong>{meta.name}</strong> en el sistema. Puedes instalarlo con un clic:
-                    </p>
-                    <button
-                      type="button"
-                      className="qt-button qt-button--primary"
-                      disabled={isRunning}
-                      onClick={async () => {
-                        setIsUpdating(true);
-                        try {
-                          await triggerJob(providerId, 'install');
-                        } finally {
-                          setIsUpdating(false);
-                        }
-                      }}
-                    >
-                      {isRunning ? (
-                        <>
-                          <span style={{ display: 'inline-block', width: '12px', height: '12px', borderRadius: '50%', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', animation: 'spin 0.8s linear infinite' }} />
-                          <span>Instalando en segundo plano...</span>
-                        </>
-                      ) : (
-                        <span>Instalar {meta.name} CLI</span>
+                      {isFailed && failureMessage && (
+                        <div className="qt-banner qt-lifecycle__error" data-tone="error" role="alert">
+                          <AlertCircleIcon size={14} />
+                          <span>{failureMessage}</span>
+                        </div>
                       )}
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
+            <div className="qt-cli-row">
               <span className="qt-spec-card__label">Comando de inicio de sesión</span>
               {isCliActive ? (
                 <span className="qt-chip" data-tone="ok">
@@ -459,9 +485,9 @@ export const ProviderConnectionPanel: React.FC<ProviderConnectionPanelProps> = (
                   alignItems: 'center',
                   justifyContent: 'space-between',
                   padding: '8px 12px',
-                  borderRadius: 'var(--radius-chip)',
-                  background: 'var(--glass-elevated-bg, var(--composer))',
-                  border: '1px solid var(--glass-border, var(--block-stroke))',
+                  borderRadius: 'var(--control-radius, 8px)',
+                  background: 'var(--glass-field-bg, var(--vl-surface-canvas))',
+                  border: '1px solid var(--glass-inner-border, var(--block-stroke))',
                   marginBottom: '10px',
                 }}
               >

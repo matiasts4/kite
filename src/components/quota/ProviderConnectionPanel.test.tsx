@@ -136,4 +136,61 @@ describe('ProviderConnectionPanel', () => {
     await user.click(portalBtn);
     expect(openPortalSpy).toHaveBeenCalledWith('antigravity');
   });
+
+  it('displays failure error message when an update job fails in CLI tab', async () => {
+    const agentUpdatesMod = await import('../../lib/agentUpdates');
+    const spy = vi.spyOn(agentUpdatesMod, 'useAgentUpdates').mockReturnValue({
+      summary: {
+        totalSupported: 1,
+        installedCount: 1,
+        outdatedCount: 1,
+        advisories: {
+          antigravity: {
+            engine: 'antigravity',
+            displayName: 'Antigravity',
+            state: 'outdated',
+            currentVersion: '1.5.17',
+            latestVersion: '1.5.18',
+            updateCommand: 'agy update',
+            checkedAtUnixMs: Date.now(),
+          },
+        },
+        lastCheckedUnixMs: Date.now(),
+      },
+      activeJobs: {
+        antigravity: {
+          jobId: 'job-err-1',
+          engine: 'antigravity',
+          action: 'update',
+          status: 'failed',
+          error: 'No se pudo ejecutar agy update',
+          startedAtUnixMs: Date.now(),
+          finishedAtUnixMs: Date.now(),
+        },
+      },
+      isChecking: false,
+      refresh: vi.fn(),
+      triggerJob: vi.fn(),
+    });
+
+    render(
+      <ProviderConnectionPanel
+        providerId="antigravity"
+        detectedSession={{
+          providerId: 'antigravity',
+          hasSession: true,
+          sessionType: 'cli_authenticated',
+          statusLabel: 'Conectada',
+          statusTone: 'ok',
+        }}
+      />
+    );
+
+    expect(screen.getByText(/no se pudo ejecutar agy update/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reintentar/i })).toBeInTheDocument();
+    // Lifecycle card must not be nested inside the login-command header flex row
+    const loginHeading = screen.getByText(/comando de inicio de sesión/i);
+    expect(loginHeading.parentElement?.querySelector('.qt-lifecycle')).toBeNull();
+    spy.mockRestore();
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { AgentUpdatesBadge } from './AgentUpdatesBadge';
 import { AgentUpdatesPopover } from './AgentUpdatesPopover';
 import type { AgentUpdatesSummary } from '../../types/agentUpdates';
@@ -118,5 +118,121 @@ describe('AgentUpdatesPopover', () => {
     const updateBtn = screen.getByRole('button', { name: /actualizar/i });
     fireEvent.click(updateBtn);
     expect(screen.getByText(/actualizando/i)).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+    });
+  });
+
+  it('renders native SVG iconography without emojis in empty and outdated states', () => {
+    const emptySummary: AgentUpdatesSummary = {
+      totalSupported: 3,
+      installedCount: 2,
+      outdatedCount: 0,
+      advisories: {},
+      lastCheckedUnixMs: Date.now(),
+    };
+
+    const { rerender } = render(
+      <AgentUpdatesPopover
+        summary={emptySummary}
+        activeJobs={{}}
+        isChecking={false}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    const dialog = screen.getByRole('dialog', { name: /actualizaciones de agentes/i });
+    expect(dialog.textContent).not.toMatch(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/u);
+    expect(dialog.querySelectorAll('svg').length).toBeGreaterThanOrEqual(4);
+
+    rerender(
+      <AgentUpdatesPopover
+        summary={mockSummary}
+        activeJobs={{}}
+        isChecking={false}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+    expect(dialog.textContent).not.toMatch(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/u);
+  });
+
+  it('clears loading state and displays error with Retry when update job fails after clicking Actualizar', async () => {
+    const { rerender } = render(
+      <AgentUpdatesPopover
+        summary={mockSummary}
+        activeJobs={{}}
+        isChecking={false}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /actualizar/i }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    rerender(
+      <AgentUpdatesPopover
+        summary={mockSummary}
+        activeJobs={{
+          antigravity: {
+            jobId: 'mock-1',
+            engine: 'antigravity',
+            action: 'update',
+            status: 'failed',
+            error: '"agy" no se reconoce como un comando interno o externo',
+            startedAtUnixMs: Date.now(),
+            finishedAtUnixMs: Date.now(),
+          },
+        }}
+        isChecking={false}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByText(/actualizando\.\.\./i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reintentar/i })).toBeInTheDocument();
+    expect(
+      screen.getByText(/"agy" no se reconoce como un comando interno o externo/i)
+    ).toBeInTheDocument();
+  });
+
+  it('prefers new startError over stale failed job error on retry and falls back when error is empty', async () => {
+    const mod = await import('../../lib/agentUpdates');
+    const spy = vi.spyOn(mod, 'triggerAgentToolJob').mockRejectedValueOnce(new Error('IPC timeout'));
+
+    render(
+      <AgentUpdatesPopover
+        summary={mockSummary}
+        activeJobs={{
+          antigravity: {
+            jobId: 'old-job',
+            engine: 'antigravity',
+            action: 'update',
+            status: 'failed',
+            error: '',
+            startedAtUnixMs: Date.now() - 1000,
+            finishedAtUnixMs: Date.now() - 500,
+          },
+        }}
+        isChecking={false}
+        onRefresh={vi.fn()}
+        onClose={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText(/no se pudo completar la actualización/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /reintentar/i }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText(/ipc timeout/i)).toBeInTheDocument();
+    spy.mockRestore();
   });
 });

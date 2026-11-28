@@ -115,3 +115,84 @@ export async function updateBrowserSurfacePresentation(
     visible,
   });
 }
+
+export interface DiscoveredBrowserServer {
+  url: string;
+  host?: string;
+  port: number;
+  source: string;
+  frameworkHint?: string | null;
+  titleHint?: string | null;
+  reachable?: boolean;
+}
+
+export interface BrowserScreenshotCaptureResult {
+  ok: boolean;
+  surfaceId?: string;
+  mimeType?: string;
+  format?: string;
+  sha256?: string;
+  deduplicated?: boolean;
+  dataBase64?: string;
+  error?: string;
+}
+
+export async function listBrowserSurfaces(
+  workspaceId?: string | null
+): Promise<{ surfaces: BrowserSurfaceView[] }> {
+  return invokeCommand<{ surfaces: BrowserSurfaceView[] }>('list_browser_surfaces', {
+    supportedSchemaVersion: 1,
+    workspaceId: workspaceId ?? null,
+  });
+}
+
+export async function takeoverBrowserSurface(
+  surfaceId: string
+): Promise<BrowserSurfaceView> {
+  return invokeCommand<BrowserSurfaceView>('takeover_browser_surface', {
+    supportedSchemaVersion: 1,
+    surfaceId,
+  });
+}
+
+export async function resumeBrowserSurface(
+  surfaceId: string,
+  threadId?: string | null
+): Promise<BrowserSurfaceView> {
+  return invokeCommand<BrowserSurfaceView>('resume_browser_surface', {
+    supportedSchemaVersion: 1,
+    surfaceId,
+    threadId: threadId ?? null,
+  });
+}
+
+export async function discoverBrowserServers(
+  ports?: number[]
+): Promise<{ servers: DiscoveredBrowserServer[] }> {
+  return invokeCommand<{ servers: DiscoveredBrowserServer[] }>('discover_browser_servers', {
+    supportedSchemaVersion: 1,
+    ports: ports ?? [],
+  });
+}
+
+export async function captureBrowserSurfaceScreenshot(
+  surfaceId: string,
+  format: 'png' | 'jpeg' = 'png',
+  quality = 85
+): Promise<BrowserScreenshotCaptureResult> {
+  return invokeCommand<BrowserScreenshotCaptureResult>('capture_browser_surface_screenshot', {
+    supportedSchemaVersion: 1,
+    surfaceId,
+    format,
+    quality,
+  });
+}
+
+export async function browserAgentAction(
+  payload: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  return invokeCommand<Record<string, unknown>>('browser_agent_action', {
+    supportedSchemaVersion: 1,
+    ...payload,
+  });
+}

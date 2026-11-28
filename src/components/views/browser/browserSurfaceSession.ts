@@ -74,8 +74,8 @@ function initialState(viewport: BrowserViewport): BrowserSessionState {
   return { viewport, phase: 'blank', view: null, busy: false, error: null };
 }
 
-function targetOf(owner: BrowserOwnerRef, surfaceId: string): BrowserTargetRef {
-  return { ...owner, surfaceId };
+function targetOf(owner: BrowserOwnerRef, surfaceId: string, descriptorId?: string): BrowserTargetRef {
+  return { ...owner, descriptorId: descriptorId || owner.descriptorId, surfaceId };
 }
 
 function messageOf(error: unknown, fallback: string): string {
@@ -103,7 +103,15 @@ function sameView(left: BrowserSurfaceView, right: BrowserSurfaceView): boolean 
     left.canGoBack === right.canGoBack &&
     left.canGoForward === right.canGoForward &&
     left.visible === right.visible &&
-    left.designMode === right.designMode
+    left.designMode === right.designMode &&
+    left.ownerKind === right.ownerKind &&
+    left.ownerThreadId === right.ownerThreadId &&
+    left.agentActive === right.agentActive &&
+    left.statusPill === right.statusPill &&
+    left.pausedForAuth === right.pausedForAuth &&
+    left.pauseReason === right.pauseReason &&
+    left.takeoverRequested === right.takeoverRequested &&
+    left.isolated === right.isolated
   );
 }
 
@@ -196,7 +204,7 @@ export class BrowserSurfaceSession {
     if (this.lastBounds === null) return;
 
     const request: PresentationRequest = {
-      target: targetOf(this.owner, view.surfaceId),
+      target: targetOf(this.owner, view.surfaceId, view.descriptorId),
       bounds: this.lastBounds,
       visible: measured !== null && anchor !== null && anchor.visible && !this.occluded,
       generation: this.generation,
@@ -259,7 +267,7 @@ export class BrowserSurfaceSession {
         }
       } else {
         const navigated = await this.api.navigate({
-          target: targetOf(this.owner, current.surfaceId),
+          target: targetOf(this.owner, current.surfaceId, current.descriptorId),
           url,
         });
         if (this.disposed || generation !== this.generation) return false;
@@ -285,7 +293,7 @@ export class BrowserSurfaceSession {
     const generation = this.generation;
     this.update({ busy: true, error: null });
     try {
-      const next = await this.api.control({ target: targetOf(this.owner, view.surfaceId), action });
+      const next = await this.api.control({ target: targetOf(this.owner, view.surfaceId, view.descriptorId), action });
       if (!this.disposed && generation === this.generation) this.commitView(next);
     } catch (error) {
       if (!this.disposed && generation === this.generation) {
@@ -311,7 +319,7 @@ export class BrowserSurfaceSession {
     this.update({ busy: true, error: null });
     try {
       const next = await this.api.control({
-        target: targetOf(this.owner, view.surfaceId),
+        target: targetOf(this.owner, view.surfaceId, view.descriptorId),
         action: enable ? 'startDesignMode' : 'stopDesignMode',
       });
       if (!this.disposed && generation === this.generation) this.commitView(next);
@@ -331,6 +339,68 @@ export class BrowserSurfaceSession {
   /** Returns to the start screen. Only meaningful when no surface is live. */
   reset = (): void => {
     if (this.disposed || this.state.view !== null) return;
+    this.update({ phase: 'blank', view: null, busy: false, error: null });
+  };
+
+  /** Switches the presented native surface to an existing tab without closing background tabs. */
+  attachSurface = async (nextView: BrowserSurfaceView): Promise<void> => {
+    if (this.disposed || this.closing !== null) return;
+    const prev = this.state.view;
+    if (prev && prev.surfaceId === nextView.surfaceId) {
+      this.syncView(nextView);
+      return;
+    }
+    this.generation += 1;
+    this.presentationPending = null;
+    this.presentationInFlight = null;
+    this.lastAppliedPresentation = null;
+    this.clearPoll();
+    if (prev && this.lastBounds !== null && this.isNative()) {
+      try {
+        await this.api.present({
+          target: targetOf(this.owner, prev.surfaceId, prev.descriptorId),
+          bounds: this.lastBounds,
+          visible: false,
+        });
+      } catch (err) {
+        console.warn('[BrowserSurfaceSession] Failed to hide previous tab surface:', prev.surfaceId, err);
+      }
+    }
+    this.update({ phase: 'ready', view: nextView, busy: false, error: null });
+    this.refreshPresentation();
+    this.updatePolling();
+  };
+
+  /** Applies an external state update (e.g., agent status pill, pause, takeover) to the active tab. */
+  syncView = (nextView: BrowserSurfaceView): void => {
+    if (this.disposed) return;
+    const current = this.state.view;
+    if (!current || current.surfaceId !== nextView.surfaceId) return;
+    if (!sameView(current, nextView)) {
+      this.update({ view: nextView, phase: 'ready', error: null });
+    }
+  };
+
+  /** Detaches the current tab from the anchor (keeping background tabs alive) to open a new blank tab. */
+  detachToBlank = async (): Promise<void> => {
+    if (this.disposed) return;
+    const prev = this.state.view;
+    this.generation += 1;
+    this.presentationPending = null;
+    this.presentationInFlight = null;
+    this.lastAppliedPresentation = null;
+    this.clearPoll();
+    if (prev && this.lastBounds !== null && this.isNative()) {
+      try {
+        await this.api.present({
+          target: targetOf(this.owner, prev.surfaceId, prev.descriptorId),
+          bounds: this.lastBounds,
+          visible: false,
+        });
+      } catch (err) {
+        console.warn('[BrowserSurfaceSession] Failed to hide tab before opening blank tab:', prev.surfaceId, err);
+      }
+    }
     this.update({ phase: 'blank', view: null, busy: false, error: null });
   };
 
@@ -379,7 +449,8 @@ export class BrowserSurfaceSession {
     this.lastAppliedPresentation = null;
     this.clearPoll();
     const view = this.state.view;
-    const target = view === null ? this.pendingCloseTarget : targetOf(this.owner, view.surfaceId);
+    const target =
+      view === null ? this.pendingCloseTarget : targetOf(this.owner, view.surfaceId, view.descriptorId);
     const closePromise =
       target === null ? Promise.resolve(true) : closeSurfaceSafely(this.api, target, this.lastBounds);
     this.closing = closePromise;
@@ -402,9 +473,22 @@ export class BrowserSurfaceSession {
     return this.measure(anchor.element, this.state.viewport);
   }
 
+  /** Clears local session state cleanly when the currently viewed surface is closed externally. */
+  handleExternalClose = (closedSurfaceId: string): void => {
+    if (this.disposed) return;
+    if (this.state.view?.surfaceId !== closedSurfaceId) return;
+    this.generation += 1;
+    this.presentationPending = null;
+    this.presentationInFlight = null;
+    this.lastAppliedPresentation = null;
+    this.clearPoll();
+    this.update({ phase: 'blank', view: null, busy: false, error: null });
+  };
+
   private commitView(view: BrowserSurfaceView, refresh = true): boolean {
-    if (this.disposed || view.descriptorId !== this.owner.descriptorId) return false;
     const current = this.state.view;
+    const expectedDescriptorId = current?.descriptorId ?? this.owner.descriptorId;
+    if (this.disposed || view.descriptorId !== expectedDescriptorId) return false;
     if (current !== null) {
       if (view.surfaceId !== current.surfaceId || view.revision < current.revision) return false;
       if (view.revision === current.revision) {
@@ -455,7 +539,11 @@ export class BrowserSurfaceSession {
         }
       } catch (error) {
         if (!this.disposed && request.generation === this.generation) {
-          await this.retire(messageOf(error, POSITION_FAILED));
+          if (isBrowserNotFound(error)) {
+            this.handleExternalClose(request.target.surfaceId);
+          } else {
+            await this.retire(messageOf(error, POSITION_FAILED));
+          }
         }
         return;
       } finally {
@@ -483,7 +571,7 @@ export class BrowserSurfaceSession {
     }
 
     this.update({ busy: true, error: message });
-    const target = targetOf(this.owner, view.surfaceId);
+    const target = targetOf(this.owner, view.surfaceId, view.descriptorId);
     this.pendingCloseTarget = target;
     const retirement = closeSurfaceSafely(this.api, target, this.lastBounds).then((closed) => {
       if (
@@ -532,11 +620,15 @@ export class BrowserSurfaceSession {
     this.pollInFlight = true;
     const generation = this.generation;
     try {
-      const next = await this.api.read({ target: targetOf(this.owner, view.surfaceId) });
+      const next = await this.api.read({ target: targetOf(this.owner, view.surfaceId, view.descriptorId) });
       if (!this.disposed && generation === this.generation) this.commitView(next, false);
     } catch (error) {
       if (!this.disposed && generation === this.generation) {
-        await this.retire(messageOf(error, STOPPED_RESPONDING));
+        if (isBrowserNotFound(error)) {
+          this.handleExternalClose(view.surfaceId);
+        } else {
+          await this.retire(messageOf(error, STOPPED_RESPONDING));
+        }
       }
     } finally {
       this.pollInFlight = false;

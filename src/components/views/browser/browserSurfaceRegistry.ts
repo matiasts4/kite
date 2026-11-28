@@ -38,3 +38,24 @@ export async function closeBrowserSurfaceSession(workspaceId: string | null): Pr
   await session.close();
   if (sessions.get(key) === session) sessions.delete(key);
 }
+
+export async function closeInactiveBrowserSurfaces(
+  activeWorkspaceId: string | null
+): Promise<void> {
+  const activeKey = activeWorkspaceId ?? NO_WORKSPACE_KEY;
+  const inactiveKeys = Array.from(sessions.keys()).filter((key) => key !== activeKey);
+  if (inactiveKeys.length === 0) return;
+
+  await Promise.allSettled(
+    inactiveKeys.map(async (key) => {
+      const session = sessions.get(key);
+      if (session === undefined) return;
+      try {
+        await session.close();
+        if (sessions.get(key) === session) sessions.delete(key);
+      } catch (err) {
+        console.warn('[browserSurfaceRegistry] Failed to close inactive browser surface:', key, err);
+      }
+    })
+  );
+}

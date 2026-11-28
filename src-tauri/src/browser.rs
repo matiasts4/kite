@@ -3,7 +3,7 @@ use crate::persist::body;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use uuid::Uuid;
 
 /// Error codes returned to the UI. A rejected command is shown as an honest
@@ -19,6 +19,8 @@ const OFFSCREEN: (f64, f64, f64, f64) = (-10000.0, -10000.0, 1.0, 1.0);
 
 #[derive(Clone)]
 pub struct SurfacePlacement {
+    pub surface_id: String,
+    pub workspace_id: Option<String>,
     pub label: String,
     pub url: String,
     pub x: f64,
@@ -32,7 +34,9 @@ pub struct SurfacePlacement {
 pub struct SurfaceRecord {
     pub surface_id: String,
     pub descriptor_id: String,
+    pub workspace_id: Option<String>,
     pub url: String,
+    pub title: String,
     pub visible: bool,
     pub revision: i64,
     pub label: String,
@@ -44,6 +48,14 @@ pub struct SurfaceRecord {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    pub owner_kind: String,
+    pub owner_thread_id: Option<String>,
+    pub agent_active: bool,
+    pub status_pill: Option<String>,
+    pub paused_for_auth: bool,
+    pub pause_reason: Option<String>,
+    pub takeover_requested: bool,
+    pub isolated: bool,
 }
 
 pub fn surfaces() -> &'static Mutex<HashMap<String, SurfaceRecord>> {
@@ -120,21 +132,31 @@ pub fn surface_view(record: &SurfaceRecord) -> Value {
         "schemaVersion": 1,
         "surfaceId": record.surface_id,
         "descriptorId": record.descriptor_id,
+        "workspaceId": record.workspace_id,
         "revision": record.revision,
         "displayUrl": display,
         "transportSecurity": transport,
-        // The native side does not read page titles; an empty string means unknown.
-        "title": "",
+        "title": record.title,
         "loading": record.loading,
         "canGoBack": can_go_back,
         "canGoForward": can_go_forward,
         "visible": record.visible,
-        "designMode": record.design_mode
+        "designMode": record.design_mode,
+        "ownerKind": record.owner_kind,
+        "ownerThreadId": record.owner_thread_id,
+        "agentActive": record.agent_active,
+        "statusPill": record.status_pill,
+        "pausedForAuth": record.paused_for_auth,
+        "pauseReason": record.pause_reason,
+        "takeoverRequested": record.takeover_requested,
+        "isolated": record.isolated
     })
 }
 
 pub fn placement_of(record: &SurfaceRecord) -> SurfacePlacement {
     SurfacePlacement {
+        surface_id: record.surface_id.clone(),
+        workspace_id: record.workspace_id.clone(),
         label: record.label.clone(),
         url: record.url.clone(),
         x: record.x,
@@ -234,10 +256,37 @@ pub fn open_surface(request: &Value) -> Result<SurfacePlacement, String> {
     let url = required_url(request)?;
     let visible = request.get("visible").and_then(Value::as_bool).unwrap_or(true);
     let (x, y, width, height) = read_bounds(request.get("bounds"))?;
+    let workspace_id = owner
+        .get("workspaceId")
+        .or_else(|| request.get("workspaceId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let owner_kind = request
+        .get("ownerKind")
+        .or_else(|| owner.get("ownerKind"))
+        .and_then(Value::as_str)
+        .filter(|s| matches!(*s, "user" | "agent"))
+        .unwrap_or("user")
+        .to_string();
+    let owner_thread_id = request
+        .get("ownerThreadId")
+        .or_else(|| owner.get("ownerThreadId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let isolated = request
+        .get("isolated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let record = SurfaceRecord {
         surface_id: surface_id.clone(),
         descriptor_id,
+        workspace_id,
         url: url.clone(),
+        title: String::new(),
         visible,
         revision: 1,
         label: label_for(&surface_id),
@@ -249,6 +298,14 @@ pub fn open_surface(request: &Value) -> Result<SurfacePlacement, String> {
         y,
         width,
         height,
+        owner_kind: owner_kind.clone(),
+        owner_thread_id,
+        agent_active: owner_kind == "agent",
+        status_pill: None,
+        paused_for_auth: false,
+        pause_reason: None,
+        takeover_requested: false,
+        isolated,
     };
     let placement = placement_of(&record);
     surfaces().lock().unwrap().insert(surface_id, record);
@@ -435,7 +492,69 @@ pub fn read_surface(request: &Value) -> Result<SurfacePlacement, String> {
     Ok(placement_of(record))
 }
 
+fn take_inactive_browser_surface_labels(
+    active_workspace_id: Option<&str>,
+    active_surface_id: Option<&str>,
+) -> Vec<String> {
+    let normalized_ws = active_workspace_id.map(str::trim).filter(|s| !s.is_empty());
+    let mut map = surfaces().lock().unwrap();
+    let mut labels = Vec::new();
+    for record in map.values_mut() {
+        if active_surface_id.is_some_and(|sid| sid == record.surface_id) {
+            continue;
+        }
+        // Protect active background agent tabs from workspace-switch eviction.
+        if record.agent_active || record.paused_for_auth {
+            continue;
+        }
+        let same_workspace = match (normalized_ws, record.workspace_id.as_deref()) {
+            (Some(active_ws), Some(rec_ws)) => active_ws == rec_ws,
+            (None, None) => active_surface_id.is_none(),
+            _ => false,
+        };
+        if !same_workspace {
+            if record.visible || record.loading {
+                record.visible = false;
+                record.loading = false;
+                record.revision = record.revision.saturating_add(1);
+            }
+            labels.push(record.label.clone());
+        }
+    }
+    labels
+}
+
+fn close_inactive_browser_surfaces_except(
+    app: &tauri::AppHandle,
+    active_workspace_id: Option<&str>,
+    active_surface_id: Option<&str>,
+) -> usize {
+    let labels = take_inactive_browser_surface_labels(active_workspace_id, active_surface_id);
+    let mut closed = 0;
+    for label in labels {
+        if let Some(webview) = app.get_webview(&label) {
+            if webview.close().is_ok() {
+                closed += 1;
+            }
+        }
+    }
+    closed
+}
+
+#[allow(dead_code)]
+pub fn close_inactive_browser_surfaces(
+    app: &tauri::AppHandle,
+    active_workspace_id: Option<&str>,
+) -> usize {
+    close_inactive_browser_surfaces_except(app, active_workspace_id, None)
+}
+
 pub async fn mount_browser(app: &tauri::AppHandle, placement: &SurfacePlacement) -> Result<(), String> {
+    close_inactive_browser_surfaces_except(
+        app,
+        placement.workspace_id.as_deref(),
+        Some(&placement.surface_id),
+    );
     let window = app
         .get_window("main")
         .or_else(|| app.windows().into_values().next())
@@ -535,6 +654,13 @@ pub async fn update_browser_surface_presentation(
 ) -> Result<Value, String> {
     let req = body(&request).ok_or_else(|| ERR_INVALID.to_string())?;
     let placement = present_surface(req)?;
+    if placement.visible {
+        close_inactive_browser_surfaces_except(
+            &app,
+            placement.workspace_id.as_deref(),
+            Some(&placement.surface_id),
+        );
+    }
     match app.get_webview(&placement.label) {
         Some(webview) => {
             let (x, y, width, height) = if placement.visible {
@@ -556,8 +682,12 @@ pub async fn control_browser_surface(app: tauri::AppHandle, request: Option<Valu
     use tauri_plugin_opener::OpenerExt;
     let req = body(&request).ok_or_else(|| ERR_INVALID.to_string())?;
     let (placement, action, traversed) = control_surface(req)?;
-    if let Some(webview) = app.get_webview(&placement.label) {
-        match action.as_str() {
+    if action == "openExternal" {
+        let _ = app.opener().open_url(&placement.url, None::<&str>);
+        return Ok(placement.view);
+    }
+    match app.get_webview(&placement.label) {
+        Some(webview) => match action.as_str() {
             "back" | "forward" if traversed => {
                 if let Ok(url) = placement.url.parse() {
                     let _ = webview.navigate(url);
@@ -569,9 +699,6 @@ pub async fn control_browser_surface(app: tauri::AppHandle, request: Option<Valu
             "stop" => {
                 let _ = webview.eval("window.stop()");
             }
-            "openExternal" => {
-                let _ = app.opener().open_url(&placement.url, None::<&str>);
-            }
             "startDesignMode" => {
                 let _ = webview.eval("document.designMode = 'on'");
             }
@@ -579,7 +706,18 @@ pub async fn control_browser_surface(app: tauri::AppHandle, request: Option<Valu
                 let _ = webview.eval("document.designMode = 'off'");
             }
             _ => {}
+        },
+        None if placement.visible
+            && matches!(action.as_str(), "back" | "forward" | "reload" | "startDesignMode") =>
+        {
+            mount_browser(&app, &placement).await?;
+            if action == "startDesignMode" {
+                if let Some(webview) = app.get_webview(&placement.label) {
+                    let _ = webview.eval("document.designMode = 'on'");
+                }
+            }
         }
+        None => {}
     }
     Ok(placement.view)
 }
@@ -587,6 +725,9 @@ pub async fn control_browser_surface(app: tauri::AppHandle, request: Option<Valu
 #[tauri::command]
 pub async fn close_browser_surface(app: tauri::AppHandle, request: Option<Value>) -> Result<Value, String> {
     let req = body(&request).ok_or_else(|| ERR_INVALID.to_string())?;
+    if let Ok((sid, _)) = target_ids(req) {
+        crate::browser_cdp::clear_surface_cdp_state(&sid);
+    }
     if let Some(label) = close_surface(req)? {
         if let Some(webview) = app.get_webview(&label) {
             let _ = webview.close();
@@ -602,9 +743,334 @@ pub fn read_browser_surface(request: Option<Value>) -> Result<Value, String> {
     Ok(read_surface(req)?.view)
 }
 
+// ============================================================================
+// Multi-Tab, Agent Ownership, Takeover, Discovery & CDP Tauri Commands
+// ============================================================================
+
+pub fn list_surface_views(workspace_id: Option<&str>) -> Vec<Value> {
+    let normalized = workspace_id.map(str::trim).filter(|s| !s.is_empty());
+    let map = surfaces().lock().unwrap();
+    let mut views: Vec<(String, Value)> = map
+        .values()
+        .filter(|r| match normalized {
+            Some(ws) => r.workspace_id.as_deref() == Some(ws) || r.owner_kind == "agent",
+            None => true,
+        })
+        .map(|r| (r.surface_id.clone(), surface_view(r)))
+        .collect();
+    views.sort_by(|a, b| a.0.cmp(&b.0));
+    views.into_iter().map(|(_, v)| v).collect()
+}
+
+pub fn all_open_surface_urls() -> Vec<String> {
+    let map = surfaces().lock().unwrap();
+    map.values().map(|r| r.url.clone()).collect()
+}
+
+pub fn surface_url_of(surface_id: &str) -> Option<String> {
+    surfaces()
+        .lock()
+        .unwrap()
+        .get(surface_id)
+        .map(|r| r.url.clone())
+}
+
+pub fn most_recent_surface_id() -> Option<String> {
+    let map = surfaces().lock().unwrap();
+    map.values()
+        .max_by_key(|r| (r.agent_active, r.revision))
+        .map(|r| r.surface_id.clone())
+}
+
+pub fn webview_for_surface(app: &tauri::AppHandle, surface_id: &str) -> Option<tauri::Webview> {
+    let label = {
+        let map = surfaces().lock().unwrap();
+        map.get(surface_id).map(|r| r.label.clone())
+    }?;
+    app.get_webview(&label)
+}
+
+pub fn update_surface_title(surface_id: &str, title: &str) {
+    let mut map = surfaces().lock().unwrap();
+    if let Some(record) = map.get_mut(surface_id) {
+        if record.title != title {
+            record.title = title.to_string();
+            record.revision = record.revision.saturating_add(1);
+        }
+    }
+}
+
+pub fn is_agent_takeover_requested(surface_id: &str) -> bool {
+    surfaces()
+        .lock()
+        .unwrap()
+        .get(surface_id)
+        .is_some_and(|r| r.takeover_requested)
+}
+
+pub fn set_browser_surface_agent_state(
+    surface_id: &str,
+    active: bool,
+    status_pill: Option<&str>,
+) {
+    let mut updated_view: Option<Value> = None;
+    {
+        let mut map = surfaces().lock().unwrap();
+        if let Some(record) = map.get_mut(surface_id) {
+            record.agent_active = active;
+            record.status_pill = status_pill.map(str::to_string);
+            record.revision = record.revision.saturating_add(1);
+            updated_view = Some(surface_view(record));
+        }
+    }
+    if let (Some(app), Some(view)) = (crate::get_app_handle(), updated_view) {
+        let _ = app.emit("browser:surface-updated", view);
+    }
+}
+
+pub fn set_browser_surface_paused(surface_id: &str, paused: bool, reason: Option<&str>) {
+    let mut updated_view: Option<Value> = None;
+    {
+        let mut map = surfaces().lock().unwrap();
+        if let Some(record) = map.get_mut(surface_id) {
+            record.paused_for_auth = paused;
+            record.pause_reason = reason.map(str::to_string);
+            if paused {
+                record.agent_active = false;
+                record.status_pill = Some("Sign in required".to_string());
+            }
+            record.revision = record.revision.saturating_add(1);
+            updated_view = Some(surface_view(record));
+        }
+    }
+    if let (Some(app), Some(view)) = (crate::get_app_handle(), updated_view) {
+        let _ = app.emit("browser:surface-updated", view);
+    }
+}
+
+pub fn request_agent_takeover(
+    surface_id: &str,
+    app: Option<&tauri::AppHandle>,
+) -> Result<Value, String> {
+    let view = {
+        let mut map = surfaces().lock().unwrap();
+        let record = map
+            .get_mut(surface_id)
+            .ok_or_else(|| ERR_NOT_FOUND.to_string())?;
+        record.takeover_requested = true;
+        record.agent_active = false;
+        record.paused_for_auth = false;
+        record.pause_reason = None;
+        record.owner_kind = "user".to_string();
+        record.status_pill = Some("You took over".to_string());
+        record.revision = record.revision.saturating_add(1);
+        surface_view(record)
+    };
+    if let Some(handle) = app.or_else(|| crate::get_app_handle()) {
+        let _ = handle.emit("browser:surface-updated", view.clone());
+    }
+    Ok(view)
+}
+
+pub fn resume_agent_control(
+    surface_id: &str,
+    thread_id: Option<&str>,
+    app: Option<&tauri::AppHandle>,
+) -> Result<Value, String> {
+    let view = {
+        let mut map = surfaces().lock().unwrap();
+        let record = map
+            .get_mut(surface_id)
+            .ok_or_else(|| ERR_NOT_FOUND.to_string())?;
+        record.takeover_requested = false;
+        record.paused_for_auth = false;
+        record.pause_reason = None;
+        record.owner_kind = "agent".to_string();
+        if let Some(tid) = thread_id.filter(|s| !s.trim().is_empty()) {
+            record.owner_thread_id = Some(tid.to_string());
+        }
+        record.agent_active = true;
+        record.status_pill = Some("Agent resumed".to_string());
+        record.revision = record.revision.saturating_add(1);
+        surface_view(record)
+    };
+    if let Some(handle) = app.or_else(|| crate::get_app_handle()) {
+        let _ = handle.emit("browser:surface-updated", view.clone());
+    }
+    Ok(view)
+}
+
+pub fn close_surface_by_id(app: &tauri::AppHandle, surface_id: &str) -> Result<bool, String> {
+    let removed = surfaces().lock().unwrap().remove(surface_id);
+    if let Some(record) = removed {
+        if let Some(webview) = app.get_webview(&record.label) {
+            let _ = webview.close();
+        }
+        let _ = app.emit(
+            "browser:surface-closed",
+            json!({ "surfaceId": surface_id }),
+        );
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Opens a new agent-owned tab or navigates an existing tab without stealing UI focus.
+pub async fn open_or_navigate_agent_surface(
+    app: &tauri::AppHandle,
+    requested_surface_id: Option<&str>,
+    url: &str,
+    workspace_id: Option<&str>,
+    thread_id: Option<&str>,
+    visible: bool,
+    isolated: bool,
+) -> Result<(SurfacePlacement, tauri::Webview), String> {
+    let (stored_url, _) = browser_urls(url).ok_or_else(|| ERR_INVALID.to_string())?;
+    if let Some(sid) = requested_surface_id {
+        let existing_placement = {
+            let mut map = surfaces().lock().unwrap();
+            map.get_mut(sid).map(|record| {
+                if record.url != stored_url {
+                    record.history.truncate(record.history_index + 1);
+                    record.history.push(stored_url.clone());
+                    record.history_index = record.history.len() - 1;
+                }
+                record.url = stored_url.clone();
+                record.agent_active = true;
+                record.takeover_requested = false;
+                record.paused_for_auth = false;
+                record.pause_reason = None;
+                record.status_pill = Some("Navigating…".to_string());
+                record.revision = record.revision.saturating_add(1);
+                placement_of(record)
+            })
+        };
+        if let Some(placement) = existing_placement {
+            if let Some(wv) = app.get_webview(&placement.label) {
+                let parsed: tauri::Url = placement.url.parse().map_err(|_| ERR_INVALID.to_string())?;
+                wv.navigate(parsed).map_err(|_| ERR_UNAVAILABLE.to_string())?;
+                let _ = app.emit("browser:surface-updated", placement.view.clone());
+                return Ok((placement, wv));
+            }
+            mount_browser(app, &placement).await?;
+            let wv = app
+                .get_webview(&placement.label)
+                .ok_or_else(|| ERR_UNAVAILABLE.to_string())?;
+            let _ = app.emit("browser:surface-updated", placement.view.clone());
+            return Ok((placement, wv));
+        }
+    }
+
+    let surface_id = requested_surface_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("agent-tab-{}", Uuid::new_v4()));
+    let open_req = json!({
+        "surfaceId": surface_id,
+        "descriptorId": format!("agent-desc-{}", thread_id.unwrap_or("default")),
+        "workspaceId": workspace_id,
+        "url": stored_url,
+        "visible": visible,
+        "ownerKind": "agent",
+        "ownerThreadId": thread_id,
+        "isolated": isolated,
+        "bounds": { "x": 0.0, "y": 40.0, "width": 1280.0, "height": 800.0 }
+    });
+    let placement = open_surface(&open_req)?;
+    if let Err(err) = mount_browser(app, &placement).await {
+        surfaces().lock().unwrap().remove(&placement.surface_id);
+        return Err(err);
+    }
+    let wv = app
+        .get_webview(&placement.label)
+        .ok_or_else(|| ERR_UNAVAILABLE.to_string())?;
+    let _ = app.emit("browser:surface-updated", placement.view.clone());
+    Ok((placement, wv))
+}
+
+#[tauri::command]
+pub fn list_browser_surfaces(request: Option<Value>) -> Result<Value, String> {
+    let ws = body(&request)
+        .and_then(|req| req.get("workspaceId").and_then(Value::as_str))
+        .map(str::to_string);
+    Ok(json!({ "surfaces": list_surface_views(ws.as_deref()) }))
+}
+
+#[tauri::command]
+pub fn takeover_browser_surface(
+    app: tauri::AppHandle,
+    request: Option<Value>,
+) -> Result<Value, String> {
+    let req = body(&request).ok_or_else(|| ERR_INVALID.to_string())?;
+    let surface_id = required_str(req, "surfaceId")?;
+    request_agent_takeover(surface_id, Some(&app))
+}
+
+#[tauri::command]
+pub fn resume_browser_surface(
+    app: tauri::AppHandle,
+    request: Option<Value>,
+) -> Result<Value, String> {
+    let req = body(&request).ok_or_else(|| ERR_INVALID.to_string())?;
+    let surface_id = required_str(req, "surfaceId")?;
+    let thread_id = req.get("threadId").and_then(Value::as_str);
+    resume_agent_control(surface_id, thread_id, Some(&app))
+}
+
+#[tauri::command]
+pub async fn discover_browser_servers(request: Option<Value>) -> Result<Value, String> {
+    let req = body(&request).cloned().unwrap_or_else(|| json!({}));
+    let extra_ports: Vec<u16> = req
+        .get("ports")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64().map(|p| p as u16))
+                .collect()
+        })
+        .unwrap_or_default();
+    let open_urls = all_open_surface_urls();
+    let servers = tokio::task::spawn_blocking(move || {
+        crate::browser_discovery::discover_local_servers(&extra_ports, &[], &open_urls)
+    })
+    .await
+    .map_err(|e| format!("discovery task failed: {e}"))?;
+    Ok(json!({ "servers": servers }))
+}
+
+#[tauri::command]
+pub async fn capture_browser_surface_screenshot(
+    app: tauri::AppHandle,
+    request: Option<Value>,
+) -> Result<Value, String> {
+    let req = body(&request).ok_or_else(|| ERR_INVALID.to_string())?;
+    let surface_id = required_str(req, "surfaceId")?;
+    let wv = webview_for_surface(&app, surface_id).ok_or_else(|| ERR_NOT_FOUND.to_string())?;
+    let format = req.get("format").and_then(Value::as_str).unwrap_or("png");
+    let quality = req.get("quality").and_then(Value::as_u64).unwrap_or(82) as u8;
+    crate::browser_cdp::capture_screenshot(&wv, surface_id, "ui-capture", format, quality, false, false)
+        .await
+}
+
+#[tauri::command]
+pub async fn browser_agent_action(
+    app: tauri::AppHandle,
+    request: Option<Value>,
+) -> Result<Value, String> {
+    let req = body(&request).ok_or_else(|| ERR_INVALID.to_string())?;
+    Ok(crate::browser_cdp::execute_browser_action(Some(&app), req).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn browser_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn target(surface_id: &str, descriptor_id: &str) -> Value {
         json!({ "surfaceId": surface_id, "descriptorId": descriptor_id })
@@ -616,6 +1082,7 @@ mod tests {
 
     #[test]
     fn test_browser_history_and_design_mode() {
+        let _guard = browser_test_lock();
         let sid = "test-surface-1";
         let open_req = json!({
             "target": target(sid, "desc-test-1"),
@@ -675,6 +1142,7 @@ mod tests {
 
     #[test]
     fn test_in_page_navigation_updates_history_stack() {
+        let _guard = browser_test_lock();
         let sid = "test-surface-in-page";
         let open_req = json!({
             "target": target(sid, "desc"),
@@ -806,6 +1274,7 @@ mod tests {
 
     #[test]
     fn test_foreign_descriptor_cannot_touch_surface() {
+        let _guard = browser_test_lock();
         let sid = "test-surface-foreign";
         open_surface(&json!({
             "target": target(sid, "owner-desc"),
@@ -822,6 +1291,7 @@ mod tests {
 
     #[test]
     fn test_presentation_visibility_is_not_forced_by_navigation() {
+        let _guard = browser_test_lock();
         let sid = "test-surface-visibility";
         open_surface(&json!({
             "target": target(sid, "desc"),
@@ -848,6 +1318,7 @@ mod tests {
 
     #[test]
     fn test_presentation_bounds_follow_the_contract() {
+        let _guard = browser_test_lock();
         let sid = "test-surface-bounds";
         open_surface(&json!({
             "target": target(sid, "desc"),
@@ -883,6 +1354,7 @@ mod tests {
 
     #[test]
     fn test_child_loading_mirrors_page_load_and_bumps_revision() {
+        let _guard = browser_test_lock();
         let sid = "test-surface-loading";
         let placement = open_surface(&json!({
             "target": target(sid, "desc"),
@@ -905,6 +1377,7 @@ mod tests {
 
     #[test]
     fn test_open_surface_with_owner_scope_and_target_descriptor() {
+        let _guard = browser_test_lock();
         let sid = "test-surface-owner-scope";
         let placement = open_surface(&json!({
             "owner": {
@@ -920,5 +1393,133 @@ mod tests {
         assert_eq!(placement.view["surfaceId"], sid);
         assert_eq!(placement.view["descriptorId"], "desc-456");
         surfaces().lock().unwrap().remove(sid);
+    }
+
+    #[test]
+    fn inactive_workspace_eviction_targets_other_workspaces_while_preserving_url_history() {
+        let _guard = browser_test_lock();
+        let sid_a = "test-evict-ws-a";
+        let sid_b = "test-evict-ws-b";
+        let p_a = open_surface(&json!({
+            "owner": { "workspaceId": "ws-alpha", "descriptorId": "desc-a" },
+            "target": target(sid_a, "desc-a"),
+            "url": "https://example.com/a1",
+            "visible": true,
+            "bounds": bounds()
+        }))
+        .unwrap();
+        navigate_surface(&json!({
+            "target": target(sid_a, "desc-a"),
+            "url": "https://example.com/a2"
+        }))
+        .unwrap();
+        record_child_loading(&p_a.label, true);
+
+        let p_b = open_surface(&json!({
+            "owner": { "workspaceId": "ws-beta", "descriptorId": "desc-b" },
+            "target": target(sid_b, "desc-b"),
+            "url": "https://example.com/b1",
+            "visible": true,
+            "bounds": bounds()
+        }))
+        .unwrap();
+
+        let prev_a_rev = read_surface(&json!({ "target": target(sid_a, "desc-a") }))
+            .unwrap()
+            .view["revision"]
+            .as_i64()
+            .unwrap();
+
+        let evicted = take_inactive_browser_surface_labels(Some("ws-beta"), Some(sid_b));
+        assert!(evicted.contains(&p_a.label));
+        assert!(!evicted.contains(&p_b.label));
+
+        // Surface A keeps its URL, back history, and bumps revision when visibility/loading reset.
+        let view_a = read_surface(&json!({ "target": target(sid_a, "desc-a") }))
+            .unwrap()
+            .view;
+        assert_eq!(view_a["visible"], false);
+        assert_eq!(view_a["loading"], false);
+        assert_eq!(view_a["displayUrl"], "https://example.com/a2");
+        assert_eq!(view_a["canGoBack"], true);
+        assert!(view_a["revision"].as_i64().unwrap() > prev_a_rev);
+
+        // Returning to workspace A restores presentation cleanly without ERR_NOT_FOUND.
+        let restored_a = present_surface(&json!({
+            "target": target(sid_a, "desc-a"),
+            "visible": true,
+            "bounds": bounds()
+        }))
+        .unwrap();
+        assert_eq!(restored_a.url, "https://example.com/a2");
+        assert_eq!(restored_a.view["visible"], true);
+        assert_eq!(restored_a.view["canGoBack"], true);
+
+        // Now workspace B is inactive.
+        let evicted_back = take_inactive_browser_surface_labels(Some("ws-alpha"), Some(sid_a));
+        assert!(evicted_back.contains(&p_b.label));
+        assert!(!evicted_back.contains(&p_a.label));
+
+        surfaces().lock().unwrap().remove(sid_a);
+        surfaces().lock().unwrap().remove(sid_b);
+    }
+
+    #[test]
+    fn agent_owned_tab_survives_workspace_eviction_and_supports_takeover_resume() {
+        let _guard = browser_test_lock();
+        let sid_agent = "test-agent-tab-1";
+        let sid_user = "test-user-tab-1";
+
+        let p_agent = open_surface(&json!({
+            "surfaceId": sid_agent,
+            "descriptorId": "agent-desc-t1",
+            "workspaceId": "ws-alpha",
+            "ownerKind": "agent",
+            "ownerThreadId": "thread-abc",
+            "url": "http://localhost:5173/checkout",
+            "visible": false,
+            "bounds": bounds()
+        }))
+        .unwrap();
+        assert_eq!(p_agent.view["ownerKind"], "agent");
+        assert_eq!(p_agent.view["ownerThreadId"], "thread-abc");
+        assert_eq!(p_agent.view["agentActive"], true);
+
+        let p_user = open_surface(&json!({
+            "surfaceId": sid_user,
+            "descriptorId": "user-desc-1",
+            "workspaceId": "ws-beta",
+            "url": "https://example.com/",
+            "visible": true,
+            "bounds": bounds()
+        }))
+        .unwrap();
+
+        // Switching to ws-beta must NOT evict the active background agent tab from ws-alpha.
+        let evicted = take_inactive_browser_surface_labels(Some("ws-beta"), Some(sid_user));
+        assert!(!evicted.contains(&p_agent.label));
+        assert!(!evicted.contains(&p_user.label));
+
+        // User takes over the agent tab -> immediately halts agent control and transfers ownership.
+        let taken = request_agent_takeover(sid_agent, None).unwrap();
+        assert_eq!(taken["ownerKind"], "user");
+        assert_eq!(taken["agentActive"], false);
+        assert_eq!(taken["takeoverRequested"], true);
+        assert!(is_agent_takeover_requested(sid_agent));
+
+        // Resuming agent control clears takeover and restores agent ownership.
+        let resumed = resume_agent_control(sid_agent, Some("thread-abc"), None).unwrap();
+        assert_eq!(resumed["ownerKind"], "agent");
+        assert_eq!(resumed["agentActive"], true);
+        assert_eq!(resumed["takeoverRequested"], false);
+        assert!(!is_agent_takeover_requested(sid_agent));
+
+        // Multi-tab listing exposes both tabs.
+        let all = list_surface_views(None);
+        assert!(all.iter().any(|v| v["surfaceId"] == sid_agent));
+        assert!(all.iter().any(|v| v["surfaceId"] == sid_user));
+
+        surfaces().lock().unwrap().remove(sid_agent);
+        surfaces().lock().unwrap().remove(sid_user);
     }
 }

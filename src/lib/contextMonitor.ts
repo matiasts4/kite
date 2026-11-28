@@ -19,6 +19,9 @@ export interface ContextTotals {
   cacheHits: number;
   cacheHitRate: number;
   estimatedUsdSaved: number;
+  grossTokensSaved: number;
+  ccrRetrievedTokens: number;
+  ccrRetrieveCalls: number;
 }
 
 export interface ContextAgentRow {
@@ -77,6 +80,26 @@ export interface ContextDiscoveryView {
   topCandidates: ContextDiscoverCandidate[];
 }
 
+export interface ContextAuditFinding {
+  kind: string;
+  agent: string;
+  path: string;
+  label: string;
+  wastedTokens: number;
+  fixable: boolean;
+  detail: string;
+}
+
+export interface ContextPromptAuditView {
+  totalFiles: number;
+  totalTokens: number;
+  wastedTokens: number;
+  duplicateBlocks: number;
+  staleBlocks: number;
+  oversizedFiles: number;
+  findings: ContextAuditFinding[];
+}
+
 export interface ContextMonitorView {
   engineVersion: string | null;
   activeSessionId: string | null;
@@ -87,11 +110,17 @@ export interface ContextMonitorView {
   categories: ContextCategoryRow[];
   features: ContextFeatureRow[];
   discovery: ContextDiscoveryView;
+  audit: ContextPromptAuditView;
   sparkline: number[];
   avgOverheadMs: number;
   ccrEntries: number;
+  ccrRetrieveCalls: number;
+  ccrRetrieveTokens: number;
   sharedEntries: number;
   readRecords: number;
+  kvSessions: number;
+  kvPrefixHits: number;
+  toolCacheEntries: number;
   quotaPreservation: QuotaPreservationView;
 }
 
@@ -112,6 +141,8 @@ export function formatContextCategoryLabel(category: string): string {
       return 'Respuestas MCP';
     case 'runtime':
       return 'Runtime in-process';
+    case 'browser':
+      return 'Navegador';
     default:
       return category;
   }
@@ -128,6 +159,8 @@ export function formatContextFeatureLabel(feature: string): string {
   if (f === 'read:full') return 'Lectura · Completa';
   if (f === 'stage1_tabular') return 'Compresor JSON · Tabular + Diccionario';
   if (f === 'stage2_crushed') return 'Compresor JSON · Anclas + CCR';
+  if (f === 'exec:json_crusher') return 'Compresor JSON · CLI';
+  if (f.startsWith('cache:')) return `Caché de comandos · ${f.slice('cache:'.length)}`;
   if (f.startsWith('lossless:')) return `Compresión lossless · ${f.slice('lossless:'.length)}`;
   if (f === 'share:put') return 'Handoff compartido · Escritura';
   if (f === 'share:get') return 'Handoff compartido · Lectura';
@@ -136,6 +169,13 @@ export function formatContextFeatureLabel(feature: string): string {
   if (f === 'runtime:thread_history') return 'Runtime · Historial de hilo';
   if (f === 'runtime:subagent_handoff') return 'Runtime · Handoff de subagente';
   if (f.startsWith('runtime:')) return `Runtime · ${f.slice('runtime:'.length)}`;
+  if (f === 'browser:snapshot_stub') return 'Browser · Snapshot sin cambios (caché)';
+  if (f === 'browser:ax_diff') return 'Browser · Delta AX semántico';
+  if (f === 'browser:chrome_strip') return 'Browser · Chrome por origen';
+  if (f === 'browser:network_crush') return 'Browser · Red y consola comprimidas';
+  if (f === 'browser:screenshot_dedup') return 'Browser · Deduplicación de capturas';
+  if (f === 'browser:recipe_replay') return 'Browser · Replay determinístico (0 tokens)';
+  if (f.startsWith('browser:')) return `Browser · ${f.slice('browser:'.length)}`;
   if (f.startsWith('mcp:')) return `Proxy MCP · ${f.slice('mcp:'.length)}`;
   if (f.startsWith('exec:')) return `Filtro CLI · ${f.slice('exec:'.length)}`;
   return f;
@@ -165,16 +205,27 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function bool(value: unknown, fallback = false): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
 function parseTotals(raw: Record<string, unknown> | null): ContextTotals {
+  const tokensSaved = num(raw?.tokens_saved);
   return {
     requests: num(raw?.requests),
     rawTokens: num(raw?.raw_tokens),
     compressedTokens: num(raw?.compressed_tokens),
-    tokensSaved: num(raw?.tokens_saved),
+    tokensSaved,
     savingsPercent: num(raw?.savings_percent),
     cacheHits: num(raw?.cache_hits),
     cacheHitRate: num(raw?.cache_hit_rate),
     estimatedUsdSaved: num(raw?.estimated_usd_saved),
+    grossTokensSaved:
+      raw?.gross_tokens_saved !== undefined && raw?.gross_tokens_saved !== null
+        ? num(raw.gross_tokens_saved, tokensSaved)
+        : tokensSaved,
+    ccrRetrievedTokens: num(raw?.ccr_retrieved_tokens),
+    ccrRetrieveCalls: num(raw?.ccr_retrieve_calls),
   };
 }
 
@@ -281,6 +332,29 @@ export function parseContextMonitorEnvelope(payload: unknown): ContextMonitorSta
         .filter((r): r is ContextDiscoverCandidate => r != null)
     : [];
 
+  const auditRaw = asRecord(root.audit);
+  const auditFindings = Array.isArray(auditRaw?.findings)
+    ? auditRaw.findings
+        .map((item) => {
+          const row = asRecord(item);
+          const kind = text(row?.kind);
+          if (!row || !kind) return null;
+          return {
+            kind,
+            agent: text(row.agent) ?? 'host',
+            path: text(row.path) ?? '',
+            label: text(row.label) ?? kind,
+            wastedTokens: num(row.wasted_tokens),
+            fixable: bool(row.fixable),
+            detail: text(row.detail) ?? '',
+          };
+        })
+        .filter((r): r is ContextAuditFinding => r != null)
+    : [];
+
+  const ccrRetrieveCalls = num(root.ccr_retrieve_calls, lifetime.ccrRetrieveCalls);
+  const ccrRetrieveTokens = num(root.ccr_retrieve_tokens, lifetime.ccrRetrievedTokens);
+
   return {
     status: 'online',
     view: {
@@ -299,11 +373,25 @@ export function parseContextMonitorEnvelope(payload: unknown): ContextMonitorSta
         estimatedMissedTokens: num(discoveryRaw?.estimated_missed_tokens),
         topCandidates,
       },
+      audit: {
+        totalFiles: num(auditRaw?.total_files),
+        totalTokens: num(auditRaw?.total_tokens),
+        wastedTokens: num(auditRaw?.wasted_tokens),
+        duplicateBlocks: num(auditRaw?.duplicate_blocks),
+        staleBlocks: num(auditRaw?.stale_blocks),
+        oversizedFiles: num(auditRaw?.oversized_files),
+        findings: auditFindings,
+      },
       sparkline,
       avgOverheadMs: num(root.avg_overhead_ms),
       ccrEntries: num(root.ccr_entries),
+      ccrRetrieveCalls,
+      ccrRetrieveTokens,
       sharedEntries: num(root.shared_entries),
       readRecords: num(root.read_records),
+      kvSessions: num(root.kv_sessions),
+      kvPrefixHits: num(root.kv_prefix_hits),
+      toolCacheEntries: num(root.tool_cache_entries),
       quotaPreservation: {
         savedTokens30d: num(quotaRaw?.saved_tokens_30d),
         proEquivalentPct: num(quotaRaw?.pro_equivalent_pct),
@@ -320,6 +408,18 @@ export async function loadContextMonitor(): Promise<ContextMonitorState> {
   }
   try {
     const raw = await invokeCommand<unknown>('fetch_context_monitor');
+    return parseContextMonitorEnvelope(raw);
+  } catch {
+    return { status: 'offline', message: CONTEXT_OFFLINE_MESSAGE };
+  }
+}
+
+export async function refreshContextMonitor(): Promise<ContextMonitorState> {
+  if (!isTauriEnvironment()) {
+    return { status: 'offline', message: CONTEXT_OFFLINE_MESSAGE };
+  }
+  try {
+    const raw = await invokeCommand<unknown>('refresh_context_monitor');
     return parseContextMonitorEnvelope(raw);
   } catch {
     return { status: 'offline', message: CONTEXT_OFFLINE_MESSAGE };

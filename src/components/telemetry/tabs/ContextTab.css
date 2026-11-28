@@ -1,0 +1,238 @@
+.ctx-tab-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.ctx-tab-btn {
+  height: var(--vl-control-sm, 26px);
+  padding: 0 10px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--vl-stroke);
+  background: var(--vl-surface-raised);
+  box-shadow: var(--vl-inset);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.ctx-tab-btn:hover {
+  background: var(--hover-fill);
+  border-color: var(--vl-stroke-strong);
+  color: var(--text-primary);
+}
+
+.ctx-tab-btn:focus-visible {
+  outline: 2px solid var(--vl-focus, var(--accent));
+  outline-offset: 2px;
+}
+
+.ctx-card {
+  background: color-mix(in srgb, var(--vl-surface-raised) 86%, transparent);
+  border: 1px solid var(--glass-card-border, var(--vl-stroke));
+  border-radius: var(--card-radius, 12px);
+  box-shadow: var(--vl-inset);
+  padding: 13px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ctx-card--muted {
+  color: var(--text-secondary);
+}
+
+.ctx-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.ctx-hero-label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ctx-section-title {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint, var(--text-secondary));
+}
+
+.ctx-badge-net {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: var(--pill-radius, 9999px);
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+}
+
+.ctx-hero-value {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.ctx-hero-sub {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.ctx-hero-sub-hint {
+  margin-left: 6px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.ctx-hero-breakdown {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.ctx-version {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  color: var(--text-faint, var(--text-secondary));
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ctx-section--divided {
+  border-top: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  padding-top: 9px;
+}
+
+.ctx-session-headline {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-muted-note {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.ctx-metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.ctx-metric-label {
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-metric-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ctx-health-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.ctx-health-tile {
+  padding: 8px 10px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  background: color-mix(in srgb, var(--background) 44%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ctx-health-tile-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint, var(--text-secondary));
+}
+
+.ctx-health-tile-value {
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.ctx-health-tile-sub {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.ctx-audit-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: var(--control-radius, 8px);
+  border: 1px solid color-mix(in srgb, var(--warning-text, var(--accent)) 35%, transparent);
+  background: color-mix(in srgb, var(--warning-text, var(--accent)) 11%, transparent);
+  font-size: 10.5px;
+  color: var(--text-primary);
+}
+
+.ctx-audit-hint {
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: var(--vl-radius-xs, 4px);
+  background: color-mix(in srgb, var(--background) 55%, transparent);
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.ctx-footer-meta {
+  font-size: 10px;
+  color: var(--text-faint, var(--text-secondary));
+  font-variant-numeric: tabular-nums;
+  padding-top: 6px;
+  border-top: 1px solid var(--glass-inner-border, var(--vl-stroke));
+}
+
+.ctx-overview-turn0 {
+  color: var(--warning-text, var(--accent));
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}

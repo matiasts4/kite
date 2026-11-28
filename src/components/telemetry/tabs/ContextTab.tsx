@@ -9,6 +9,7 @@ import {
   formatTokenCount,
   formatUsd,
   loadContextMonitor,
+  refreshContextMonitor,
   resetContextMonitorStats,
   type ContextMonitorState,
   type ContextMonitorView,
@@ -16,87 +17,97 @@ import {
 
 export interface ContextTabProps {
   load?: () => Promise<ContextMonitorState>;
+  onRefresh?: () => Promise<ContextMonitorState>;
   onReset?: () => Promise<boolean>;
   intervalMs?: number;
 }
 
 type PanelState = ContextMonitorState | { status: 'loading' };
 
-const cardStyle: React.CSSProperties = {
-  backgroundColor: 'var(--block-fill)',
-  border: '1px solid var(--block-stroke)',
-  borderRadius: 'var(--card-radius)',
-  padding: '12px',
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '10px',
-};
-
-const sectionHeadingStyle: React.CSSProperties = {
-  fontSize: '10px',
-  fontWeight: 600,
-  letterSpacing: '0.04em',
-  textTransform: 'uppercase',
-  color: 'var(--text-secondary)',
-};
-
 function MetricLine({ label, value }: { label: string; value: string }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', fontSize: '11px' }}>
-      <span style={{ color: 'var(--text-secondary)' }}>{label}</span>
-      <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
+    <div className="ctx-metric-row">
+      <span className="ctx-metric-label">{label}</span>
+      <span className="ctx-metric-value">{value}</span>
     </div>
   );
 }
 
 function ContextPanel({ view }: { view: ContextMonitorView }) {
+  const grossSaved = Math.max(view.lifetime.grossTokensSaved, view.lifetime.tokensSaved);
+  const ccrRetrieved = view.lifetime.ccrRetrievedTokens || view.ccrRetrieveTokens;
+
   return (
-    <div style={cardStyle}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px' }}>
+    <div className="ctx-card">
+      <div className="ctx-hero">
         <div>
-          <div style={sectionHeadingStyle}>Ahorro acumulado</div>
-          <div
-            style={{
-              fontSize: '22px',
-              fontWeight: 700,
-              fontVariantNumeric: 'tabular-nums',
-              marginTop: '2px',
-              color: 'var(--accent, #5c8fff)',
-            }}
-          >
+          <div className="ctx-hero-label-row">
+            <div className="ctx-section-title">Ahorro acumulado</div>
+            <span className="ctx-badge-net">Neto</span>
+          </div>
+          <div className="ctx-hero-value">
             {formatTokenCount(view.lifetime.tokensSaved)} tokens
           </div>
-          <div style={{ fontSize: '12px', fontWeight: 600, fontVariantNumeric: 'tabular-nums', marginTop: '2px' }}>
+          <div className="ctx-hero-sub">
             {formatPercent(view.lifetime.savingsPercent)} · {formatUsd(view.lifetime.estimatedUsdSaved)}
-            <span style={{ marginLeft: '6px', color: 'var(--text-secondary)', fontWeight: 500 }}>Estimado</span>
+            <span className="ctx-hero-sub-hint">Estimado</span>
+          </div>
+          <div className="ctx-hero-breakdown">
+            {ccrRetrieved > 0
+              ? `Bruto ${formatTokenCount(grossSaved)} − CCR ${formatTokenCount(ccrRetrieved)}`
+              : `Bruto ${formatTokenCount(grossSaved)}`}
           </div>
         </div>
         {view.engineVersion ? (
-          <div style={{ fontSize: '10px', color: 'var(--text-secondary)', textAlign: 'right' }}>
-            kite-ctx v{view.engineVersion}
-          </div>
+          <div className="ctx-version">kite-ctx v{view.engineVersion}</div>
         ) : null}
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+      <div className="ctx-section">
         <MetricLine label="Operaciones" value={formatTokenCount(view.lifetime.requests)} />
-        <MetricLine
-          label="Reutilización en caché"
-          value={`${formatTokenCount(view.lifetime.cacheHits)} (${formatPercent(view.lifetime.cacheHitRate)})`}
-        />
         <MetricLine
           label="Cuota preservada (30d · Pro / 5x)"
           value={`${formatPercent(view.quotaPreservation.proEquivalentPct)} · ${formatPercent(view.quotaPreservation.tier5xPct)}`}
         />
       </div>
 
-      <div style={{ borderTop: '1px solid var(--block-stroke)', paddingTop: '8px' }}>
-        <div style={{ ...sectionHeadingStyle, marginBottom: '4px' }}>Esta sesión</div>
-        <div style={{ fontSize: '12px', fontVariantNumeric: 'tabular-nums' }}>
+      <div className="ctx-section ctx-section--divided">
+        <div className="ctx-section-title">Salud del motor</div>
+        <div className="ctx-health-grid">
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">Caché real</span>
+            <span className="ctx-health-tile-value">
+              {formatTokenCount(view.lifetime.cacheHits)} ({formatPercent(view.lifetime.cacheHitRate)})
+            </span>
+            <span className="ctx-health-tile-sub">Lecturas + comandos</span>
+          </div>
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">KV Prefix Hits</span>
+            <span className="ctx-health-tile-value">{formatTokenCount(view.kvPrefixHits)}</span>
+            <span className="ctx-health-tile-sub">{formatTokenCount(view.kvSessions)} sesiones</span>
+          </div>
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">CCR FTS5</span>
+            <span className="ctx-health-tile-value">{formatTokenCount(view.ccrEntries)} entradas</span>
+            <span className="ctx-health-tile-sub">
+              {formatTokenCount(view.ccrRetrieveCalls)} consultas
+            </span>
+          </div>
+          <div className="ctx-health-tile">
+            <span className="ctx-health-tile-label">Tool Cache</span>
+            <span className="ctx-health-tile-value">{formatTokenCount(view.toolCacheEntries)} entradas</span>
+            <span className="ctx-health-tile-sub">git inmutable</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="ctx-section ctx-section--divided">
+        <div className="ctx-section-title">Esta sesión</div>
+        <div className="ctx-session-headline">
           {formatTokenCount(view.session.tokensSaved)} tokens · {formatPercent(view.session.savingsPercent)} ·{' '}
           {formatUsd(view.session.estimatedUsdSaved)}
         </div>
-        <div style={{ fontSize: '10px', color: 'var(--text-secondary)', marginTop: '2px' }}>
+        <div className="ctx-muted-note">
           {formatTokenCount(view.session.requests)} operaciones · {formatTokenCount(view.session.cacheHits)} en caché
         </div>
       </div>
@@ -106,8 +117,8 @@ function ContextPanel({ view }: { view: ContextMonitorView }) {
       ) : null}
 
       {view.agents.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div style={sectionHeadingStyle}>Por agente</div>
+        <div className="ctx-section">
+          <div className="ctx-section-title">Por agente</div>
           {view.agents.map((row) => (
             <MetricLine
               key={row.agent}
@@ -119,8 +130,8 @@ function ContextPanel({ view }: { view: ContextMonitorView }) {
       ) : null}
 
       {view.models.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div style={sectionHeadingStyle}>Por modelo</div>
+        <div className="ctx-section">
+          <div className="ctx-section-title">Por modelo</div>
           {view.models.map((row) => (
             <MetricLine
               key={row.model}
@@ -132,8 +143,8 @@ function ContextPanel({ view }: { view: ContextMonitorView }) {
       ) : null}
 
       {view.features.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div style={sectionHeadingStyle}>Por funcionalidad</div>
+        <div className="ctx-section">
+          <div className="ctx-section-title">Por funcionalidad</div>
           {view.features.map((row) => (
             <MetricLine
               key={row.feature}
@@ -145,8 +156,8 @@ function ContextPanel({ view }: { view: ContextMonitorView }) {
       ) : null}
 
       {view.categories.length > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-          <div style={sectionHeadingStyle}>Por canal</div>
+        <div className="ctx-section">
+          <div className="ctx-section-title">Por canal</div>
           {view.categories.map((row) => (
             <MetricLine
               key={row.category}
@@ -157,9 +168,45 @@ function ContextPanel({ view }: { view: ContextMonitorView }) {
         </div>
       ) : null}
 
+      {view.audit.totalFiles > 0 ? (
+        <div className="ctx-section ctx-section--divided">
+          <div className="ctx-section-title">Auditoría Turn-0</div>
+          <MetricLine
+            label="Archivos / Tokens Turn-0"
+            value={`${formatTokenCount(view.audit.totalFiles)} / ~${formatTokenCount(view.audit.totalTokens)}`}
+          />
+          {view.audit.wastedTokens > 0 ? (
+            <div className="ctx-audit-banner">
+              <span>
+                ~{formatTokenCount(view.audit.wastedTokens)} redundantes ({view.audit.duplicateBlocks} dup ·{' '}
+                {view.audit.staleBlocks} obsoletos · {view.audit.oversizedFiles} grandes)
+              </span>
+              <code className="ctx-audit-hint">kite ctx audit --fix</code>
+            </div>
+          ) : (
+            <div className="ctx-muted-note">
+              Sin bloques duplicados ni reglas obsoletas en Turn-0.
+            </div>
+          )}
+          {view.audit.findings.slice(0, 3).map((finding, idx) => (
+            <MetricLine
+              key={`${finding.kind}:${finding.path}:${idx}`}
+              label={`${finding.fixable ? '↳ ' : 'ℹ '}${finding.agent} · ${finding.label}`}
+              value={
+                finding.fixable
+                  ? `~${formatTokenCount(finding.wastedTokens)} (reparable)`
+                  : `~${formatTokenCount(finding.wastedTokens)} (${
+                      finding.kind === 'cross_host_overlap' ? 'compartido' : 'grande'
+                    })`
+              }
+            />
+          ))}
+        </div>
+      ) : null}
+
       {view.discovery && view.discovery.scannedCommands > 0 ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', borderTop: '1px solid var(--block-stroke)', paddingTop: '8px' }}>
-          <div style={sectionHeadingStyle}>Auditoría de intercepción</div>
+        <div className="ctx-section ctx-section--divided">
+          <div className="ctx-section-title">Auditoría de intercepción</div>
           <MetricLine
             label="Comandos auditados / optimizados"
             value={`${formatTokenCount(view.discovery.scannedCommands)} / ${formatTokenCount(view.discovery.alreadyOptimized)}`}
@@ -179,14 +226,14 @@ function ContextPanel({ view }: { view: ContextMonitorView }) {
               ))}
             </>
           ) : (
-            <div style={{ fontSize: '10px', color: 'var(--text-secondary)' }}>
+            <div className="ctx-muted-note">
               100% de los comandos elegibles fueron interceptados por hooks activos.
             </div>
           )}
         </div>
       ) : null}
 
-      <div style={{ fontSize: '10px', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
+      <div className="ctx-footer-meta">
         Sobrecarga {formatMs(view.avgOverheadMs)} · CCR {formatTokenCount(view.ccrEntries)} · Handoffs{' '}
         {formatTokenCount(view.sharedEntries)} · Lecturas {formatTokenCount(view.readRecords)}
       </div>
@@ -196,22 +243,26 @@ function ContextPanel({ view }: { view: ContextMonitorView }) {
 
 export const ContextTab: React.FC<ContextTabProps> = ({
   load = loadContextMonitor,
+  onRefresh,
   onReset = resetContextMonitorStats,
   intervalMs = 5000,
 }) => {
   const [state, setState] = useState<PanelState>({ status: 'loading' });
+  const isCustomLoader = load !== loadContextMonitor;
+  const effectiveRefresh = onRefresh ?? (isCustomLoader ? load : refreshContextMonitor);
 
   const refresh = useCallback(async () => {
-    const next = await load();
+    const next = await effectiveRefresh();
     setState(next);
-  }, [load]);
+  }, [effectiveRefresh]);
 
   const handleReset = useCallback(async () => {
     const ok = await onReset();
     if (ok) {
-      await refresh();
+      const next = await load();
+      setState(next);
     }
-  }, [onReset, refresh]);
+  }, [load, onReset]);
 
   useEffect(() => {
     let active = true;
@@ -236,47 +287,21 @@ export const ContextTab: React.FC<ContextTabProps> = ({
 
   return (
     <section aria-label="Monitor de Contexto">
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px', marginBottom: '8px' }}>
-        <button
-          type="button"
-          onClick={() => void handleReset()}
-          style={{
-            height: 'var(--vl-control-sm)',
-            padding: '0 10px',
-            borderRadius: 'var(--control-radius)',
-            border: '1px solid var(--block-stroke)',
-            background: 'transparent',
-            color: 'var(--text-secondary)',
-            fontSize: '11px',
-            cursor: 'pointer',
-          }}
-        >
+      <div className="ctx-tab-toolbar">
+        <button type="button" onClick={() => void handleReset()} className="ctx-tab-btn">
           Reiniciar
         </button>
-        <button
-          type="button"
-          onClick={() => void refresh()}
-          style={{
-            height: 'var(--vl-control-sm)',
-            padding: '0 10px',
-            borderRadius: 'var(--control-radius)',
-            border: '1px solid var(--block-stroke)',
-            background: 'transparent',
-            color: 'var(--text-secondary)',
-            fontSize: '11px',
-            cursor: 'pointer',
-          }}
-        >
+        <button type="button" onClick={() => void refresh()} className="ctx-tab-btn">
           Actualizar
         </button>
       </div>
       {state.status === 'loading' ? (
-        <div role="status" style={{ ...cardStyle, color: 'var(--text-secondary)' }}>
+        <div role="status" className="ctx-card ctx-card--muted">
           Leyendo métricas del motor de contexto.
         </div>
       ) : null}
       {state.status === 'offline' ? (
-        <div role="status" style={{ ...cardStyle, color: 'var(--text-secondary)' }}>
+        <div role="status" className="ctx-card ctx-card--muted">
           {state.message || CONTEXT_OFFLINE_MESSAGE}
         </div>
       ) : null}

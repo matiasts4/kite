@@ -8,6 +8,7 @@
 @import "./components/diffs/kiteDiffs.css";
 @import "./components/ui/agent-indicators.css";
 @import "./components/theme/theme-visuals.css";
+@import "./components/telemetry/tabs/ContextTab.css";
 
 
 /* Root theme presets */
@@ -17,6 +18,10 @@
 }
 
 /* Maintain sidebar toggle button in static position beside brand lockup regardless of sidebar state */
+.titlebar {
+  grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr);
+}
+
 .titlebar__leading,
 .titlebar__leading--band {
   width: auto !important;
@@ -26,6 +31,21 @@
 .titlebar__leading .brand-lockup,
 .titlebar__leading--band .brand-lockup {
   margin-right: 0 !important;
+}
+
+@container app-frame (width <= 920px) {
+  .titlebar__leading,
+  .titlebar__trailing {
+    gap: var(--space-2, 8px);
+  }
+
+  .titlebar__leading .brand-lockup span {
+    display: none;
+  }
+
+  .titlebar__leading .brand-lockup__mark {
+    margin-right: 0;
+  }
 }
 
 .main-pane--stacked {
@@ -154,7 +174,7 @@ html, body, #root {
 /* Custom scrollbars */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+  scrollbar-color: var(--scrollbar-thumb, rgba(128, 128, 128, 0.28)) transparent;
 }
 
 ::-webkit-scrollbar {
@@ -428,6 +448,32 @@ select option:hover {
   color: var(--text-secondary);
 }
 
+/* Per-project thread list expand/collapse overflow toggle */
+.chat-thread-workspace__more {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: var(--vl-control-sm, 26px);
+  padding: 0 var(--space-2, 8px) 0 var(--space-7, 28px);
+  border: 0;
+  border-radius: var(--vl-radius-sm, 6px);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-caption, 11px);
+  font-weight: var(--weight-medium, 500);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--duration-ink, 0.12s) var(--ease-ink, ease),
+              color var(--duration-ink, 0.12s) var(--ease-ink, ease);
+}
+
+.chat-thread-workspace__more:hover,
+.chat-thread-workspace__more:focus-visible {
+  background: var(--hover-fill);
+  color: var(--text-primary);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -442,6 +488,165 @@ select option:hover {
   .animate-spin {
     animation: none;
   }
+}
+
+/* Workspace folder items & thread rail utility classes (design-token compliant) */
+.chat-rail__search {
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--separator);
+}
+
+.chat-rail__search-input {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font-size: var(--text-caption);
+  color: var(--text-primary);
+  padding: 2px 0;
+}
+
+.chat-rail__search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--vl-radius-xs, 4px);
+}
+
+.chat-rail__search-clear:hover {
+  color: var(--text-primary);
+}
+
+.workspace-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--control-row, 28px);
+  padding: 0 var(--space-2, 8px);
+  border-radius: var(--control-radius, 8px);
+}
+
+.workspace-item__toggle {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font-size: var(--text-row, 12px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
+}
+
+.workspace-item__chevron {
+  flex-shrink: 0;
+  transition: transform 120ms ease;
+}
+
+.workspace-item__toggle[aria-expanded='true'] .workspace-item__chevron {
+  transform: rotate(90deg);
+}
+
+.workspace-item__folder-icon {
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.workspace-item__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-item__action {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  width: var(--vl-control-sm, 26px);
+  height: var(--vl-control-sm, 26px);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--vl-radius-xs, 4px);
+  flex-shrink: 0;
+  transition: background-color var(--duration-ink, 0.12s) var(--ease-ink, ease),
+              color var(--duration-ink, 0.12s) var(--ease-ink, ease);
+}
+
+.workspace-item__action:hover,
+.workspace-item__action:focus-visible {
+  background: var(--hover-fill);
+  color: var(--text-primary);
+}
+
+.chat-rail__settled-title {
+  margin: 0;
+  text-transform: none;
+}
+
+.chat-rail__settled-chevron {
+  flex-shrink: 0;
+  transition: transform 120ms ease;
+}
+
+.chat-rail__settled-toggle[aria-expanded='true'] .chat-rail__settled-chevron {
+  transform: rotate(90deg);
+}
+
+.chat-rail__settled-count {
+  margin-left: auto;
+  font-size: var(--text-badge);
+  color: var(--text-faint);
+  padding: 0 4px;
+  border-radius: var(--radius-chip);
+  background: var(--chip-fill);
+}
+
+.chat-rail__undo {
+  margin: var(--space-2, 8px);
+  padding: var(--space-2, 8px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2, 8px);
+  border: 1px solid var(--separator);
+}
+
+/* Reserve horizontal clearance on thread row hover/focus/menu-open so quick actions never cover title text */
+.chat-thread-row:hover .chat-thread-row__select,
+.chat-thread-row:has(:focus-visible) .chat-thread-row__select,
+.chat-thread-row--menu-open .chat-thread-row__select {
+  padding-right: 52px;
+}
+
+.chat-thread-row--menu-open .chat-thread-row__trailing {
+  visibility: hidden;
+}
+
+.chat-thread-row--menu-open .chat-thread-row__actions {
+  opacity: 1;
+}
+
+.chat-thread-row:has(.chat-thread-row__actions > :nth-child(3)):hover .chat-thread-row__select,
+.chat-thread-row:has(.chat-thread-row__actions > :nth-child(3)):has(:focus-visible) .chat-thread-row__select,
+.chat-thread-row--menu-open:has(.chat-thread-row__actions > :nth-child(3)) .chat-thread-row__select {
+  padding-right: 72px;
 }
 
 

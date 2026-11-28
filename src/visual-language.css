@@ -66,7 +66,11 @@ body.kite-app {
   --glass-modal-scrim: var(--scrim, rgba(0, 0, 0, 0.72));
   --glass-blur: none;
   --glass-overlay-blur: var(--menu-backdrop, blur(24px) saturate(160%));
-  --glass-border: var(--vl-stroke-strong);
+  --glass-border: var(--vl-stroke);
+  --glass-card-border: var(--block-stroke);
+  --glass-card-border-hover: var(--vl-stroke-strong);
+  --glass-inner-border: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  --glass-field-bg: color-mix(in srgb, var(--background, #0a0a0a) 64%, var(--pane, #141414));
   --glass-highlight: var(--vl-inset);
   --glass-shadow: var(--vl-shadow-card);
 
@@ -137,6 +141,10 @@ html[data-theme='light'] body.kite-app {
   --vl-primary-top: #1f252e;
   --vl-primary-bottom: #0b0f14;
   --vl-primary-ink: #f7fafc;
+  --glass-card-border: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  --glass-card-border-hover: color-mix(in srgb, var(--text-primary) 18%, transparent);
+  --glass-inner-border: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  --glass-field-bg: color-mix(in srgb, var(--background, #e5e5e5) 34%, #ffffff);
 }
 
 /* Selection --------------------------------------------------------------- */
@@ -423,7 +431,7 @@ body.kite-app :is(.secondary-button, .ghost-button, .danger-button):focus-visibl
 
 body.kite-app .ui-card {
   border-radius: var(--vl-radius-lg);
-  border-color: var(--vl-stroke);
+  border-color: var(--glass-card-border, var(--vl-stroke));
   background: var(--vl-surface-raised);
   box-shadow: var(--vl-inset);
 }
@@ -434,14 +442,28 @@ html[data-theme='light'] body.kite-app .ui-card {
 
 body.kite-app .plugin-card {
   border-radius: var(--vl-radius-lg);
-  border-color: var(--vl-stroke);
+  border-color: var(--glass-card-border, var(--vl-stroke));
   background: var(--vl-surface-raised);
   box-shadow: var(--vl-inset);
 }
 
 body.kite-app .plugin-card:hover {
-  border-color: var(--vl-stroke-strong);
+  border-color: var(--glass-card-border-hover, var(--vl-stroke-strong));
   box-shadow: var(--vl-inset), var(--vl-shadow-card);
+}
+
+body.kite-app .plugin-search {
+  height: var(--vl-control-md, 32px);
+  border-radius: var(--control-radius, 8px);
+  background: var(--glass-field-bg, var(--vl-surface-canvas));
+  border: 1px solid var(--glass-inner-border, var(--vl-stroke));
+  box-shadow: var(--vl-inset-field);
+}
+
+body.kite-app .plugin-search:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 body.kite-app .ui-popover {
@@ -493,10 +515,10 @@ body.kite-app .mode-toggle--stadium {
   min-height: 32px !important;
   max-height: 32px !important;
   border-radius: 9999px !important;
-  background: #090a0d !important;
-  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  background: color-mix(in srgb, var(--pane, #141414) 76%, var(--background, #0a0a0a)) !important;
+  border: 1px solid var(--vl-stroke) !important;
   padding: 3px !important;
-  box-shadow: inset 0 1.5px 4px rgba(0, 0, 0, 0.85) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.36) !important;
   gap: 2px !important;
   margin: 0 !important;
   align-self: center !important;
@@ -522,7 +544,7 @@ body.kite-app .mode-toggle--stadium .mode-toggle__item {
   font-size: 12.5px !important;
   font-weight: 550 !important;
   letter-spacing: -0.01em !important;
-  color: #838891 !important;
+  color: var(--text-secondary) !important;
   cursor: pointer !important;
   user-select: none !important;
   transition: color 140ms ease !important;
@@ -541,13 +563,13 @@ body.kite-app .mode-toggle--stadium .mode-toggle__item:after {
 
 .mode-toggle--stadium .mode-toggle__item:hover,
 body.kite-app .mode-toggle--stadium .mode-toggle__item:hover {
-  color: #e4e7eb !important;
+  color: var(--text-primary) !important;
   background: transparent !important;
 }
 
 .mode-toggle--stadium .mode-toggle__item--active,
 body.kite-app .mode-toggle--stadium .mode-toggle__item--active {
-  color: #ffffff !important;
+  color: var(--text-primary) !important;
   background: transparent !important;
   font-weight: 550 !important;
 }
@@ -584,27 +606,117 @@ body.kite-app .mode-toggle--stadium .mode-toggle__stadium-backdrop {
   height: 100% !important;
   min-height: 26px !important;
   border-radius: 9999px !important;
-  background: #26282d !important;
-  border: 1px solid rgba(255, 255, 255, 0.13) !important;
+  background: color-mix(in srgb, var(--composer, #1c1c1e) 86%, var(--text-primary) 10%) !important;
+  border: 1px solid var(--vl-stroke-strong) !important;
   box-shadow:
-    0 1.5px 4px rgba(0, 0, 0, 0.55),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12) !important;
+    0 1px 3px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 12%, transparent) !important;
 }
 
-/* Subtle chromatic ambient illumination matching BorderBeam colors */
+/* Light-mode solid stadium switcher adaptation */
+html[data-theme='light'] .mode-toggle--stadium,
+html[data-theme='light'] body.kite-app .mode-toggle--stadium {
+  background: color-mix(in srgb, var(--text-primary) 5%, var(--pane, #fafafa)) !important;
+  border-color: var(--vl-stroke) !important;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.08) !important;
+}
+
+html[data-theme='light'] .mode-toggle--stadium .mode-toggle__stadium-backdrop,
+html[data-theme='light'] body.kite-app .mode-toggle--stadium .mode-toggle__stadium-backdrop {
+  background: var(--menu-plate, #ffffff) !important;
+  border: 1px solid color-mix(in srgb, var(--text-primary) 12%, transparent) !important;
+  box-shadow:
+    0 1px 3px rgba(15, 23, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9) !important;
+}
+
+/* Translucent frosted-glass stadium switcher (adapts to StageBackdrop + TitleBar chrome) */
+html[data-surface-glass='true'] .mode-toggle--stadium,
+html[data-surface-glass='true'] body.kite-app .mode-toggle--stadium {
+  background: color-mix(
+    in srgb,
+    var(--pane, #141414) clamp(26%, calc(var(--theme-surface-opacity, 56%) * 0.62), 62%),
+    transparent
+  ) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: var(--glass-border) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 8%, transparent),
+    0 4px 12px -6px rgba(0, 0, 0, 0.42) !important;
+}
+
+html[data-surface-glass='true'] .mode-toggle--stadium .mode-toggle__stadium-backdrop,
+html[data-surface-glass='true'] body.kite-app .mode-toggle--stadium .mode-toggle__stadium-backdrop {
+  background: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--composer, var(--pane, #1c1c1e)) 84%, var(--text-primary) 16%)
+      clamp(52%, calc(var(--theme-surface-opacity, 56%) + 12%), 82%),
+    transparent
+  ) !important;
+  border: 1px solid color-mix(in srgb, var(--text-primary) 20%, transparent) !important;
+  box-shadow:
+    0 2px 6px -2px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 18%, transparent) !important;
+}
+
+html[data-surface-glass='true'][data-theme='light'] .mode-toggle--stadium,
+html[data-surface-glass='true'][data-theme='light'] body.kite-app .mode-toggle--stadium {
+  background: color-mix(
+    in srgb,
+    var(--pane, #fffdf9) clamp(34%, calc(var(--theme-surface-opacity, 56%) * 0.72), 68%),
+    transparent
+  ) !important;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-color: var(--glass-border) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 4px 12px -6px rgba(15, 23, 42, 0.14) !important;
+}
+
+html[data-surface-glass='true'][data-theme='light'] .mode-toggle--stadium .mode-toggle__stadium-backdrop,
+html[data-surface-glass='true'][data-theme='light'] body.kite-app .mode-toggle--stadium .mode-toggle__stadium-backdrop {
+  background: color-mix(
+    in srgb,
+    var(--menu-plate, #ffffff) clamp(72%, calc(var(--theme-surface-opacity, 56%) + 26%), 92%),
+    transparent
+  ) !important;
+  border: 1px solid color-mix(in srgb, var(--text-primary) 13%, transparent) !important;
+  box-shadow:
+    0 1px 4px rgba(15, 23, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92) !important;
+}
+
+/* Subtle chromatic ambient illumination matching active mode */
 .mode-toggle--stadium[data-mode='agent'] .mode-toggle__stadium-indicator,
 body.kite-app .mode-toggle--stadium[data-mode='agent'] .mode-toggle__stadium-indicator {
-  box-shadow: 0 0 14px -3px rgba(56, 189, 248, 0.35) !important;
+  box-shadow: 0 0 14px -3px rgba(56, 189, 248, 0.24) !important;
 }
 
 .mode-toggle--stadium[data-mode='code'] .mode-toggle__stadium-indicator,
 body.kite-app .mode-toggle--stadium[data-mode='code'] .mode-toggle__stadium-indicator {
-  box-shadow: 0 0 14px -3px rgba(45, 212, 191, 0.35) !important;
+  box-shadow: 0 0 14px -3px rgba(45, 212, 191, 0.24) !important;
 }
 
 .mode-toggle--stadium[data-mode='chat'] .mode-toggle__stadium-indicator,
 body.kite-app .mode-toggle--stadium[data-mode='chat'] .mode-toggle__stadium-indicator {
-  box-shadow: 0 0 14px -3px rgba(244, 63, 94, 0.35) !important;
+  box-shadow: 0 0 14px -3px rgba(244, 63, 94, 0.24) !important;
+}
+
+html[data-theme='light'] .mode-toggle--stadium[data-mode='agent'] .mode-toggle__stadium-indicator,
+html[data-theme='light'] body.kite-app .mode-toggle--stadium[data-mode='agent'] .mode-toggle__stadium-indicator {
+  box-shadow: 0 0 12px -3px rgba(56, 189, 248, 0.16) !important;
+}
+
+html[data-theme='light'] .mode-toggle--stadium[data-mode='code'] .mode-toggle__stadium-indicator,
+html[data-theme='light'] body.kite-app .mode-toggle--stadium[data-mode='code'] .mode-toggle__stadium-indicator {
+  box-shadow: 0 0 12px -3px rgba(45, 212, 191, 0.16) !important;
+}
+
+html[data-theme='light'] .mode-toggle--stadium[data-mode='chat'] .mode-toggle__stadium-indicator,
+html[data-theme='light'] body.kite-app .mode-toggle--stadium[data-mode='chat'] .mode-toggle__stadium-indicator {
+  box-shadow: 0 0 12px -3px rgba(244, 63, 94, 0.16) !important;
 }
 
 /* Global Stadium Buttons */
@@ -1004,12 +1116,12 @@ html[data-backdrop]:not([data-backdrop='none']) body.kite-app .workspace-tab-lay
 
 /* Contrast scaling driven by --theme-contrast (0-100, default 50) */
 html[data-theme] body.kite-app {
-  --vl-contrast-border: clamp(6%, calc(4% + var(--theme-contrast, 50) * 0.2%), 32%);
-  --vl-contrast-border-strong: clamp(12%, calc(8% + var(--theme-contrast, 50) * 0.3%), 46%);
+  --vl-contrast-border: clamp(6%, calc(4% + var(--theme-contrast, 50) * 0.14%), 22%);
+  --vl-contrast-border-strong: clamp(10%, calc(7% + var(--theme-contrast, 50) * 0.22%), 34%);
   --vl-stroke: color-mix(in srgb, var(--text-primary) var(--vl-contrast-border), transparent);
   --vl-stroke-strong: color-mix(in srgb, var(--text-primary) var(--vl-contrast-border-strong), transparent);
   --panel-stroke: var(--vl-stroke);
-  --block-stroke: color-mix(in srgb, var(--text-primary) clamp(4%, calc(2% + var(--theme-contrast, 50) * 0.16%), 26%), transparent);
+  --block-stroke: color-mix(in srgb, var(--text-primary) clamp(5%, calc(3% + var(--theme-contrast, 50) * 0.12%), 20%), transparent);
 }
 
 html[data-contrast-custom='true'] body.kite-app {
@@ -1049,7 +1161,13 @@ html[data-surface-glass='true'] body.kite-app {
   );
   --glass-elevated-bg: color-mix(
     in srgb,
-    var(--composer, var(--pane, #18181b)) clamp(28%, calc(var(--theme-surface-opacity, 56%) * 0.82), 84%),
+    color-mix(in srgb, var(--composer, var(--pane, #18181b)) 94%, var(--text-primary) 6%)
+      clamp(52%, calc(var(--theme-surface-opacity, 56%) + 6%), 84%),
+    transparent
+  );
+  --glass-field-bg: color-mix(
+    in srgb,
+    var(--background, #090a0c) clamp(46%, calc(var(--theme-surface-opacity, 56%) * 0.85), 76%),
     transparent
   );
   --glass-composer-bg: color-mix(
@@ -1103,15 +1221,56 @@ html[data-surface-glass='true'] body.kite-app {
   --glass-modal-scrim: rgba(4, 6, 10, 0.68);
   --glass-blur: blur(var(--theme-surface-blur, 20px)) saturate(140%);
   --glass-overlay-blur: blur(max(var(--theme-surface-blur, 20px), 24px)) saturate(160%);
-  --glass-border: color-mix(in srgb, var(--accent, #5c8fff) 18%, var(--vl-stroke-strong));
-  --glass-highlight: inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent);
+  --glass-border: color-mix(
+    in srgb,
+    var(--text-primary) clamp(9%, calc(6% + var(--theme-contrast, 50) * 0.14%), 24%),
+    color-mix(in srgb, var(--accent, #5c8fff) 4%, transparent)
+  );
+  --glass-card-border: color-mix(
+    in srgb,
+    var(--text-primary) clamp(7%, calc(4.5% + var(--theme-contrast, 50) * 0.11%), 20%),
+    transparent
+  );
+  --glass-card-border-hover: color-mix(
+    in srgb,
+    var(--text-primary) clamp(13%, calc(9% + var(--theme-contrast, 50) * 0.18%), 30%),
+    transparent
+  );
+  --glass-inner-border: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  --glass-highlight: inset 0 1px 0 color-mix(in srgb, #ffffff 7%, transparent);
   --glass-shadow:
-    inset 0 1px 0 color-mix(in srgb, #ffffff 10%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 7%, transparent),
     0 18px 42px -18px rgba(0, 0, 0, 0.52);
 }
 
 html[data-surface-glass='true'][data-theme='light'],
 html[data-surface-glass='true'][data-theme='light'] body.kite-app {
+  --glass-border: color-mix(
+    in srgb,
+    var(--text-primary) clamp(9%, calc(6% + var(--theme-contrast, 50) * 0.14%), 22%),
+    transparent
+  );
+  --glass-card-border: color-mix(
+    in srgb,
+    var(--text-primary) clamp(8%, calc(5% + var(--theme-contrast, 50) * 0.12%), 20%),
+    transparent
+  );
+  --glass-card-border-hover: color-mix(
+    in srgb,
+    var(--text-primary) clamp(15%, calc(10% + var(--theme-contrast, 50) * 0.18%), 30%),
+    transparent
+  );
+  --glass-inner-border: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  --glass-elevated-bg: color-mix(
+    in srgb,
+    var(--composer, #ffffff) clamp(68%, calc(var(--theme-surface-opacity, 56%) + 18%), 92%),
+    transparent
+  );
+  --glass-field-bg: color-mix(
+    in srgb,
+    var(--background, #eceae4) 32%,
+    rgba(255, 255, 255, 0.8)
+  );
   --glass-subagent-card-bg: color-mix(
     in srgb,
     color-mix(in srgb, var(--composer, #ffffff) 82%, var(--pane, #fffdf9))
@@ -1178,7 +1337,7 @@ body.kite-app .glass-overlay {
 
 /* Top-level Translucent Tinted Glass Islands layered over pre-blurred StageBackdrop */
 html[data-surface-glass='true'] body.kite-app .sidebar,
-html[data-surface-glass='true'] body.kite-app .SettingsSidebar,
+html[data-surface-glass='true'] body.kite-app .SettingsSidebar:not(.settings-modal-window .SettingsSidebar),
 html[data-surface-glass='true'] body.kite-app .app-browser-sidebar:not(.app-browser-sidebar--fullscreen),
 html[data-surface-glass='true'] body.kite-app .right-dock {
   background: var(--glass-sidebar-bg) !important;
@@ -1208,6 +1367,21 @@ html[data-surface-glass='true'] body.kite-app .ui-sheet {
   backdrop-filter: var(--glass-overlay-blur);
   border-color: var(--glass-border) !important;
   box-shadow: var(--glass-shadow);
+}
+
+/* Modal-scoped card elevation & recessed field wells for clear visual hierarchy */
+body.kite-app :is(.settings-modal-window, .ui-sheet, .legal-notice__panel, .qt-modal-container) {
+  --glass-elevated-bg: color-mix(
+    in srgb,
+    var(--text-primary) 4.5%,
+    color-mix(in srgb, var(--composer, var(--pane, #18181b)) 82%, transparent)
+  );
+  --glass-field-bg: color-mix(in srgb, var(--background, #090a0c) 56%, transparent);
+}
+
+html[data-theme='light'] body.kite-app :is(.settings-modal-window, .ui-sheet, .legal-notice__panel, .qt-modal-container) {
+  --glass-elevated-bg: color-mix(in srgb, #ffffff 86%, var(--composer, #ffffff));
+  --glass-field-bg: color-mix(in srgb, var(--background, #eceae4) 42%, #ffffff);
 }
 
 body.kite-app .ui-sheet::backdrop {
@@ -1349,10 +1523,14 @@ html[data-surface-glass='true'] body.kite-app .workspace-notice,
 html[data-surface-glass='true'] body.kite-app .bv-help,
 html[data-surface-glass='true'] body.kite-app .bv-sound {
   background: var(--glass-elevated-bg) !important;
-  border-color: var(--glass-border) !important;
-  box-shadow: var(--glass-highlight);
+  border-color: var(--glass-card-border, var(--vl-stroke)) !important;
+  box-shadow: var(--vl-inset);
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
+}
+
+html[data-theme='light'] body.kite-app :is(.ui-card, .plugin-card, .ticket-card) {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
 
 /* User conversation bubbles keep glass translucency with tactile 3D bevels and elevation */
@@ -1455,4 +1633,42 @@ body.kite-app .ticket-new input.ticket-new__chip-input {
 html[data-surface-glass='true'] body.kite-app .terminal-canvas-area,
 html[data-surface-glass='true'] body.kite-app .agent-terminal__live {
   background: var(--glass-terminal-bg) !important;
+}
+
+.sidebar__routines-button {
+  width: auto;
+  height: var(--control-row, 28px);
+  min-height: var(--control-row, 28px);
+  padding: 0 var(--space-2, 8px);
+  border: 0;
+  border-radius: var(--control-radius, 8px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-caption, 11px);
+  font-weight: var(--weight-medium, 500);
+  line-height: 1;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  cursor: pointer;
+  transition: color var(--duration-ink, 120ms) var(--ease-ink, ease-out),
+    background-color var(--duration-ink, 120ms) var(--ease-ink, ease-out);
+}
+
+.sidebar__routines-button:hover:not(:disabled) {
+  background: var(--hover-fill);
+  color: var(--text-primary);
+}
+
+.sidebar__routines-button--active {
+  background: var(--selected-fill);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--glass-inner-border, var(--block-stroke));
+}
+
+.sidebar__routines-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
